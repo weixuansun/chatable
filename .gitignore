@@ -1,0 +1,44 @@
+# Data files (personal conversation history)
+chatable.sqlite3
+*.sqlite3
+.chatable_history
+
+# Uploaded files (drag-and-drop attachments)
+uploads/
+
+# Exports (personal data)
+chatable_export.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+chatable.egg-info/
+dist/
+build/
+*.egg-info/
+
+# Virtual environment
+venv/
+.venv/
+path/to/venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code internal config
+.claude/
+
+# Environment files (may contain keys)
+.env
+.env.local
+
+# LLM profiles (contains app_id/app_key secrets)
+profiles.toml

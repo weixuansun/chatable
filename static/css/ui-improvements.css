@@ -1,0 +1,510 @@
+/* chatable UI improvements — overrides and new components
+   Loaded after the inline styles in static/index.html so these rules take
+   precedence for the same specificity. All design tokens (colors, radii,
+   shadows, fonts) live in the single :root block in static/index.html. */
+
+/* -------------------------------------------------------------------------
+   Responsive layout + mobile drawer
+   ------------------------------------------------------------------------- */
+.mobile-header,
+.drawer-backdrop { display: none; }
+
+@media (max-width: 768px) {
+  :root { --mobile-header-h: 54px; }
+
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: 100dvh;
+  }
+
+  .mobile-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: var(--mobile-header-h);
+    padding: 0 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border-2);
+    grid-column: 1 / -1;
+  }
+  .mobile-brand {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 700; font-size: 15px; flex: 1;
+  }
+  .mobile-brand .logo {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: var(--gradient-brand);
+    color: #fff; display: flex; align-items: center; justify-content: center;
+  }
+  .mobile-meta {
+    font-size: 11px; color: var(--dim-2);
+    max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  #divider { display: none; }
+
+  #tree {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: min(320px, 85vw);
+    transform: translateX(-100%);
+    transition: transform .25s cubic-bezier(.4,0,.2,1);
+    z-index: 50;
+    border-right: 1px solid var(--border-2);
+    box-shadow: var(--shadow-md);
+    background: var(--panel);
+  }
+  #tree.open { transform: translateX(0); }
+
+  .drawer-backdrop {
+    display: block;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.55);
+    z-index: 45;
+  }
+
+  #conv {
+    height: calc(100dvh - var(--mobile-header-h));
+  }
+
+  #composer {
+    padding: 10px 12px 14px;
+  }
+
+  /* bookmarks drawer goes fullscreen on narrow screens */
+  #bookmarks-panel {
+    width: 100vw;
+    border-left: 0;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   Tree panel polish
+   ------------------------------------------------------------------------- */
+#tree {
+  background: var(--panel);
+}
+
+.topbar {
+  background: rgba(14,17,24,.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+
+.node-row {
+  margin: 3px 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  transition: background .12s, border-color .12s, transform .05s;
+}
+.node-row:hover {
+  background: var(--card);
+  border-color: var(--border-2);
+}
+.node-row.selected {
+  background: rgba(99,102,241,.14);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(99,102,241,.25) inset;
+}
+.node-row:active { transform: scale(.995); }
+.node-row.notselectable:hover { background: transparent; border-color: transparent; }
+
+.guides { color: var(--border-2); padding-top: 2px; }
+.guides .connector { color: var(--dim-2); }
+
+.role-dot {
+  width: 8px; height: 8px;
+  margin-top: 5px;
+  box-shadow: 0 0 0 2px rgba(255,255,255,.04);
+}
+
+.node-caret {
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  color: var(--dim-2);
+}
+.node-caret:hover { background: rgba(255,255,255,.08); color: var(--fg); }
+
+.node-del, .node-map {
+  opacity: 0;
+  transition: opacity .12s;
+}
+.node-row:hover .node-del,
+.node-row:focus-within .node-del,
+.node-row:hover .node-map,
+.node-row:focus-within .node-map { opacity: 1; }
+
+.node-label .title-line > span:first-of-type {
+  font-weight: 500;
+}
+.node-label .preview {
+  color: var(--dim-2);
+  font-size: 12px;
+}
+.branch-badge {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.tree-search {
+  background: var(--card);
+  border-color: var(--border-2);
+}
+.tree-search:focus-within { border-color: var(--accent); }
+
+/* -------------------------------------------------------------------------
+   Conversation messages
+   ------------------------------------------------------------------------- */
+#messages {
+  padding: 26px 22px;
+}
+
+.msg {
+  margin-bottom: 24px;
+  animation: msg-in .25s ease-out;
+}
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.bubble {
+  background: var(--card);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  box-shadow: var(--shadow-sm);
+  line-height: 1.7;
+  color: var(--fg);
+}
+.msg.role-user { align-items: flex-end; }
+.msg.role-user .bubble {
+  background: var(--gradient-user);
+  color: #fff;
+  border-color: transparent;
+  border-top-right-radius: 6px;
+  max-width: 80%;
+}
+.msg.role-assistant .bubble {
+  border-top-left-radius: 6px;
+  max-width: 92%;
+}
+
+.msg .who {
+  font-size: 12px;
+  color: var(--dim);
+  margin-bottom: 6px;
+  gap: 6px;
+}
+.msg.role-user .who { color: #a5b4fc; }
+.msg.role-assistant .who { color: var(--assistant); }
+
+/* markdown inside bubble */
+.bubble p { margin: .65em 0; }
+.bubble p:first-child { margin-top: 0; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble h1, .bubble h2, .bubble h3, .bubble h4 {
+  margin: 1.1em 0 .5em;
+  color: var(--fg);
+  font-weight: 600;
+}
+.bubble h1 { font-size: 1.35em; }
+.bubble h2 { font-size: 1.2em; }
+.bubble ul, .bubble ol { padding-left: 1.5em; margin: .6em 0; }
+.bubble li { margin: .3em 0; }
+.bubble blockquote {
+  border-left: 3px solid var(--accent);
+  margin: .8em 0;
+  padding: .5em 1em;
+  background: rgba(99,102,241,.08);
+  border-radius: 0 10px 10px 0;
+  color: var(--dim);
+}
+.bubble hr {
+  border: 0;
+  border-top: 1px solid var(--border-2);
+  margin: 16px 0;
+}
+.bubble table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  font-size: 14px;
+}
+.bubble th, .bubble td {
+  border: 1px solid var(--border-2);
+  padding: 8px 12px;
+}
+.bubble th { background: var(--elevated); text-align: left; font-weight: 600; }
+
+/* inline code */
+.bubble :not(pre) > code {
+  background: rgba(99,102,241,.15);
+  color: #c7c9ff;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+.msg.role-user .bubble :not(pre) > code {
+  background: rgba(255,255,255,.2);
+  color: #fff;
+}
+
+/* code blocks + copy button */
+.bubble pre {
+  position: relative;
+  background: #0d1117;
+  border: 1px solid var(--border-2);
+  border-radius: 12px;
+  padding: 14px;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+.bubble pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  font-family: var(--font-mono);
+}
+.copy-btn {
+  position: absolute;
+  top: 8px; right: 8px;
+  background: rgba(255,255,255,.08);
+  border: 1px solid var(--border-2);
+  color: var(--dim);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, background .15s;
+}
+.bubble pre:hover .copy-btn,
+.copy-btn:focus { opacity: 1; }
+.copy-btn:hover {
+  background: rgba(255,255,255,.15);
+  color: var(--fg);
+}
+
+/* reasoning block */
+.reasoning {
+  background: rgba(255,255,255,.03);
+  border: 1px dashed var(--border-2);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  color: var(--dim);
+  font-size: 14px;
+}
+.reasoning summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.reasoning summary::-webkit-details-marker { display: none; }
+.reasoning[open] summary { margin-bottom: 8px; }
+.reasoning div { white-space: pre-wrap; font-style: italic; line-height: 1.6; }
+
+/* tool cards */
+.tool {
+  background: var(--card);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+.tool summary { padding: 8px 12px; }
+.tool .tool-name { font-weight: 600; }
+.tool .tool-args { color: var(--dim-2); max-width: 45%; }
+.tool .tool-out {
+  border-top: 1px solid var(--border-2);
+  background: var(--elevated);
+  padding: 10px 12px;
+}
+
+/* stats */
+.stats {
+  font-size: 12px;
+  color: var(--dim-2);
+  margin-top: 6px;
+}
+
+/* fork button */
+.fork-btn {
+  border-color: var(--border-2);
+  color: var(--dim);
+}
+.fork-btn:hover {
+  color: var(--branch);
+  border-color: var(--branch);
+  background: var(--branch-soft);
+}
+
+/* -------------------------------------------------------------------------
+   Floating composer
+   ------------------------------------------------------------------------- */
+#composer {
+  border-top: 1px solid var(--border);
+  background: transparent;
+  padding: 12px 18px 18px;
+}
+#composer .inner {
+  background: var(--card);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-xl);
+  padding: 10px 12px;
+  box-shadow: var(--shadow-md);
+}
+#composer .ctx {
+  margin-bottom: 10px;
+  padding-left: 4px;
+  color: var(--dim-2);
+}
+.input-wrap {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  align-items: center;
+  flex: 1;
+}
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.send-main {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  margin-bottom: 2px;
+}
+.attach-btn {
+  flex: none;
+}
+#composer textarea {
+  min-height: 24px;
+  max-height: 160px;
+  padding: 6px 4px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+.send-btn {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+}
+#composer .foot {
+  margin-top: 8px;
+  padding: 0 4px;
+  color: var(--dim-2);
+}
+
+/* attachments */
+.attach-chip {
+  background: var(--elevated);
+  border-color: var(--border-2);
+}
+
+/* -------------------------------------------------------------------------
+   Toast notifications
+   ------------------------------------------------------------------------- */
+#toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  background: var(--elevated);
+  color: var(--fg);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 10px 16px;
+  box-shadow: var(--shadow-md);
+  font-size: 14px;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity .25s, transform .25s;
+  pointer-events: auto;
+  max-width: 320px;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast-success { border-color: rgba(52,211,153,.5); color: #a7f3d0; }
+.toast-error { border-color: rgba(248,113,113,.5); color: #fecaca; }
+
+/* -------------------------------------------------------------------------
+   Settings modal polish
+   ------------------------------------------------------------------------- */
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0,0,0,.55);
+}
+.modal-head {
+  border-bottom: 1px solid var(--border);
+}
+.fld input, .fld select {
+  background: var(--card);
+  border-color: var(--border-2);
+  color: var(--fg);
+}
+.fld input:focus, .fld select:focus { border-color: var(--accent); }
+
+/* -------------------------------------------------------------------------
+   Empty state
+   ------------------------------------------------------------------------- */
+.empty-hero {
+  margin-top: 10vh;
+}
+.empty-hero h2 { font-size: 20px; }
+.suggestions button {
+  background: var(--card);
+  border-color: var(--border-2);
+  transition: all .12s;
+}
+.suggestions button:hover {
+  background: var(--elevated);
+  border-color: var(--accent);
+}
+
+/* -------------------------------------------------------------------------
+   Touch devices: no hover, so row-level actions must stay visible
+   ------------------------------------------------------------------------- */
+@media (hover: none) {
+  .node-del, .node-map, .node-rename, .copy-btn { opacity: 1; }
+}
+
+/* -------------------------------------------------------------------------
+   Reduced motion
+   ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   Light-theme fixes for hardcoded dark-on-dark rules above (must come last:
+   same specificity, later in this file wins over the earlier rules).
+   ------------------------------------------------------------------------- */
+:root[data-theme="light"] .topbar { background: rgba(255,255,255,.85); }
+:root[data-theme="light"] .bubble :not(pre) > code {
+  background: rgba(99,102,241,.10);
+  color: #4f46e5;
+}
+:root[data-theme="light"] .msg.role-user .who { color: var(--accent); }
+:root[data-theme="light"] .reasoning { background: rgba(0,0,0,.03); }
+

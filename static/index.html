@@ -1,0 +1,3026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>chatable</title>
+<script>
+// Apply the saved appearance before first paint (avoids a theme flash).
+try {
+  document.documentElement.dataset.theme = localStorage.getItem('chatable.theme') || 'midnight';
+  const _fs = parseInt(localStorage.getItem('chatable.fontSize') || '14', 10);
+  if (_fs !== 14) document.addEventListener('DOMContentLoaded', () => {
+    const conv = document.getElementById('conv');
+    if (conv) conv.style.fontSize = _fs + 'px';
+  });
+} catch (e) { /* localStorage unavailable — defaults apply */ }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.16.0/dist/cdn.min.js"></script>
+<style>
+  :root {
+    /* dark surface ladder (darkest → raised) */
+    --bg: #050608; --panel: #0e1118; --panel-2: #11141b;
+    --card: #151922; --card-hover: #252b38; --elevated: #1c2230;
+    --border: #1f242e; --border-2: #2a2f3a;
+    /* text */
+    --fg: #f0f2f5; --dim: #a8adb8; --dim-2: #7a8090;
+    /* accents: indigo = primary, amber = branch */
+    --accent: #6366f1; --accent-strong: #4f46e5;
+    --accent-soft: rgba(99,102,241,.16); --accent-softer: rgba(99,102,241,.07);
+    --branch: #d97706; --branch-soft: rgba(217,119,6,.18);
+    /* semantic */
+    --user: #6366f1; --assistant: #3ec46d; --note: #d97706;
+    --ok: #34d399; --fail: #f87171;
+    /* radii / shadows / fonts */
+    --radius: 10px; --radius-lg: 16px; --radius-xl: 20px;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
+    --shadow-md: 0 4px 14px rgba(0,0,0,0.40);
+    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    /* brand */
+    --fg-user-title: #b4b7ff;
+    --gradient-brand: linear-gradient(135deg, #6366f1, #a855f7);
+    --gradient-user: linear-gradient(135deg, #4f46e5, #6366f1);
+  }
+  /* ---- theme variants (override the midnight defaults above) ---- */
+  :root[data-theme="graphite"] {
+    --bg: #0b0d12; --panel: #12151d; --panel-2: #151a24;
+    --card: #1a2130; --card-hover: #2a3245; --elevated: #232b3d;
+    --border: #262c38; --border-2: #323a49;
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f0f1f5;
+    --card: #ffffff; --card-hover: #eceef3; --elevated: #e7eaf0;
+    --border: #e3e5ec; --border-2: #d3d7e1;
+    --fg: #1d2433; --dim: #5c6575; --dim-2: #8b93a4;
+    --accent-soft: rgba(99,102,241,.12); --accent-softer: rgba(99,102,241,.06);
+    --branch-soft: rgba(217,119,6,.14);
+    --fg-user-title: #4f46e5;
+    --shadow-sm: 0 1px 2px rgba(15,20,30,.08);
+    --shadow-md: 0 4px 14px rgba(15,20,30,.14);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0;
+         font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden;
+         -webkit-font-smoothing: antialiased; }
+  #app { display: grid; grid-template-columns: var(--tree-w, 340px) 6px minmax(0, 1fr); height: 100vh; }
+  .panel { height: 100vh; overflow-y: auto; }
+  button { cursor: pointer; font-family: inherit; }
+  /* keyboard focus indicator — text inputs signal focus via border instead */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input:focus-visible, textarea:focus-visible { outline: none; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  /* custom scrollbars */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim-2); }
+  @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .lucide { width: 1em; height: 1em; stroke-width: 2; vertical-align: -0.14em; display: inline-block; }
+  /* ---- drag handle between the two panes ---- */
+  #divider { background: var(--border); cursor: col-resize; height: 100vh;
+             position: relative; transition: background .12s; }
+  #divider:hover, #divider.dragging { background: var(--accent); }
+  /* grip dots, centered vertically */
+  #divider::after { content: ""; position: absolute; top: 50%; left: 50%;
+             width: 2px; height: 22px; transform: translate(-50%, -50%);
+             background-image: radial-gradient(var(--dim-2) 40%, transparent 42%);
+             background-size: 2px 6px; background-repeat: repeat-y; opacity: .8; }
+  #divider:hover::after, #divider.dragging::after {
+             background-image: radial-gradient(#fff 40%, transparent 42%); }
+  /* widen the actual grab target beyond the visible 6px line */
+  #divider::before { content: ""; position: absolute; top: 0; bottom: 0;
+             left: -5px; right: -5px; }
+  body.col-resizing { cursor: col-resize; user-select: none; }
+  /* ---- left: tree ---- */
+  #tree { background: var(--panel); border-right: 1px solid var(--border); padding: 0; }
+  .topbar { padding: 12px 14px; border-bottom: 1px solid var(--border);
+            position: sticky; top: 0; background: var(--panel); z-index: 5; }
+  .brand { display: flex; align-items: center; gap: 9px; }
+  .brand .logo { flex: none; width: 30px; height: 30px; border-radius: 9px;
+            background: var(--gradient-brand); color: #fff;
+            display: flex; align-items: center; justify-content: center; font-size: 16px; }
+  .brand h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: .2px; }
+  .brand .sub { font-size: 12px; color: var(--dim-2); margin-top: 1px; }
+  .topbar .meta { font-size: 12px; color: var(--dim-2); word-break: break-all; margin-top: 8px; }
+  .topbar .meta.session { color: var(--accent); }
+  /* ---- tree search ---- */
+  .tree-search { display: flex; align-items: center; gap: 6px; margin-top: 10px;
+            background: var(--card); border: 1px solid var(--border-2);
+            border-radius: 8px; padding: 5px 8px; transition: border-color .12s; }
+  .tree-search:focus-within { border-color: var(--accent); }
+  .tree-search .lucide { width: 14px; height: 14px; color: var(--dim-2); flex: none; }
+  .tree-search input { flex: 1; min-width: 0; background: transparent; border: 0;
+            outline: none; color: var(--fg); font: inherit; font-size: 13px; }
+  .tree-search .clear { flex: none; width: 18px; height: 18px; display: flex;
+            align-items: center; justify-content: center; background: transparent;
+            border: 0; color: var(--dim); border-radius: 4px; }
+  .tree-search .clear:hover { color: var(--fg); background: var(--card-hover); }
+  .tree-search .clear .lucide { width: 12px; height: 12px; }
+  .topbar .meta.search-count { color: var(--dim-2); margin-top: 6px; }
+  /* dim non-matching rows; matches stay full-opacity */
+  .node-row.search-dim { opacity: .38; }
+  .node-label mark, .gallery-card mark { background: rgba(217,119,6,.35); color: var(--fg); font-weight: 600;
+            border-radius: 3px; padding: 0 2px; box-shadow: 0 0 0 1px rgba(217,119,6,.5); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+  .icon-btn { flex: none; width: 30px; height: 30px; display: flex; align-items: center;
+            justify-content: center; background: var(--card); border: 1px solid var(--border-2);
+            color: var(--dim); border-radius: 8px; font-size: 15px; transition: all .12s; }
+  .icon-btn:hover { background: var(--card-hover); color: var(--fg); }
+  .icon-btn.danger:hover { color: var(--fail); border-color: var(--fail); background: rgba(248,113,113,.12); }
+  .tree-list { padding: 8px 6px; }
+  .node-row { display: flex; align-items: flex-start; gap: 5px; padding: 6px 7px;
+            border-radius: var(--radius); cursor: pointer; font-size: 14px;
+            border: 1px solid transparent; transition: background .12s, border-color .12s; }
+  .node-row:hover { background: var(--card); }
+  .node-row.notselectable { cursor: default; }
+  .node-row.notselectable:hover { background: transparent; }
+  .node-row.notselectable .node-label { color: var(--dim); }
+  /* subtle per-role tint on the node label text (user vs assistant) */
+  .node-row.role-user .node-label .title-line > span:first-of-type { color: var(--fg-user-title); }
+  .node-row.role-assistant .node-label .title-line > span:first-of-type { color: var(--fg); }
+  .node-row.selected { background: var(--accent-soft); border-color: var(--accent);
+            box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .node-row.onpath { background: var(--accent-softer); }
+  .guides { flex: none; display: flex; font-family: var(--font-mono);
+            color: var(--border-2); user-select: none; align-self: stretch; padding-top: 1px; }
+  .guides .guide { display: inline-block; width: 12px; text-align: center; }
+  .guides .connector { color: var(--dim-2); }
+  .node-caret { flex: none; align-self: flex-start; margin-top: 1px; width: 18px; height: 18px;
+            padding: 0; background: transparent; border: 0;
+            color: var(--dim); border-radius: 5px; display: flex; align-items: center;
+            justify-content: center; transition: all .12s; }
+  .node-caret:hover { color: var(--fg); background: var(--card-hover); }
+  .node-caret.spacer { cursor: default; visibility: hidden; }
+  .node-label .collapsed-badge { color: var(--dim-2); }
+  .role-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; margin-top: 6px; }
+  .role-user .role-dot { background: var(--user); }
+  .role-assistant .role-dot { background: var(--assistant); }
+  .role-system_note .role-dot { background: var(--note); }
+  /* Streaming node marker: the role dot gets a glowing, expanding halo ring.
+     Uses a ::after pseudo (transform/opacity) so the tree pane's overflow
+     never clips it, and the dot itself gently breathes. */
+  .role-dot.streaming { position: relative; background: var(--accent) !important;
+            animation: dot-breathe 1.4s ease-in-out infinite; }
+  .role-dot.streaming::after { content: ""; position: absolute; inset: 0;
+            border-radius: 50%; background: var(--accent);
+            animation: dot-halo 1.4s ease-out infinite; }
+  @keyframes dot-breathe {
+    0%, 100% { transform: scale(1);    box-shadow: 0 0 6px 1px rgba(99,102,241,0.7); }
+    50%      { transform: scale(1.25); box-shadow: 0 0 10px 3px rgba(99,102,241,0.9); }
+  }
+  @keyframes dot-halo {
+    0%   { transform: scale(1);   opacity: 0.55; }
+    100% { transform: scale(3.6); opacity: 0;    }
+  }
+  /* Ring spinner next to a streaming node's label — a crisp, guaranteed cue. */
+  .spin { display: inline-block; width: 11px; height: 11px; margin-right: 6px;
+            vertical-align: -1px; border: 2px solid rgba(99,102,241,0.25);
+            border-top-color: var(--accent); border-radius: 50%;
+            animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .node-label { overflow: hidden; flex: 1; min-width: 0; }
+  .node-label .title-line { display: flex; align-items: center; gap: 5px; }
+  .node-label .title-line > span:first-of-type { overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; }
+  .node-label .preview { font-size: 12px; color: var(--dim-2); margin-top: 2px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-label .nid { color: var(--dim-2); font-size: 12px; flex: none; }
+  .node-label .pin { color: var(--note); flex: none; }
+  .node-label .tag { color: var(--accent); font-size: 12px; flex: none; }
+  .branch-badge { flex: none; font-size: 10px; font-weight: 600; color: var(--branch);
+            background: var(--branch-soft); padding: 1px 5px; border-radius: 5px; }
+  .node-dot-live { color: var(--accent); }
+  .node-del { flex: none; opacity: 0; background: transparent; border: 0;
+            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
+            justify-content: center; border-radius: 5px; margin-top: -1px; }
+  .node-row:hover .node-del { opacity: 1; }
+  .node-del:hover { color: var(--fail); background: rgba(248,113,113,0.12); }
+  /* ---- right: conversation ---- */
+  #conv { display: flex; flex-direction: column; height: 100vh; min-width: 0; background: var(--bg); transition: margin-right .2s ease; }
+  #messages { flex: 1; overflow-y: auto; padding: 22px 24px; min-width: 0; }
+  #messages .inner { max-width: 1000px; margin: 0 auto; }
+  .msg { margin-bottom: 18px; animation: fade-in .25s ease-out; display: flex; flex-direction: column; }
+  .msg.role-user { align-items: flex-end; }
+  .msg .who { font-size: 12px; margin-bottom: 5px; color: var(--dim);
+            display: flex; align-items: center; gap: 5px; }
+  .msg.role-user .who { color: var(--user); flex-direction: row-reverse; }
+  .msg.role-assistant .who { color: var(--assistant); }
+  .msg.role-system_note .who { color: var(--note); }
+  .msg .who .lucide { width: 13px; height: 13px; }
+  .bubble-wrap { position: relative; }
+  .msg-copy-btn { position: absolute; top: 6px; right: 6px; z-index: 1;
+            background: var(--card); border: 1px solid var(--border-2); border-radius: 6px;
+            cursor: pointer; color: var(--dim); opacity: 0; transition: opacity .15s;
+            padding: 3px; display: inline-flex; align-items: center; }
+  .bubble-wrap:hover .msg-copy-btn, .msg-copy-btn:focus { opacity: 1; }
+  .msg-copy-btn .lucide { width: 12px; height: 12px; }
+  .bubble { background: var(--card); border: 1px solid var(--border-2);
+            border-radius: var(--radius-lg); padding: 11px 15px; overflow-x: auto;
+            overflow-wrap: anywhere; max-width: 100%; }
+  .msg.role-user .bubble { background: var(--accent); border-color: transparent; color: #fff;
+            border-radius: var(--radius-xl); border-top-right-radius: 6px; max-width: 85%; }
+  .msg.role-assistant .bubble { border-top-left-radius: 6px; }
+  .bubble.note { font-family: var(--font-mono); font-size: 13px; color: var(--dim);
+            white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
+  .planning { display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+            padding: 7px 11px; font-size: 14px; color: var(--accent);
+            background: var(--accent-soft); border: 1px solid var(--accent);
+            border-radius: 8px; width: fit-content; }
+  /* ---- inline tool calls (folded into the assistant turn) ---- */
+  .tool { background: var(--card); border: 1px solid var(--border-2);
+            border-radius: var(--radius); margin-bottom: 8px; font-size: 13px; }
+  .tool summary { cursor: pointer; padding: 7px 11px; display: flex; align-items: center;
+            gap: 8px; list-style: none; user-select: none; }
+  .tool summary::-webkit-details-marker { display: none; }
+  .tool summary .lucide { width: 13px; height: 13px; color: var(--dim); flex: none; }
+  .tool .tool-name { color: var(--fg); font-weight: 600; }
+  .tool .tool-args { color: var(--dim); font-family: var(--font-mono);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+  .tool .tool-badge { margin-left: auto; font-size: 12px; padding: 1px 8px; border-radius: 10px; font-weight: 600; }
+  .tool .tool-badge.ok { color: var(--ok); background: rgba(52,211,153,.14); }
+  .tool .tool-badge.fail { color: var(--fail); background: rgba(248,113,113,.14); }
+  .tool .tool-badge.run { color: var(--note); background: var(--branch-soft); }
+  .tool .tool-ms { color: var(--dim-2); font-size: 12px; }
+  .tool .tool-out { margin: 0; padding: 9px 11px; border-top: 1px solid var(--border-2);
+            background: var(--panel-2); white-space: pre-wrap; max-height: 280px; overflow-y: auto;
+            font-family: var(--font-mono); font-size: 12px; color: var(--dim);
+            border-radius: 0 0 var(--radius) var(--radius); }
+  .bubble p:first-child { margin-top: 0; } .bubble p:last-child { margin-bottom: 0; }
+  .bubble pre { background: var(--panel-2); padding: 11px; border-radius: 8px; overflow-x: auto;
+            border: 1px solid var(--border); }
+  .bubble code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .msg.role-user .bubble code { background: rgba(255,255,255,.18); }
+  .bubble pre code { background: none; padding: 0; }
+  .bubble .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; margin: 8px 0; }
+  .bubble .katex code { background: none; padding: 0; }
+  .stats { font-size: 12px; color: var(--dim-2); margin-top: 5px; }
+	  .fork-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+	  .fork-btn { display: inline-flex; align-items: center; gap: 4px;
+	            background: transparent; border: 1px solid var(--border-2);
+	            color: var(--dim); border-radius: 7px; padding: 3px 10px;
+	            font-size: 12px; transition: all .12s; cursor: pointer; font-family: inherit; }
+	  .fork-btn:hover { color: var(--branch); border-color: var(--branch);
+	            background: var(--branch-soft); }
+	  .fork-btn.map-open-btn:hover { color: var(--accent); border-color: var(--accent);
+	            background: var(--accent-soft); }
+	  .fork-btn .lucide { width: 12px; height: 12px; }
+  /* ---- composer ---- */
+  #composer { border-top: 1px solid var(--border); padding: 14px 24px 16px; background: var(--panel); }
+  #composer .inner { max-width: 1000px; margin: 0 auto; }
+  #composer .ctx { font-size: 12px; color: var(--dim-2); margin-bottom: 8px; }
+  #composer .ctx .fork { color: var(--branch); }
+  .input-wrap { display: flex; align-items: flex-end; gap: 8px;
+            background: var(--card); border: 1px solid var(--border-2);
+            border-radius: var(--radius-lg); padding: 8px 8px 8px 12px; transition: border-color .12s; }
+  .input-wrap:focus-within { border-color: var(--accent); }
+  .input-wrap textarea { flex: 1; resize: none; min-height: 24px; max-height: 200px;
+            overflow: hidden; scrollbar-width: none; -ms-overflow-style: none;
+            background: transparent; color: var(--fg); border: 0; outline: none;
+            padding: 4px 0; font: inherit; line-height: 1.5; }
+  .input-wrap textarea::-webkit-scrollbar { display: none; }
+
+  /* ---- bookmarks sidebar (slides in from the right; fullscreen on mobile) ---- */
+  #bookmarks-panel { position: fixed; top: 0; right: 0; width: 320px; height: 100vh; background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; z-index: 56; box-shadow: -4px 0 24px rgba(0,0,0,0.25); transform: translateX(105%); visibility: hidden; transition: transform .2s ease, visibility .2s ease; }
+  #bookmarks-panel.open { transform: none; visibility: visible; }
+  #bookmarks-panel[x-cloak] { display: none !important; }
+  /* desktop: the conversation column makes room instead of being covered */
+  @media (min-width: 769px) {
+    #app.bm-open #conv { margin-right: 320px; }
+  }
+  .bookmarks-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .bookmarks-head h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .bookmarks-add { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .bookmarks-add input { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--fg); font: inherit; font-size: 13px; outline: none; }
+  .bookmarks-add input:focus { border-color: var(--accent); }
+  .bookmarks-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .bookmark-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 8px; transition: border-color .12s, background .12s; }
+  .bookmark-item:hover { border-color: var(--accent); background: var(--card); }
+  .bookmark-item.enriching { border-color: var(--accent); opacity: 0.85; }
+  .bookmark-item .title { font-weight: 600; font-size: 13px; line-height: 1.35; margin-bottom: 4px; color: var(--fg); cursor: pointer; }
+  .bookmark-item .title:hover { color: var(--accent); }
+  .bookmark-item .summary { font-size: 12px; color: var(--dim); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .bookmark-item .url { font-size: 11px; color: var(--dim-2); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bookmark-item .actions { display: flex; gap: 4px; margin-top: 8px; }
+  .bookmark-item .actions button { background: transparent; border: 0; color: var(--dim); padding: 4px; cursor: pointer; border-radius: 5px; }
+  .bookmark-item .actions button:hover:not(:disabled) { color: var(--accent); background: var(--card-hover); }
+  .bookmark-item .actions button:disabled { cursor: default; }
+  .bookmark-empty { padding: 20px 10px; text-align: center; color: var(--dim-2); font-size: 13px; }
+  .bm-error { color: var(--fail); font-size: 12px; margin-top: 4px; }
+  .bm-rename { width: 100%; font-size: 12px; margin-bottom: 4px; }
+  .rotating { animation: spin 0.9s linear infinite; }
+
+  .send-btn { flex: none; width: 34px; height: 34px; display: flex; align-items: center;
+            justify-content: center; background: var(--accent); color: #fff; border: 0;
+            border-radius: 9px; transition: background .12s; }
+  .send-btn:hover:not(:disabled) { background: var(--accent-strong); }
+  .send-btn .lucide { width: 17px; height: 17px; }
+  #composer .foot { display: flex; align-items: center; gap: 12px; margin-top: 8px;
+            font-size: 12px; color: var(--dim-2); }
+  #composer .foot .kbd { font-family: var(--font-mono); }
+  #composer .foot .streaming-count { color: var(--accent); margin-left: auto; }
+  /* ---- attachments (uploaded files) ---- */
+  .attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .attach-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 320px;
+            background: var(--card); border: 1px solid var(--border-2); color: var(--fg);
+            border-radius: 8px; padding: 4px 6px 4px 9px; font-size: 13px; }
+  .attach-chip .lucide { width: 14px; height: 14px; color: var(--accent); flex: none; }
+  .attach-chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attach-chip .name.link { cursor: pointer; }
+  .attach-chip .name.link:hover { color: var(--accent); text-decoration: underline; }
+  .attach-chip .sz { color: var(--dim-2); flex: none; }
+  .attach-chip.uploading { opacity: .7; }
+  .attach-chip .x { flex: none; width: 16px; height: 16px; display: flex; align-items: center;
+            justify-content: center; border: 0; background: transparent; color: var(--dim);
+            border-radius: 4px; }
+  .attach-chip .x:hover { color: var(--fail); background: rgba(248,113,113,.12); }
+  .attach-chip.failed { border-color: var(--fail); color: var(--fail); }
+  .chip-thumb { width: 24px; height: 24px; object-fit: cover; border-radius: 4px; flex: none; }
+  /* image thumbnails inside a user message bubble */
+  .attach-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .msg-thumb { max-height: 56px; max-width: 160px; border-radius: 6px;
+            border: 1px solid var(--border-2); cursor: pointer; display: block; }
+  .msg-thumb:hover { border-color: var(--accent); }
+  /* drag-over overlay across the whole app */
+  .drop-hint { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center;
+            justify-content: center; background: rgba(99,102,241,.12);
+            border: 3px dashed var(--accent); pointer-events: none; }
+  .drop-hint .box { background: var(--panel); border: 1px solid var(--accent);
+            border-radius: var(--radius-lg); padding: 18px 26px; font-size: 15px; color: var(--fg);
+            display: flex; align-items: center; gap: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .drop-hint .box .lucide { width: 20px; height: 20px; color: var(--accent); }
+  /* ---- settings modal ---- */
+  .modal-backdrop { position: fixed; inset: 0; z-index: 60; display: flex;
+            align-items: center; justify-content: center; background: rgba(0,0,0,.5);
+            animation: fade-in .12s ease; }
+  .modal { width: 460px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px);
+            display: flex; flex-direction: column; background: var(--panel);
+            border: 1px solid var(--border-2); border-radius: var(--radius-lg);
+            box-shadow: 0 16px 50px rgba(0,0,0,.5); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between;
+            padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .modal-head h2 { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .modal-head h2 .lucide { width: 16px; height: 16px; color: var(--accent); }
+  .modal-body { padding: 14px 16px; overflow-y: auto; }
+  .modal-body .hint { font-size: 12px; color: var(--dim-2); margin: 0 0 12px; }
+  .modal-body .hint code { background: var(--card); padding: 1px 4px; border-radius: 4px; }
+  .fld { display: block; margin-bottom: 11px; }
+  .fld > span { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px;
+            text-transform: uppercase; letter-spacing: .4px; }
+  .fld > span .link-btn { float: right; text-transform: none; letter-spacing: 0;
+            background: transparent; border: 0; color: var(--accent); font-size: 12px;
+            cursor: pointer; padding: 0; }
+  .fld > span .link-btn:hover { text-decoration: underline; }
+  .fld .fld-note { display: block; font-size: 11px; color: var(--dim-2); margin-top: 3px;
+            text-transform: none; letter-spacing: 0; }
+  .fld input, .fld select { width: 100%; background: var(--card); color: var(--fg);
+            border: 1px solid var(--border-2); border-radius: 8px; padding: 7px 10px;
+            font: inherit; font-size: 14px; outline: none; }
+  .fld input:focus, .fld select:focus { border-color: var(--accent); }
+  .sep { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+  .modal-err { background: rgba(248,113,113,.12); border: 1px solid var(--fail);
+            color: var(--fail); border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-top: 8px; }
+  .modal-foot { display: flex; justify-content: flex-end; gap: 8px;
+            padding: 12px 16px; border-top: 1px solid var(--border); }
+  /* storage folder picker (browse the server's local filesystem) */
+  .path-row { display: flex; gap: 6px; }
+  .path-row input { flex: 1; min-width: 0; }
+  .path-row .btn-ghost { flex: none; padding: 7px 10px; }
+  .fs-picker { border: 1px solid var(--border-2); border-radius: 8px; margin: 4px 0 12px;
+            background: var(--card); }
+  .fs-head { display: flex; align-items: center; gap: 6px; padding: 7px 10px;
+            border-bottom: 1px solid var(--border); font-size: 12px; }
+  .fs-head .lucide { width: 13px; height: 13px; color: var(--accent); flex: none; }
+  .fs-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; color: var(--fg); font-family: var(--font-mono); font-size: 11px; }
+  .fs-hidden-toggle { display: flex; align-items: center; gap: 4px; color: var(--dim-2);
+            font-size: 11px; cursor: pointer; flex: none; }
+  .fs-close { background: transparent; border: 0; color: var(--dim); padding: 2px; flex: none; }
+  .fs-close:hover { color: var(--fg); }
+  .fs-list { max-height: 220px; overflow-y: auto; padding: 4px; }
+  .fs-row { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 6px;
+            font-size: 12px; cursor: pointer; color: var(--fg); }
+  .fs-row:hover { background: var(--card-hover); }
+  .fs-row .lucide { width: 13px; height: 13px; color: var(--dim); flex: none; }
+  .fs-empty { padding: 14px; text-align: center; color: var(--dim-2); font-size: 12px; }
+  .fs-err { padding: 6px 10px; color: var(--fail); font-size: 11px; }
+  .fs-foot { display: flex; justify-content: flex-end; padding: 8px 10px;
+            border-top: 1px solid var(--border); }
+  /* appearance: theme chips + font-size stepper */
+  .theme-row { display: flex; gap: 8px; }
+  .theme-chip { flex: 1; display: flex; align-items: center; gap: 7px; background: var(--card);
+            border: 1px solid var(--border-2); border-radius: 8px; padding: 7px 10px;
+            color: var(--fg); font-size: 12px; cursor: pointer; font-family: inherit; }
+  .theme-chip.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+  .theme-chip .swatch { width: 18px; height: 18px; border-radius: 5px; flex: none;
+            border: 1px solid var(--border-2); }
+  .sw-midnight { background: linear-gradient(135deg, #050608 60%, #151922); }
+  .sw-graphite { background: linear-gradient(135deg, #0b0d12 60%, #1a2130); }
+  .sw-light { background: linear-gradient(135deg, #ffffff 60%, #e7eaf0); }
+  .zoom-row { display: flex; align-items: center; gap: 10px; }
+  .zoom-btn { padding: 5px 12px; }
+  .zoom-val { min-width: 46px; text-align: center; color: var(--fg); font-size: 13px;
+            font-family: var(--font-mono); }
+  .btn-ghost { background: transparent; border: 1px solid var(--border-2); color: var(--fg);
+            border-radius: 8px; padding: 7px 14px; font-size: 14px; }
+  .btn-ghost:hover { background: var(--card); }
+  .btn-primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+            padding: 7px 16px; font-size: 14px; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-strong); }
+  /* per-reply inline stop button in the message header */
+  .stop-inline { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
+            background: transparent; border: 1px solid var(--fail);
+            color: var(--fail); border-radius: 6px; padding: 1px 7px; font-size: 11px;
+            line-height: 16px; }
+  .stop-inline .lucide { width: 10px; height: 10px; }
+  .stop-inline:hover { background: var(--fail); color: #fff; }
+  /* inline retry shown when auto-resume of a dropped stream gave up */
+  .retry-btn { background: transparent; border: 1px solid var(--accent);
+            color: var(--accent); border-radius: 6px; padding: 1px 8px;
+            font-size: 11px; margin-left: 6px; }
+  .retry-btn:hover { background: var(--accent); color: #fff; }
+  .retry-btn .lucide { width: 10px; height: 10px; }
+  /* ---- empty states ---- */
+  .empty { color: var(--dim); text-align: center; margin-top: 40px; }
+  .empty-hero { max-width: 560px; margin: 8vh auto 0; text-align: center; }
+  .empty-hero .icon { font-size: 44px; margin-bottom: 12px; }
+  .empty-hero h2 { font-size: 18px; font-weight: 700; margin: 0 0 8px; color: var(--fg); }
+  .empty-hero p { color: var(--dim); margin: 0 0 4px; font-size: 14px; }
+  .empty-hero .accent { color: var(--accent); } .empty-hero .branch { color: var(--branch); }
+  .suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 22px; }
+  .suggestions button { text-align: left; background: var(--card); color: var(--fg);
+            border: 1px solid var(--border-2); border-radius: var(--radius); padding: 12px 14px;
+            font-size: 14px; line-height: 1.4; transition: all .12s; }
+  .suggestions button:hover { background: var(--card-hover); border-color: var(--accent); }
+
+  /* ---- mind map overlay ---- */
+  .node-map { flex: none; opacity: 0; background: transparent; border: 0;
+            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
+            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
+  .node-row:hover .node-map, .node-row:focus-within .node-map { opacity: 1; }
+  .node-map:hover { color: var(--accent); background: var(--accent-soft); }
+  .node-export { flex: none; opacity: 0; background: transparent; border: 0;
+            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
+            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
+  .node-row:hover .node-export, .node-row:focus-within .node-export { opacity: 1; }
+  .node-export:hover { color: var(--accent); background: var(--accent-soft); }
+  .node-rename { flex: none; opacity: 0; background: transparent; border: 0;
+            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
+            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
+  .node-row:hover .node-rename, .node-row:focus-within .node-rename { opacity: 1; }
+  .node-rename:hover { color: var(--accent); background: var(--accent-soft); }
+  .rename-input { flex: 1; min-width: 0; background: var(--card);
+            border: 1px solid var(--accent); border-radius: 6px; color: var(--fg);
+            font: inherit; font-size: 13px; padding: 1px 6px; outline: none; }
+  .mindmap-backdrop { position: fixed; inset: 0; z-index: 58; background: var(--bg);
+            display: flex; flex-direction: column; animation: fade-in .15s ease; }
+  .mindmap-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+            border-bottom: 1px solid var(--border); background: var(--panel); }
+  .mindmap-head h3 { margin: 0; font-size: 15px; display: flex; align-items: center;
+            gap: 8px; flex: 1; min-width: 0; }
+  .mindmap-head h3 .lucide { width: 16px; height: 16px; color: var(--accent); flex: none; }
+  .mindmap-head h3 .mm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            color: var(--dim); font-weight: 400; font-size: 13px; }
+  .mindmap-head .count { font-size: 12px; color: var(--dim-2); flex: none; }
+  .mindmap-canvas { flex: 1; overflow: hidden; position: relative; cursor: grab;
+            touch-action: none;
+            background-image: radial-gradient(var(--border) 1px, transparent 1.2px);
+            background-size: 26px 26px; }
+  .mindmap-canvas.dragging { cursor: grabbing; }
+  .mindmap-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  .mindmap-canvas.animating .mindmap-world { transition: transform .3s cubic-bezier(.4,0,.2,1); }
+  .map-edges { position: absolute; top: 0; left: 0; overflow: visible; }
+  .map-edge { fill: none; stroke: #4a5163; stroke-width: 2; }
+  .map-node { position: absolute; width: 220px; height: 112px; background: var(--card);
+            border: 1px solid var(--border-2); border-radius: var(--radius); padding: 8px 12px;
+            cursor: pointer; display: flex; flex-direction: column; justify-content: space-between;
+            transition: border-color .12s, box-shadow .12s; }
+  .map-node:hover { border-color: var(--accent); box-shadow: var(--shadow-md); }
+  .map-node.center { border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-soft), 0 4px 18px rgba(99,102,241,.35); }
+  .map-q { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+  .map-q .role-dot { margin-top: 4px; flex: none; }
+  .map-q .map-q-text { font-size: 13px; line-height: 1.35; color: var(--fg-user-title);
+            overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .map-a { font-size: 11px; line-height: 1.4; color: var(--assistant); margin-top: 4px;
+            overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .map-a .role-dot { margin-right: 5px; margin-top: 3px; }
+  .map-node-foot { display: flex; align-items: center; gap: 6px; }
+  .map-del-btn { display: inline-flex; align-items: center; justify-content: center;
+            width: 20px; height: 20px; background: transparent; border: 0;
+            color: var(--dim-2); border-radius: 5px; padding: 0; }
+  .map-del-btn:hover { color: var(--fail); background: rgba(248,113,113,.12); }
+  .map-del-btn .lucide { width: 12px; height: 12px; }
+  .map-detail-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+            background: transparent; border: 1px solid var(--border-2); color: var(--dim);
+            border-radius: 6px; padding: 1px 8px; font-size: 11px; }
+  .map-detail-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .map-detail-btn .lucide { width: 11px; height: 11px; }
+
+  /* ---- gallery overlay (all conversations as cards) ---- */
+  .gallery-backdrop { position: fixed; inset: 0; z-index: 57; background: var(--bg);
+            display: flex; flex-direction: column; animation: fade-in .15s ease; }
+  .gallery-grid { flex: 1; overflow-y: auto; padding: 18px 22px; display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 12px; align-content: start; }
+  .gallery-card { background: var(--card); border: 1px solid var(--border-2);
+            border-radius: var(--radius); padding: 10px 12px; display: flex;
+            flex-direction: column; transition: border-color .12s, box-shadow .12s; }
+  .gallery-card:hover { border-color: var(--accent); box-shadow: var(--shadow-md); }
+  .gallery-actions { display: flex; gap: 6px; margin-top: 8px; }
+  .gallery-actions button { display: inline-flex; align-items: center; gap: 4px;
+            background: transparent; border: 1px solid var(--border-2); color: var(--dim);
+            border-radius: 7px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+            font-family: inherit; }
+  .gallery-actions button:hover { color: var(--accent); border-color: var(--accent);
+            background: var(--accent-soft); }
+  .gallery-actions button.danger:hover { color: var(--fail); border-color: var(--fail);
+            background: rgba(248,113,113,.12); }
+  .gallery-actions .lucide { width: 12px; height: 12px; }
+  .gallery-search { margin-top: 0; flex: 0 1 300px; }
+  .gallery-card.search-hit { border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent), var(--shadow-md); }
+  .gallery-card.search-dim { opacity: .38; }
+
+  [x-cloak] { display: none !important; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css" />
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<link rel="stylesheet" href="/static/css/ui-improvements.css" />
+<script src="/static/js/ui-enhancements.js" defer></script>
+</head>
+<body>
+<div id="toast-container" aria-live="polite"></div>
+<div id="app" x-data="chatable()" x-init="init()" :class="{'bm-open': bookmarksOpen}">
+
+  <!-- mobile header / drawer toggle -->
+  <div class="mobile-header">
+    <button class="icon-btn" @click="toggleDrawer()" title="Open tree" aria-label="Open tree"><i data-lucide="menu"></i></button>
+    <div class="mobile-brand"><div class="logo"><i data-lucide="git-branch"></i></div><span>chatable</span></div>
+    <span class="mobile-meta" x-text="config.backend"></span>
+    <button class="icon-btn" @click="toggleGallery()" title="Gallery" aria-label="Gallery"><i data-lucide="layout-grid"></i></button>
+    <button class="icon-btn" @click="toggleBookmarks()" title="Bookmarks" aria-label="Bookmarks"><i data-lucide="bookmark"></i></button>
+  </div>
+
+  <!-- drawer backdrop for mobile -->
+  <div class="drawer-backdrop" x-show="drawerOpen" @click="drawerOpen=false"></div>
+
+  <!-- drag-and-drop overlay -->
+  <template x-if="dragActive">
+    <div class="drop-hint"><div class="box"><i data-lucide="file-up"></i>
+      <span>Drop file to attach (PDF, text…)</span></div></div>
+  </template>
+
+  <!-- settings modal: model + storage (current process only) -->
+  <template x-if="settingsOpen">
+    <div class="modal-backdrop" @click.self="closeSettings()">
+      <div class="modal" @keydown="trapModalTab($event)">
+        <div class="modal-head">
+          <h2><i data-lucide="settings"></i> Settings</h2>
+          <button class="icon-btn" @click="closeSettings()" title="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <p class="hint">Model and storage settings are saved to <code>~/.chatable/settings.json</code> and survive restarts. A reply must not be generating.</p>
+
+          <div>
+            <label class="fld">
+              <span>Model</span>
+              <input type="text" x-model="settings.model" placeholder="type or pick a model" spellcheck="false" />
+            </label>
+            <label class="fld">
+              <span>Base URL</span>
+              <input type="text" x-model="settings.base_url" placeholder="https://…" spellcheck="false" />
+            </label>
+            <label class="fld">
+              <span>API Key</span>
+              <input type="password" x-model="settings.api_key" :placeholder="config.llm && config.llm.has_api_key ? '•••••• (unchanged)' : ''" spellcheck="false" />
+            </label>
+          </div>
+
+          <hr class="sep" />
+
+          <div class="fld">
+            <span>Theme</span>
+            <div class="theme-row">
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='midnight'}" @click="setTheme('midnight')"><span class="swatch sw-midnight"></span>Midnight</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='graphite'}" @click="setTheme('graphite')"><span class="swatch sw-graphite"></span>Graphite</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='light'}" @click="setTheme('light')"><span class="swatch sw-light"></span>Light</button>
+            </div>
+          </div>
+          <div class="fld">
+            <span>Chat font size</span>
+            <div class="zoom-row">
+              <button type="button" class="btn-ghost zoom-btn" @click="adjustFontSize(-1)">A−</button>
+              <span class="zoom-val" x-text="appearance.fontSize + 'px'"></span>
+              <button type="button" class="btn-ghost zoom-btn" @click="adjustFontSize(1)">A+</button>
+            </div>
+          </div>
+
+          <hr class="sep" />
+
+          <label class="fld">
+            <span>Storage folder</span>
+            <div class="path-row">
+              <input type="text" x-model="settings.data_dir" placeholder="~/.chatable or /path/to/folder" spellcheck="false" />
+              <button type="button" class="btn-ghost" @click="fsBrowse(settings.data_dir)">Browse…</button>
+            </div>
+          </label>
+          <template x-if="fsPicker.open">
+            <div class="fs-picker">
+              <div class="fs-head">
+                <i data-lucide="folder-open"></i>
+                <span class="fs-path" x-text="fsPicker.path"></span>
+                <label class="fs-hidden-toggle"><input type="checkbox" x-model="fsPicker.showHidden" @change="fsBrowse(fsPicker.path)" /> hidden</label>
+                <button class="fs-close" @click="fsPicker.open=false" title="Close"><i data-lucide="x"></i></button>
+              </div>
+              <div class="fs-list">
+                <div class="fs-row" x-show="fsPicker.parent" @click="fsBrowse(fsPicker.parent)"><i data-lucide="corner-left-up"></i> <span>..</span></div>
+                <template x-for="d in fsPicker.dirs" :key="d.path">
+                  <div class="fs-row" @click="fsBrowse(d.path)"><i data-lucide="folder"></i> <span x-text="d.name"></span></div>
+                </template>
+                <div class="fs-empty" x-show="!fsPicker.loading && !fsPicker.dirs.length && !fsPicker.parent">empty folder</div>
+                <div class="fs-empty" x-show="fsPicker.loading">loading…</div>
+              </div>
+              <div class="fs-err" x-show="fsPicker.error" x-text="fsPicker.error"></div>
+              <div class="fs-foot">
+                <button class="btn-primary" @click="settings.data_dir = fsPicker.path; fsPicker.open=false">Select this folder</button>
+              </div>
+            </div>
+          </template>
+          <p class="hint">Holds <code>chatable.jsonl</code>. Switching loads that folder's history and is remembered on the next launch.</p>
+
+          <template x-if="settingsError">
+            <div class="modal-err" x-text="settingsError"></div>
+          </template>
+        </div>
+        <div class="modal-foot">
+          <button class="btn-ghost" @click="closeSettings()">Cancel</button>
+          <button class="btn-primary" @click="saveSettings()" :disabled="settingsSaving"
+                  x-text="settingsSaving ? 'Saving…' : 'Apply'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- LEFT: tree -->
+  <div id="tree" class="panel" :class="{'open': drawerOpen}">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo"><i data-lucide="git-branch"></i></div>
+        <div>
+          <h1>chatable</h1>
+          <div class="sub">tree-structured chat</div>
+        </div>
+      </div>
+      <div class="meta" x-text="config.backend"></div>
+      <template x-if="sessionStats"><div class="meta session" x-text="sessionStats"></div></template>
+      <div class="toolbar">
+        <button class="icon-btn" @click="newTrunk()" title="Start a new trunk (clear selection)"><i data-lucide="plus"></i></button>
+        <button class="icon-btn" @click="collapseAll()" title="Collapse all nodes"><i data-lucide="chevrons-down-up"></i></button>
+        <button class="icon-btn" @click="toggleGallery()" title="Gallery — browse all conversations"><i data-lucide="layout-grid"></i></button>
+        <button class="icon-btn" @click="expandAll()" title="Expand all nodes"><i data-lucide="chevrons-up-down"></i></button>
+        <button class="icon-btn" @click="toggleBookmarks()" title="Toggle bookmarks"><i data-lucide="bookmark"></i></button>
+        <button class="icon-btn" @click="openSettings()" title="Model & storage settings"><i data-lucide="settings"></i></button>
+      </div>
+      <div class="tree-search">
+        <i data-lucide="search"></i>
+        <input type="text" x-model="search" @input="rebuildFlat(); refreshIcons()"
+               placeholder="Search titles & replies…  (⌘K)" spellcheck="false" />
+        <button class="clear" x-show="search" @click="search=''; rebuildFlat(); refreshIcons()" title="Clear"><i data-lucide="x"></i></button>
+      </div>
+      <template x-if="search.trim()">
+        <div class="meta search-count" x-text="searchSummary"></div>
+      </template>
+    </div>
+    <div class="tree-list">
+      <template x-if="!tree.children || !tree.children.length">
+        <div class="empty" style="font-size:13px;margin-top:20px;">no nodes yet — ask something →</div>
+      </template>
+      <template x-for="n in flatTree" :key="n.id">
+        <div class="node-row" :class="rowClass(n)" role="button"
+             :tabindex="(n.role === 'assistant' || n.role === 'user') ? 0 : -1"
+             @click="(n.role === 'assistant' || n.role === 'user') && select(n.id)"
+             @keydown.enter.space.prevent="(n.role === 'assistant' || n.role === 'user') && select(n.id)"
+>
+          <span class="guides">
+            <template x-for="(line, gi) in n.ancestors" :key="gi">
+              <span class="guide" x-text="line ? '│' : ''"></span>
+            </template>
+            <span class="guide connector" x-text="n.isLast ? '└' : '├'"></span>
+          </span>
+          <template x-if="n.hasKids">
+            <button class="node-caret" :title="n.collapsed ? 'Expand' : 'Collapse'"
+                    @click.stop="toggleCollapse(n)"><i :data-lucide="n.collapsed ? 'chevron-right' : 'chevron-down'"></i></button>
+          </template>
+          <template x-if="!n.hasKids"><span class="node-caret spacer"></span></template>
+          <span class="role-dot" :class="['role-' + n.role, {'streaming': !!streams[n.id]}]"></span>
+          <span class="node-label">
+            <span class="title-line">
+              <template x-if="!!streams[n.id]"><span class="spin"></span></template>
+              <template x-if="renamingId !== n.id">
+                <span x-html="highlight(n.title || n.preview)"></span>
+              </template>
+              <template x-if="renamingId === n.id">
+                <input class="rename-input" type="text" x-model="renameText"
+                       @click.stop @keydown.enter.prevent="submitRename(n.id)"
+                       @keydown.esc.prevent="renamingId=null" @blur="renamingId=null"
+                       spellcheck="false" />
+              </template>
+              <template x-if="n.kidCount > 1"><span class="branch-badge" x-text="n.kidCount + ' 分支'"></span></template>
+              <span class="nid" x-text="'#' + n.id.slice(0,6)"></span>
+              <template x-if="n.collapsed"><span class="collapsed-badge" x-text="'⋯'"></span></template>
+              <template x-if="n.pinned"><span class="pin"><i data-lucide="pin"></i></span></template>
+              <template x-for="t in n.tags"><span class="tag" x-text="'#'+t"></span></template>
+            </span>
+            <template x-if="n.role === 'assistant' && n.reply_preview">
+              <div class="preview" x-html="highlight(n.reply_preview)"></div>
+            </template>
+          </span>
+          <button class="node-export" x-show="n.depth === 0" title="导出整棵对话树为 Markdown"
+                  @click.stop="exportTree(n.id)"><i data-lucide="download"></i></button>
+          <button class="node-map" title="Open mind map centered on this node"
+                  @click.stop="openMindmap(n.id)"><i data-lucide="network"></i></button>
+          <button class="node-rename" title="Rename this node (locks the auto title; submit empty to restore)"
+                  @click.stop="startRename(n)"><i data-lucide="pencil"></i></button>
+          <button class="node-del" title="Delete this node and all its children"
+                  @click.stop="deleteNode(n)"><i data-lucide="trash-2"></i></button>
+        </div>
+      </template>
+    </div>
+
+  </div>
+
+  <!-- draggable divider: resize the tree pane -->
+  <div id="divider" @mousedown="startResize($event)" @dblclick="resetTreeWidth()"
+       title="Drag to resize · double-click to reset"></div>
+
+  <!-- RIGHT: conversation (clicking the main area dismisses the bookmarks panel) -->
+  <div id="conv" @click="bookmarksOpen=false">
+    <div id="messages" @scroll.passive="onScroll()">
+     <div class="inner">
+      <template x-if="!selectedId && !messages.length">
+        <div class="empty-hero">
+          <div class="icon">🌳</div>
+          <h2>Tree-structured research chat</h2>
+          <p>Ask anything below to start a new trunk, or click an assistant node
+             on the left to <span class="branch">fork</span> from it.</p>
+          <p>Every answer can become a fork point — explore branches without
+             polluting the <span class="accent">main thread</span>.</p>
+          <div class="suggestions">
+            <button @click="useSuggestion('Explain the intuition behind rotary position embeddings (RoPE).')">Explain RoPE intuitively</button>
+            <button @click="useSuggestion('Summarize the key idea of the Transformer attention mechanism.')">Summarize attention</button>
+            <button @click="useSuggestion('Walk me through a proof that √2 is irrational.')">Prove √2 is irrational</button>
+            <button @click="useSuggestion('Compare GRPO and PPO for RLHF, with trade-offs.')">GRPO vs PPO</button>
+          </div>
+        </div>
+      </template>
+      <template x-for="m in messages" :key="m.id">
+        <div class="msg" :id="'msg-' + m.id" :class="'role-' + m.role">
+          <div class="who">
+            <template x-if="m.role === 'user'"><i data-lucide="user"></i></template>
+            <template x-if="m.role === 'assistant'"><i data-lucide="bot"></i></template>
+            <template x-if="m.role === 'system_note'"><i data-lucide="wrench"></i></template>
+            <span x-text="m.role"></span>
+            <span x-text="'#' + m.id.slice(0,6)"></span>
+            <template x-if="m.tool"><span x-text="'· ' + m.tool"></span></template>
+            <template x-if="streams[m.id] && streams[m.id].ctx"><span x-text="streams[m.id].ctx"></span></template>
+            <!-- per-reply stop button: on the assistant row while streaming,
+                 and on the pending user row before the reply node exists -->
+            <template x-if="streamKeyFor(m.id)">
+              <button class="stop-inline" @click="stopStream(streamKeyFor(m.id))" title="Stop this reply"><i data-lucide="square"></i> stop</button>
+            </template>
+            <!-- regenerate: retry a user message (deletes its replies first) -->
+            <template x-if="m.role === 'user' && !streamKeyFor(m.id)">
+              <button class="retry-btn" @click="retryUserNode(m.id)" title="Delete all replies to this message and regenerate"><i data-lucide="rotate-ccw"></i> retry</button>
+            </template>
+          </div>
+          <template x-if="m.role === 'system_note'">
+            <details class="tool">
+              <summary>
+                <i data-lucide="wrench"></i>
+                <span class="tool-name" x-text="m.tool || m.title || 'tool result'"></span>
+                <span class="tool-args" x-text="toolPreview(m.content)"></span>
+              </summary>
+              <pre class="tool-out" x-text="m.content"></pre>
+            </details>
+          </template>
+          <template x-if="m.role !== 'system_note'">
+            <div>
+              <!-- uploaded image attachments: thumbnails above the text -->
+              <template x-if="m.role === 'user' && m.attachments && m.attachments.length">
+                <div class="attach-thumbs">
+                  <template x-for="(att, ai) in m.attachments" :key="ai">
+                    <a x-show="String(att.mime || '').startsWith('image/')"
+                       :href="'/api/files/' + encodeURIComponent(att.filename)">
+                      <img class="msg-thumb" :src="'/api/files/' + encodeURIComponent(att.filename)"
+                           :alt="att.filename" :title="att.filename" />
+                    </a>
+                  </template>
+                </div>
+              </template>
+              <!-- tool cards: live tools while this row streams, else persisted -->
+              <template x-for="(t, ti) in (streams[m.id] ? streams[m.id].tools : (m.tool_results || []))" :key="ti">
+                <details class="tool" :open="t.running === true">
+                  <summary>
+                    <i data-lucide="wrench"></i>
+                    <span class="tool-name" x-text="t.name"></span>
+                    <span class="tool-args" x-text="JSON.stringify(t.arguments)"></span>
+                    <template x-if="t.running"><span class="tool-badge run">running…</span></template>
+                    <template x-if="!t.running && t.ok === true"><span class="tool-badge ok">✓</span></template>
+                    <template x-if="!t.running && t.ok === false"><span class="tool-badge fail">✗</span></template>
+                    <template x-if="t.duration_ms"><span class="tool-ms" x-text="t.duration_ms + 'ms'"></span></template>
+                    <template x-if="t.images"><span class="tool-ms" x-text="'🖼 ' + t.images"></span></template>
+                  </summary>
+                  <pre class="tool-out" x-text="t.error || t.output || '…'"></pre>
+                </details>
+              </template>
+              <!-- planning: non-streaming tool-decision in progress -->
+              <template x-if="streams[m.id] && streams[m.id].planning">
+                <div class="planning"><span class="spin"></span>
+                  <span>planning next move…</span></div>
+              </template>
+              <!-- reasoning: live while this row is streaming; auto-collapses
+                   once the answer text starts flowing -->
+              <template x-if="streams[m.id] && streams[m.id].reasoning">
+                <details class="reasoning" :open="!streams[m.id].text">
+                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
+                  <div x-text="streams[m.id].reasoning"></div>
+                </details>
+              </template>
+              <!-- persisted reasoning after the turn settles (collapsed, like tool cards) -->
+              <template x-if="!streams[m.id] && m.reasoning">
+                <details class="reasoning">
+                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
+                  <div x-text="m.reasoning"></div>
+                </details>
+              </template>
+              <!-- body: live text (with … placeholder) while streaming, else persisted -->
+              <div class="bubble-wrap">
+                <template x-if="streams[m.id]">
+                  <div>
+                    <div class="bubble streaming-bubble" x-show="streams[m.id].text" x-md="streams[m.id] ? streams[m.id].text : ''"></div>
+                    <div class="bubble" x-show="!streams[m.id].text && !streams[m.id].planning"><span style="color:var(--dim)">…</span></div>
+                  </div>
+                </template>
+                <template x-if="!streams[m.id]">
+                  <div class="bubble" x-md="m.content"></div>
+                </template>
+                <!-- copy this message's raw markdown to the clipboard -->
+                <button class="msg-copy-btn" @click="copyMessage(m)"
+                        :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
+                  <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>
+                </button>
+              </div>
+              <!-- stats: live while streaming, else persisted usage -->
+              <template x-if="streams[m.id] && streams[m.id].stats">
+                <div class="stats" x-text="streams[m.id].stats"></div>
+              </template>
+              <!-- auto-resume gave up: offer a manual retry -->
+              <template x-if="streams[m.id] && streams[m.id].resumeFailed">
+                <div class="stats"><span style="color:var(--fail)">connection lost.</span><button class="retry-btn" @click="retryResume(m.id)">retry</button></div>
+              </template>
+              <template x-if="!streams[m.id] && m.usage && (m.usage.input || m.usage.output)">
+                <div class="stats" x-text="fmtUsage(m.usage)"></div>
+              </template>
+              <!-- fork button below assistant reply, only after generation completes -->
+              <template x-if="m.role === 'assistant' && !streams[m.id]">
+                <div class="fork-actions">
+                  <button class="fork-btn" @click="forkFromHere(m.id)" title="从此回复分叉追问">
+                    <i data-lucide="git-branch"></i>追问
+                  </button>
+                  <button class="fork-btn map-open-btn" @click="openMindmap(m.id)" title="以这条回复为中心打开思维结构图">
+                    <i data-lucide="network"></i>思维图
+                  </button>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+     </div>
+    </div>
+
+    <div id="composer">
+     <div class="inner">
+      <div class="ctx">
+        <template x-if="selectedId"><span>forking from <span class="fork" x-text="'#' + selectedId.slice(0,6)"></span></span></template>
+        <template x-if="!selectedId"><span>new trunk (no fork point selected)</span></template>
+      </div>
+      <!-- attachments -->
+      <template x-if="attachments.length">
+        <div class="attach-row">
+          <template x-for="(a, ai) in attachments" :key="a.uid">
+            <span class="attach-chip" :class="{uploading: a.status==='uploading', failed: a.status==='failed'}">
+              <img class="chip-thumb" x-show="a.kind==='image' && a.status==='ready'"
+                   :src="'/api/files/' + encodeURIComponent(a.filename)" :alt="a.filename" />
+              <i x-show="!(a.kind==='image' && a.status==='ready')"
+                 :data-lucide="a.status==='uploading' ? 'loader' : (a.status==='failed' ? 'alert-triangle' : 'file-text')"></i>
+              <span class="name" :class="{link: a.status==='ready'}"
+                    :title="a.status==='ready' ? 'Open in new tab' : ''"
+                    @click="a.status==='ready' && window.open('/api/files/' + encodeURIComponent(a.filename), '_blank', 'noopener')"
+                    x-text="a.filename"></span>
+              <span class="sz" x-show="a.size" x-text="fmtSize(a.size)"></span>
+              <button class="x" @click="removeAttachment(a.uid)" title="Remove"><i data-lucide="x"></i></button>
+            </span>
+          </template>
+        </div>
+      </template>
+      <div class="composer-row">
+        <div class="input-wrap">
+          <input type="file" x-ref="fileInput" style="display:none"
+                 @change="onFilePick($event)" multiple />
+          <button class="send-btn attach-btn" style="background:var(--card);color:var(--dim)"
+                  @click="$refs.fileInput.click()" title="Attach a file"><i data-lucide="paperclip"></i></button>
+          <textarea x-model="draft" x-ref="composerInput" rows="1"
+                    @input="autoGrow($event.target)"
+                    x-effect="draft, $nextTick(() => autoGrow($refs.composerInput))"
+                    @compositionstart="imeComposing = true"
+                    @compositionend="imeComposing = false; _imeEndedAt = Date.now()"
+                    @keydown.enter="composerEnter($event)"
+                    @paste="onPaste($event)"
+                    placeholder="Ask something... (Enter to send, Shift+Enter newline, drop files to attach)"></textarea>
+        </div>
+        <button class="send-btn send-main" @click="send()" :disabled="!canSend()" title="Send (Enter)"><i data-lucide="arrow-up"></i></button>
+      </div>
+      <div class="foot">
+        <span class="kbd">⌘K search</span>
+        <span x-text="status"></span>
+        <span class="streaming-count" x-show="anyStreaming"
+              x-text="Object.keys(streams).length + ' 生成中…'"></span>
+      </div>
+     </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: bookmarks -->
+  <div id="bookmarks-panel" :class="{'open': bookmarksOpen}" x-cloak>
+    <div class="bookmarks-head">
+      <h3><i data-lucide="bookmark"></i> Bookmarks</h3>
+      <button class="icon-btn" @click="bookmarksOpen=false" title="Close bookmarks"><i data-lucide="x"></i></button>
+    </div>
+    <div class="bookmarks-add">
+      <input type="text" x-model="newBookmarkUrl" @keydown.enter="addBookmark()"
+             placeholder="Paste URL and press Enter…" spellcheck="false" />
+      <template x-if="bookmarkError"><div class="bm-error" x-text="bookmarkError"></div></template>
+    </div>
+    <div class="bookmarks-list">
+      <template x-if="!bookmarks.length">
+        <div class="bookmark-empty">No bookmarks yet.<br>Paste a URL above to save blogs, papers, or articles.</div>
+      </template>
+      <template x-for="b in bookmarks" :key="b.id">
+        <div class="bookmark-item" :class="{'enriching': b.metadata && b.metadata.enriching}">
+          <template x-if="bmRenamingId !== b.id">
+            <div class="title" @click="openLink(b.url)" title="Open link in new tab" x-text="b.title || b.url"></div>
+          </template>
+          <template x-if="bmRenamingId === b.id">
+            <input class="rename-input bm-rename" type="text" x-model="bmRenameText" @click.stop
+                   @keydown.enter.prevent="submitBookmarkRename(b.id)"
+                   @keydown.esc.prevent="bmRenamingId=null" @blur="bmRenamingId=null"
+                   spellcheck="false" />
+          </template>
+          <div class="summary" x-text="b.summary || (b.metadata && b.metadata.enriching ? '…' : '(no summary)')"></div>
+          <div class="url" x-text="b.url"></div>
+          <div class="actions" @click.stop>
+            <button @click="regenerateBookmark(b.id)" :disabled="!!(b.metadata && b.metadata.enriching)"
+                    title="Regenerate title & summary"><i data-lucide="sparkles" :class="{'rotating': b.metadata && b.metadata.enriching}"></i></button>
+            <button @click="openLink(b.url)" title="Open link in new tab"><i data-lucide="external-link"></i></button>
+            <button @click="copyBookmark(b)" title="Copy bookmark"><i data-lucide="copy"></i></button>
+            <button @click="discussBookmark(b)" title="Discuss in chat (pastes a prompt into the composer)"><i data-lucide="message-square"></i></button>
+            <button @click="startBookmarkRename(b)" title="Rename (submit empty to restore auto title)"><i data-lucide="pencil"></i></button>
+            <button @click="deleteBookmark(b.id)" title="Delete"><i data-lucide="trash-2"></i></button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- FULLSCREEN: mind map overlay -->
+  <template x-if="mindmap.open">
+    <div class="mindmap-backdrop">
+      <div class="mindmap-head">
+        <h3><i data-lucide="network"></i> Mind map
+          <span class="mm-title" x-text="mindmap.centerTitle"></span></h3>
+        <span class="count" x-text="mindmap.nodes.length + ' nodes · drag to pan · scroll to zoom · click a node to center'"></span>
+        <button class="icon-btn" @click="closeMindmap()" title="Close (Esc)"><i data-lucide="x"></i></button>
+      </div>
+      <div class="mindmap-canvas" x-ref="mapCanvas"
+           :class="{animating: mapAnim, dragging: mapDragging}"
+           @pointerdown="mapPointerDown($event)"
+           @wheel.prevent="mapWheel($event)">
+        <div class="mindmap-world"
+             :style="`width:${mindmap.w}px; height:${mindmap.h}px; transform: translate(${mapView.tx}px, ${mapView.ty}px) scale(${mapView.scale});`">
+          <svg class="map-edges" :width="mindmap.w" :height="mindmap.h">
+            <path class="map-edge" :d="mindmap.edgesD"></path>
+          </svg>
+          <template x-for="mn in mindmap.nodes" :key="mn.id">
+            <div class="map-node" :class="{center: mn.isCenter}"
+                 :style="`left:${mn.x}px; top:${mn.y}px;`"
+                 :title="mn.q || mn.a"
+                 @click.stop="mapNodeClick(mn)">
+              <div class="map-q" x-show="mn.isPair">
+                <span class="role-dot role-user" :class="{'streaming': !!(streams[mn.id] || (mn.replyId && streams[mn.replyId]))}"></span>
+                <span class="map-q-text" x-text="mn.q"></span>
+              </div>
+              <div class="map-a" x-show="mn.a">
+                <span class="role-dot role-assistant" x-show="!mn.isPair"></span><span x-text="mn.a"></span>
+              </div>
+              <div class="map-node-foot">
+                <button class="map-del-btn" x-show="mn.isCenter" @click.stop="exportTree(mn.id)"
+                        title="导出整棵对话树为 Markdown">
+                  <i data-lucide="download"></i>
+                </button>
+                <button class="map-del-btn" @click.stop="mapDeleteNode(mn)" title="删除该节点及其所有子节点">
+                  <i data-lucide="trash-2"></i>
+                </button>
+                <template x-if="mn.kidCount > 1"><span class="branch-badge" x-text="mn.kidCount + ' 分支'"></span></template>
+                <button class="map-detail-btn" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
+                  <i data-lucide="message-square"></i>查看细节
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- FULLSCREEN: gallery overlay (all trunk conversations as cards) -->
+  <template x-if="galleryOpen">
+    <div class="gallery-backdrop">
+      <div class="mindmap-head">
+        <h3><i data-lucide="layout-grid"></i> Gallery
+          <span class="mm-title">all conversations</span></h3>
+        <div class="tree-search gallery-search">
+          <i data-lucide="search"></i>
+          <input type="text" x-model="gallerySearch"
+                 placeholder="Search conversations…" spellcheck="false" />
+          <button class="clear" x-show="gallerySearch" @click="gallerySearch=''" title="Clear"><i data-lucide="x"></i></button>
+        </div>
+        <span class="count" x-text="galleryCountText"></span>
+        <button class="icon-btn" @click="closeGallery()" title="Close (Esc)"><i data-lucide="x"></i></button>
+      </div>
+      <div class="gallery-grid">
+        <template x-if="!galleryItems.length">
+          <div class="bookmark-empty">No conversations yet.</div>
+        </template>
+        <template x-for="g in galleryItems" :key="g.id">
+          <div class="gallery-card" :class="galleryCardClass(g)">
+            <div class="map-q"><span class="role-dot role-user"></span><span class="map-q-text" x-html="galleryHighlight(g.q)"></span></div>
+            <div class="map-a" x-show="g.a" x-html="galleryHighlight(g.a)"></div>
+            <div class="gallery-actions">
+              <button class="danger" @click="galleryDelete(g)" title="Delete this conversation and all its branches">
+                <i data-lucide="trash-2"></i>删除</button>
+              <button @click="galleryDetail(g)" title="Open this conversation">
+                <i data-lucide="message-square"></i>查看细节</button>
+              <button @click="galleryMap(g)" title="Open the mind map of this conversation">
+                <i data-lucide="network"></i>思维图</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<script>
+// Register an `x-md` directive: renders markdown into the element, then runs
+// KaTeX over the result so $…$ / $$…$$ / \(…\) / \[…\] become formulas.
+// Math spans are protected from the markdown pass so underscores/backslashes
+// inside them are not mangled.
+document.addEventListener('alpine:init', () => {
+  Alpine.directive('md', (el, { expression }, { evaluateLater, effect }) => {
+    const getText = evaluateLater(expression);
+    let latest = '';
+    let scheduled = false;
+    let lastRender = 0;
+    const render = () => {
+      lastRender = performance.now();
+      el.innerHTML = renderMarkdownWithMath(latest || '');
+      renderMathIn(el);
+      // Skip expensive highlighting/copy-button scans while a message is
+      // still streaming; the final persisted render will run them.
+      if (!el.classList.contains('streaming-bubble')) {
+        highlightCodeBlocks(el);
+        addCodeCopyButtons(el);
+      }
+    };
+    effect(() => {
+      getText(text => {
+        latest = text;
+        if (!el.classList.contains('streaming-bubble')) {
+          render();
+          return;
+        }
+        // Streaming bubbles re-render on every token; coalesce to at most one
+        // render per ~80ms so per-token markdown+KaTeX stays bounded. Trailing
+        // semantics: the newest text is always what gets rendered.
+        if (scheduled) return;
+        scheduled = true;
+        const wait = Math.max(0, 80 - (performance.now() - lastRender));
+        setTimeout(() => requestAnimationFrame(() => {
+          scheduled = false;
+          if (el.isConnected) render();
+        }), wait);
+      });
+    });
+  });
+});
+
+// Collapse the machine-facing attachment preamble into a clean, clickable
+// file list: hides the web_fetch instructions and the server path, keeps just
+// the filename as a link. Handles both the current markdown-link format and
+// legacy plain-text messages (link rebuilt from the path's basename).
+function formatAttachmentBlock(text) {
+  if (!text || !text.startsWith('Attached file(s)')) return text;
+  const lines = text.split('\n');
+  const items = [];
+  let i = 1;  // line 0 is the instruction sentence
+  for (; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.startsWith('- ')) break;
+    // Current: - [name](/api/files/name): /server/path
+    let m = l.match(/^- \[(.+?)\]\((\/api\/files\/[^)]+)\): .+$/);
+    if (m) { items.push(`- 📎 [${m[1]}](${m[2]})`); continue; }
+    // Legacy:  - name: /server/path
+    m = l.match(/^- ([^:[\]]+): (\/.+)$/);
+    if (m) {
+      const base = m[2].split('/').pop();
+      items.push(`- 📎 [${m[1].trim()}](/api/files/${encodeURIComponent(base)})`);
+      continue;
+    }
+    break;
+  }
+  if (!items.length) return text;
+  const rest = lines.slice(i).join('\n').replace(/^\s+/, '');
+  return 'Attachments:\n' + items.join('\n') + (rest ? '\n\n' + rest : '');
+}
+
+function renderMarkdownWithMath(text) {
+  if (!text) return '';
+  text = formatAttachmentBlock(text);
+  // 1. Pull out ALL math segments (complete or streaming-incomplete) and
+  //    replace with U+E000 (private-use) placeholders so marked never sees
+  //    them — a printable-delimiter token keeps this file plain UTF-8 text.
+  const math = [];
+  const stash = (s) => { math.push(s); return `MATH${math.length - 1}`; };
+  let t = text;
+  // Display math $$…$$ — content cannot contain $$ (always true for LaTeX).
+  // Non-greedy scan stops at the next $$ (closing this block) or end of text
+  // (streaming cut-off).  The negative lookahead (?!\$\$) keeps the content
+  // from bleeding into a following $$ block when both are incomplete.
+  t = t.replace(/\$\$((?:(?!\$\$)[\s\S])*?)(\$\$|$)/g,
+    (_, c, e) => stash('$$' + c + (e === '$$' ? '$$' : '')));
+  // \[…\] display math  (complete or incomplete)
+  t = t.replace(/\\\[((?:(?!\\\])[\s\S])*?)(\\\]|$)/g,
+    (_, c, e) => stash('$$' + c + (e === '\\]' ? '$$' : '')));
+  // \(…\) inline math  (complete or incomplete)
+  t = t.replace(/\\\(((?:(?!\\\))[\s\S])*?)(\\\)|$)/g,
+    (_, c, e) => stash('$' + c + (e === '\\)' ? '$' : '')));
+  // Inline $…$ — single-line only; avoid $$ already handled above.
+  t = t.replace(/(?<!\$)\$(?!\$)([^\n$]*?)(\$|$)/g,
+    (_, c, e) => stash('$' + c + (e === '$' ? '$' : '')));
+  // 2. Markdown render on the safe remainder.
+  let html;
+  try { html = marked.parse(t); } catch (e) { html = t; }
+  // 3. Restore math placeholders, escaping < > so the browser won't
+  //    interpret <i>, <b>, <u> etc. inside formulas as HTML tags.
+  html = html.replace(/MATH(\d+)/g, (_, i) =>
+    math[+i].replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  return html;
+}
+
+function renderMathIn(el) {
+  if (typeof renderMathInElement !== 'function') return; // KaTeX not loaded yet
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '\\(', right: '\\)', display: false },
+      ],
+      throwOnError: false,
+    });
+  } catch (e) { /* leave raw text on failure */ }
+}
+
+function chatable() {
+  return {
+    config: {}, tree: {children: []}, flatTree: [],
+    collapsed: new Set(),
+    search: '',   // tree filter query; matches node title + summary + preview
+    renamingId: null, renameText: '',  // inline tree-row rename state
+    selectedId: null, messages: [],
+    copiedMsgId: null,  // message id whose copy button just succeeded (icon feedback)
+    draft: '', status: '',
+    // IME (e.g. Chinese pinyin) composition tracking. event.isComposing alone
+    // is not reliable: on some browser/IME combos compositionend fires BEFORE
+    // the Enter keydown that confirms a candidate, so isComposing is already
+    // false and the Enter would wrongly send the message.
+    imeComposing: false, _imeEndedAt: 0,
+    // Concurrent in-progress replies, keyed by assistant node id (or a temp key
+    // until the real id arrives). Each entry:
+    //   { userId, parentId, content, text, reasoning, tools:[], stats, ctx,
+    //     usage, abortCtrl, stopped, tempKey }
+    // A message row whose id is a key here renders that stream's live content
+    // instead of its persisted content, so multiple branches can stream at once
+    // and navigating between them keeps each one's in-progress reply visible.
+    streams: {},
+    _tmpSeq: 0,
+    lastUsage: null,
+    // When the user scrolls up mid-stream we stop forcing the viewport for the
+    // currently-viewed branch. `stickToBottom` tracks whether to keep following.
+    stickToBottom: true,
+    // Tree-pane width (px), draggable via #divider and persisted to localStorage.
+    treeWidth: 340, resizing: false,
+    // Uploaded-file attachments for the next message. Each: {uid, filename,
+    // size, path, status: 'uploading'|'ready'|'failed'}.
+    attachments: [],
+    _attachSeq: 0,
+    dragActive: false, _dragDepth: 0,
+    // Settings modal (model + storage). Persisted to settings.json.
+    settingsOpen: false, settingsSaving: false, settingsError: '',
+    // Appearance (theme + chat font size), persisted to localStorage.
+    appearance: { theme: 'midnight', fontSize: 14 },
+    FONT_SIZES: [12, 13, 14, 15, 16, 17, 18],
+
+    loadAppearance() {
+      const t = localStorage.getItem('chatable.theme');
+      const fs = parseInt(localStorage.getItem('chatable.fontSize') || '', 10);
+      if (t) this.appearance.theme = t;
+      if (!isNaN(fs) && this.FONT_SIZES.includes(fs)) this.appearance.fontSize = fs;
+      this.applyAppearance();
+    },
+    applyAppearance() {
+      document.documentElement.dataset.theme = this.appearance.theme;
+      // Font size applies to the conversation column only — side panels,
+      // modals and overlays keep their own sizing.
+      const conv = document.getElementById('conv');
+      if (conv) conv.style.fontSize = this.appearance.fontSize + 'px';
+      localStorage.setItem('chatable.theme', this.appearance.theme);
+      localStorage.setItem('chatable.fontSize', String(this.appearance.fontSize));
+    },
+    setTheme(t) { this.appearance.theme = t; this.applyAppearance(); },
+    adjustFontSize(dir) {
+      const steps = this.FONT_SIZES;
+      let i = steps.indexOf(this.appearance.fontSize);
+      if (i === -1) i = steps.indexOf(14);
+      i = Math.min(steps.length - 1, Math.max(0, i + dir));
+      this.appearance.fontSize = steps[i];
+      this.applyAppearance();
+    },
+    // Storage-folder browser state (settings modal).
+    fsPicker: {open: false, path: '', parent: null, dirs: [], showHidden: false, loading: false, error: ''},
+    settings: {base_url: '', api_key: '', model: '', data_dir: ''},
+    // Bookmarks sidebar
+    bookmarksOpen: true,
+    bookmarks: [],
+    newBookmarkUrl: '',
+    bookmarkError: '',
+    bmRenamingId: null, bmRenameText: '',  // inline bookmark rename state
+    toggleBookmarks() {
+      this.bookmarksOpen = !this.bookmarksOpen;
+      if (this.bookmarksOpen) this.drawerOpen = false;  // the two panels are mutually exclusive
+    },
+    totals: {turns: 0, in: 0, out: 0, cache_read: 0, cache_creation: 0},
+
+    // True when any reply is streaming. Derived; never a send gate.
+    get anyStreaming() { return Object.keys(this.streams).length > 0; },
+
+    drawerOpen: false,
+
+    // Mind map overlay: a layout snapshot (nodes/edges in px) plus the canvas
+    // view transform. Snapshot is taken on open and not re-laid-out while the
+    // map is open, so background tree changes can't shift the user's view.
+    MAP_NW: 220, MAP_NH: 112, MAP_GX: 32, MAP_GY: 90,
+    mindmap: { open: false, rootId: null, centerTitle: '', nodes: [], edgesD: '', w: 0, h: 0 },
+    galleryOpen: false,
+    gallerySearch: '',
+    mapView: { tx: 0, ty: 0, scale: 1 },
+    mapAnim: false, mapDragging: false, _mapSuppressClick: false,
+
+  toggleDrawer() {
+    this.drawerOpen = !this.drawerOpen;
+    if (this.drawerOpen) this.bookmarksOpen = false;  // mutually exclusive panels
+  },
+
+  async init() {
+      // Alpine calls a component's init() method automatically AND evaluates
+      // x-init="init()" — guard against the resulting double invocation.
+      if (this._inited) return;
+      this._inited = true;
+      // The bookmarks drawer defaults to open on desktop only; on narrow
+      // screens it would cover the whole conversation.
+      if (window.innerWidth <= 768) this.bookmarksOpen = false;
+      this.loadTreeWidth();
+      this.loadAppearance();
+      this.initDragDrop();
+      this.config = await (await fetch('/api/config')).json();
+      await this.refreshTree();
+      // Open as a top-level conversation list (one row per trunk); carets
+      // drill into branches. Search still sees inside collapsed subtrees.
+      this.collapseAll();
+      this.refreshIcons();
+      this.loadBookmarks();
+      // Reconnect to any replies still generating on the server (e.g. after a
+      // page refresh mid-stream): generation runs detached from the connection,
+      // so we resume watching instead of losing the reply.
+      this.reconnectActive();
+
+      // Escape closes the topmost overlay: mind map > settings > gallery > bookmarks > drawer.
+      window.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (this.mindmap.open) { this.closeMindmap(); return; }
+        if (this.settingsOpen) { this.closeSettings(); return; }
+        if (this.galleryOpen) { this.closeGallery(); return; }
+        if (this.bookmarksOpen) { this.bookmarksOpen = false; return; }
+        this.drawerOpen = false;
+      });
+
+      // Uploaded-file links inside message bubbles open in a new tab instead
+      // of navigating the app away.
+      document.addEventListener('click', (e) => {
+        const a = e.target.closest && e.target.closest('a[href^="/api/files/"]');
+        if (a) { e.preventDefault(); window.open(a.href, '_blank', 'noopener'); }
+      });
+    },
+
+    async reconnectActive() {
+      let ids = [];
+      try {
+        const data = await (await fetch('/api/active')).json();
+        ids = data.active || [];
+      } catch (e) { return; }
+      for (const aid of ids) {
+        if (this.streams[aid]) continue;  // already tracking it
+        this.reconnect(aid);
+      }
+    },
+
+    // Attach to an in-progress turn by assistant id and stream its remaining
+    // events. Replays from index 0 to rebuild full live state (text, tools).
+    async reconnect(assistantId) {
+      let st = {
+        userId: null, parentId: null, content: '',
+        text: '', reasoning: '', tools: [], stats: '', ctx: '',
+        usage: null, abortCtrl: new AbortController(), stopped: false,
+        tempKey: null, assistantId, pendId: null, evIndex: 0,
+        _counted: true,  // session totals were counted on the original send
+      };
+      this.streams = {...this.streams, [assistantId]: st};
+      // Rebind to Alpine's reactive proxy for this entry: `st` above is the raw
+      // object, and per-delta mutations (st.text += …) on the raw ref bypass the
+      // reactive set-trap, so the streaming bubble wouldn't re-render until the
+      // turn settled. Mutating the proxy makes each delta paint live.
+      st = this.streams[assistantId];
+      this.refreshTree();
+      const onView = () => this.messages.some(m => m.id === assistantId);
+      let resp;
+      try {
+        resp = await fetch('/api/stream/' + encodeURIComponent(assistantId) + '?from_index=0',
+                           {signal: st.abortCtrl.signal});
+      } catch (e) {
+        const s = {...this.streams}; delete s[assistantId]; this.streams = s;
+        return;
+      }
+      await this.consumeStream(resp, st, onView);
+    },
+
+    // Grow the composer textarea to fit its content: reset to auto so it can
+    // shrink when text is deleted, then match scrollHeight. CSS caps it at
+    // max-height (200px), past which overflow-y:auto kicks in and it scrolls.
+    autoGrow(el) {
+      if (!el) return;
+      el.style.height = 'auto';
+      el.style.height = el.scrollHeight + 'px';
+    },
+
+    // Enter in the composer: send, unless it's a newline (Shift) or part of an
+    // IME composition. The 100ms guard after compositionend covers browsers
+    // where compositionend is dispatched before the confirming Enter keydown.
+    composerEnter(e) {
+      if (e.shiftKey) return;  // newline
+      if (e.isComposing || this.imeComposing) return;
+      if (Date.now() - this._imeEndedAt < 100) return;
+      e.preventDefault();
+      this.send();
+    },
+
+    // Re-render lucide <i data-lucide> placeholders into <svg>. Alpine's x-for/
+    // x-if rebuild DOM on data changes, wiping previously-rendered icons, so we
+    // re-run this after any template update (via $nextTick). Purely cosmetic.
+    refreshIcons() {
+      this.$nextTick(() => { try { window.lucide && lucide.createIcons(); } catch (e) {} });
+    },
+
+    // Prefill the composer from an empty-state suggestion card (no send).
+    useSuggestion(text) {
+      this.draft = text;
+      this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // ---- attachments (drag-and-drop / paperclip upload) -------------------
+
+    canSend() {
+      // Allow send when there's text, or ready attachments (and none still uploading).
+      if (this.attachments.some(a => a.status === 'uploading')) return false;
+      return !!this.draft.trim() || this.attachments.some(a => a.status === 'ready');
+    },
+
+    fmtSize(n) {
+      if (!n) return '';
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
+    },
+
+    // Window-level file drag & drop. Bound natively (not via Alpine element
+    // bindings) so no overlay or region can swallow the events — and a missed
+    // drop never navigates the browser to the file.
+    _hasFiles(e) {
+      return !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
+    },
+
+    initDragDrop() {
+      window.addEventListener('dragenter', (e) => {
+        if (!this._hasFiles(e)) return;
+        e.preventDefault();
+        this._dragDepth++;
+        this.dragActive = true;
+        this.refreshIcons();
+      });
+      window.addEventListener('dragover', (e) => {
+        if (!this._hasFiles(e)) return;
+        e.preventDefault();  // required for drop to be allowed at all
+        e.dataTransfer.dropEffect = 'copy';
+      });
+      window.addEventListener('dragleave', (e) => {
+        this._dragDepth = Math.max(0, this._dragDepth - 1);
+        if (this._dragDepth === 0) this.dragActive = false;
+      });
+      window.addEventListener('drop', (e) => {
+        if (!this._hasFiles(e)) return;
+        e.preventDefault();
+        this._dragDepth = 0;
+        this.dragActive = false;
+        const files = e.dataTransfer.files;
+        if (files && files.length) this.uploadFiles(files);
+      });
+    },
+
+    onFilePick(e) {
+      const files = e.target.files;
+      if (files && files.length) this.uploadFiles(files);
+      e.target.value = '';   // allow re-picking the same file
+    },
+
+    // Paste images (and files) straight into the composer.
+    onPaste(e) {
+      const files = e.clipboardData && e.clipboardData.files;
+      if (files && files.length) {
+        e.preventDefault();
+        this.uploadFiles(files);
+      }
+    },
+
+    // Downscale an image to max 1568px on the long edge (JPEG q0.85) so the
+    // inline data URL stays token-friendly. Small images pass through as-is.
+    async _downscaleImage(file) {
+      const MAX_EDGE = 1568, MIN_BYTES = 300 * 1024;
+      if (file.size <= MIN_BYTES) return file;
+      try {
+        const bmp = await createImageBitmap(file);
+        const scale = Math.min(1, MAX_EDGE / Math.max(bmp.width, bmp.height));
+        if (scale >= 1) { if (bmp.close) bmp.close(); return file; }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(bmp.width * scale);
+        canvas.height = Math.round(bmp.height * scale);
+        canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        if (bmp.close) bmp.close();
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85));
+        return blob || file;
+      } catch (e) {
+        return file;  // not decodable — upload as-is
+      }
+    },
+
+    async uploadFiles(fileList) {
+      for (const file of Array.from(fileList)) {
+        const isImage = (file.type || '').startsWith('image/');
+        let upload = file, mime = file.type || '', filename = file.name;
+        if (isImage) {
+          upload = await this._downscaleImage(file);
+          if (upload !== file) {
+            mime = 'image/jpeg';
+            filename = filename.replace(/\.[^.]+$/, '') + '.jpg';
+          }
+        }
+        const uid = 'att-' + (++this._attachSeq);
+        const raw = {uid, filename, size: upload.size || file.size, path: null,
+                     status: 'uploading', kind: isImage ? 'image' : 'file', mime};
+        this.attachments.push(raw);
+        // Rebind to Alpine's reactive proxy: `raw` is the plain object, and
+        // later mutations (att.status = 'ready') on the raw ref bypass the
+        // reactive set-trap, so `canSend()` / :disabled wouldn't re-evaluate and
+        // the send button stayed disabled even after the upload finished.
+        const att = this.attachments[this.attachments.length - 1];
+        this.refreshIcons();
+        try {
+          const fd = new FormData();
+          fd.append('file', upload, filename);
+          const resp = await fetch('/api/upload', {method: 'POST', body: fd});
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const data = await resp.json();
+          att.path = data.path;
+          att.filename = data.filename || att.filename;
+          att.size = data.size || att.size;
+          att.status = 'ready';
+          toast('Attached ' + att.filename, 'success');
+        } catch (err) {
+          att.status = 'failed';
+          this.status = 'upload failed: ' + err;
+          toast('Upload failed: ' + err, 'error');
+        }
+        this.refreshIcons();
+      }
+    },
+
+    removeAttachment(uid) {
+      this.attachments = this.attachments.filter(a => a.uid !== uid);
+      this.refreshIcons();
+    },
+
+    // ---- settings modal (model + storage) ---------------------------------
+
+    openSettings() {
+      // Prefill from the live config. Secrets are never sent back, so the
+      // api_key field starts blank; leaving it blank keeps the existing key.
+      const llm = (this.config && this.config.llm) || {};
+      this.settings = {
+        base_url: llm.base_url || '',
+        api_key: '',
+        model: llm.model || '',
+        data_dir: (this.config && this.config.data_dir) || '',
+      };
+      this.settingsError = '';
+      this._preModalFocus = document.activeElement;
+      this.settingsOpen = true;
+      this.refreshIcons();
+      this.$nextTick(() => {
+        const el = document.querySelector('.modal input');
+        if (el) el.focus();
+      });
+    },
+
+    closeSettings() {
+      this.settingsOpen = false;
+      const el = this._preModalFocus;
+      this._preModalFocus = null;
+      if (el && el.isConnected) this.$nextTick(() => el.focus());
+    },
+
+    // Browse the server's local filesystem for the storage-folder setting.
+    async fsBrowse(path) {
+      const p = this.fsPicker;
+      p.open = true;  // open immediately so errors are visible too
+      p.loading = true;
+      p.error = '';
+      try {
+        const url = '/api/fs/list?path=' + encodeURIComponent((path || '').trim() || '~') +
+                    '&hidden=' + (p.showHidden ? '1' : '0');
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (!resp.ok) { p.error = data.detail || ('HTTP ' + resp.status); return; }
+        p.path = data.path;
+        p.parent = data.parent;
+        p.dirs = data.dirs;
+        this.refreshIcons();
+      } catch (e) {
+        p.error = String(e);
+      } finally {
+        p.loading = false;
+      }
+    },
+
+    // Keep Tab cycling inside the settings modal while it is open.
+    trapModalTab(e) {
+      if (e.key !== 'Tab') return;
+      const els = [...e.currentTarget.querySelectorAll('input, select, button')]
+        .filter(el => !el.disabled);
+      if (!els.length) return;
+      const first = els[0], last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    },
+
+
+
+    async saveSettings() {
+      if (this.anyStreaming) { this.settingsError = 'A reply is generating — stop it first.'; return; }
+      this.settingsSaving = true;
+      this.settingsError = '';
+      const s = this.settings;
+      const body = {data_dir: s.data_dir || ''};
+      // Only send model settings if a model is provided.
+      if (s.model && s.model.trim()) {
+        body.base_url = s.base_url;
+        body.model = s.model;
+        if (s.api_key) body.api_key = s.api_key;    // blank = keep existing
+      }
+      try {
+        const resp = await fetch('/api/settings', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { this.settingsError = data.detail || ('HTTP ' + resp.status); return; }
+        this.config = data;
+        this.closeSettings();
+        toast('Settings saved', 'success');
+        // Storage may have changed → reload the tree/view.
+        this.selectedId = null; this.messages = [];
+        await this.refreshTree();
+      } catch (e) {
+        this.settingsError = String(e);
+      } finally {
+        this.settingsSaving = false;
+        this.refreshIcons();
+      }
+    },
+
+    // ---- bookmarks sidebar ------------------------------------------------
+
+    async loadBookmarks() {
+      try {
+        const data = await (await fetch('/api/bookmarks')).json();
+        this.bookmarks = data.reverse();  // server returns oldest-first; show newest on top
+        this.refreshIcons();  // the list renders async — convert the new <i data-lucide>
+      } catch (e) {
+        this.bookmarkError = 'Failed to load bookmarks: ' + e;
+      }
+    },
+
+    async addBookmark() {
+      const url = (this.newBookmarkUrl || '').trim();
+      if (!url) return;
+      this.bookmarkError = '';
+      try {
+        const resp = await fetch('/api/bookmarks', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url}),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { this.bookmarkError = data.detail || ('HTTP ' + resp.status); return; }
+        this.newBookmarkUrl = '';
+        // Show immediately; background enrichment will fill title/summary shortly.
+        this.bookmarks = [data, ...this.bookmarks];
+        this.refreshIcons();
+        // Poll a few times as the server fetches and summarizes.
+        this._pollBookmarksFor(data.id);
+      } catch (e) {
+        this.bookmarkError = String(e);
+      }
+    },
+
+    _pollBookmarksFor(bid) {
+      let attempts = 0;
+      const poll = async () => {
+        if (attempts++ >= 12) return;  // ~60s max
+        await new Promise(r => setTimeout(r, 5000));
+        await this.loadBookmarks();
+        const bm = this.bookmarks.find(b => b.id === bid);
+        if (bm && bm.metadata && bm.metadata.enriching) {
+          poll();
+        }
+      };
+      poll();
+    },
+
+    async deleteBookmark(id) {
+      if (!confirm('Delete this bookmark?')) return;
+      try {
+        const resp = await fetch('/api/bookmarks/' + id, {method: 'DELETE'});
+        if (!resp.ok) { this.bookmarkError = await this.errDetail(resp); return; }
+        await this.loadBookmarks();
+      } catch (e) {
+        this.bookmarkError = 'Delete failed: ' + e;
+      }
+    },
+
+    // Re-extract the title and regenerate the one-sentence summary.
+    async regenerateBookmark(id) {
+      this.bookmarkError = '';
+      const bm = this.bookmarks.find(b => b.id === id);
+      if (bm) bm.metadata = {...(bm.metadata || {}), enriching: true};  // spin the icon
+      try {
+        const resp = await fetch('/api/bookmarks/' + id + '/refresh', {method: 'POST'});
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.bookmarkError = data.detail || ('HTTP ' + resp.status);
+          if (bm) bm.metadata.enriching = false;
+          return;
+        }
+        this.bookmarks = this.bookmarks.map(b => b.id === id ? data : b);
+        this.refreshIcons();
+      } catch (e) {
+        this.bookmarkError = String(e);
+        if (bm) bm.metadata.enriching = false;
+      }
+    },
+
+    openLink(url) {
+      window.open(url, '_blank', 'noopener');
+    },
+
+    async copyBookmark(b) {
+      const text = [b.title || b.url, b.url, b.summary].filter(Boolean).join('\n');
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('Bookmark copied', 'success');
+      } catch (e) {
+        this.bookmarkError = 'Copy failed: ' + e;
+      }
+    },
+
+    // Copy a conversation message's raw markdown. Streaming rows copy the
+    // text generated so far.
+    async copyMessage(m) {
+      const st = this.streams[m.id];
+      const text = st ? (st.text || '') : (m.content || '');
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        this.copiedMsgId = m.id;
+        this.$nextTick(() => { try { window.lucide && lucide.createIcons(); } catch (e) {} });
+        setTimeout(() => {
+          if (this.copiedMsgId === m.id) {
+            this.copiedMsgId = null;
+            this.$nextTick(() => { try { window.lucide && lucide.createIcons(); } catch (e) {} });
+          }
+        }, 1500);
+      } catch (e) {
+        console.warn('copy failed:', e);
+      }
+    },
+
+    // Inline bookmark rename; a manual title is locked against re-extraction.
+    startBookmarkRename(b) {
+      this.bmRenamingId = b.id;
+      this.bmRenameText = b.title || '';
+      this.$nextTick(() => {
+        const el = document.querySelector('.bm-rename');
+        if (el) { el.focus(); el.select(); }
+      });
+    },
+
+    async submitBookmarkRename(id) {
+      const title = this.bmRenameText.trim();
+      this.bmRenamingId = null;
+      const bm = this.bookmarks.find(x => x.id === id);
+      if (bm && (bm.title || '') === title) return;  // unchanged
+      try {
+        const resp = await fetch('/api/bookmarks/' + id + '/rename', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({title}),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { this.bookmarkError = data.detail || ('HTTP ' + resp.status); return; }
+        this.bookmarks = this.bookmarks.map(x =>
+          x.id === id ? {...x, title: data.title, metadata: data.metadata} : x);
+        this.refreshIcons();
+      } catch (e) {
+        this.bookmarkError = 'Rename failed: ' + e;
+      }
+    },
+
+    // Seed the composer with a reading prompt for this bookmark — the user
+    // reviews/edits it and sends manually (no auto-send). Always starts from
+    // a fresh root: clear the current fork point so the send opens a new trunk.
+    discussBookmark(b) {
+      this.newTrunk();
+      const title = b.title || b.url;
+      const summary = b.summary || '（暂无摘要）';
+      this.draft = [
+        `请详细阅读并分析这篇文章：${b.url}`,
+        '',
+        `标题：${title}`,
+        `摘要：${summary}`,
+        '',
+        '请对文章进行详细解读。如果需要重新获取完整正文，可以使用 web_fetch；'
+        + '如果需要定位特定段落，可以使用 grep。',
+      ].join('\n');
+      this.bookmarksOpen = false;
+      this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // ---- resizable tree pane ----------------------------------------------
+
+    TREE_MIN: 200,
+    TREE_MAX_FRAC: 0.6,   // never let the tree eat more than 60% of the window
+
+    applyTreeWidth() {
+      document.getElementById('app').style.setProperty('--tree-w', this.treeWidth + 'px');
+    },
+
+    loadTreeWidth() {
+      const saved = parseInt(localStorage.getItem('chatable.treeWidth') || '', 10);
+      if (!isNaN(saved)) this.treeWidth = saved;
+      this.treeWidth = this.clampTreeWidth(this.treeWidth);
+      this.applyTreeWidth();
+    },
+
+    clampTreeWidth(px) {
+      const max = Math.max(this.TREE_MIN, Math.floor(window.innerWidth * this.TREE_MAX_FRAC));
+      return Math.min(max, Math.max(this.TREE_MIN, px));
+    },
+
+    startResize(ev) {
+      ev.preventDefault();
+      this.resizing = true;
+      document.body.classList.add('col-resizing');
+      document.getElementById('divider').classList.add('dragging');
+      const move = (e) => {
+        // The tree pane starts at the window's left edge, so its width is the
+        // pointer's clientX (clamped).
+        this.treeWidth = this.clampTreeWidth(e.clientX);
+        this.applyTreeWidth();
+      };
+      const up = () => {
+        this.resizing = false;
+        document.body.classList.remove('col-resizing');
+        document.getElementById('divider').classList.remove('dragging');
+        localStorage.setItem('chatable.treeWidth', String(this.treeWidth));
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    },
+
+    resetTreeWidth() {
+      this.treeWidth = 340;
+      this.applyTreeWidth();
+      localStorage.setItem('chatable.treeWidth', String(this.treeWidth));
+    },
+
+    render(text) {
+      return renderMarkdownWithMath(text);
+    },
+
+    toolPreview(text) {
+      if (!text) return '';
+      const one = text.replace(/\s+/g, ' ').trim();
+      return one.length > 80 ? one.slice(0, 79) + '…' : one;
+    },
+
+    fmtUsage(u) {
+      if (!u) return '';
+      const inp = u.input || 0, out = u.output || 0;
+      const total = u.total || (inp + out);
+      const cr = u.cache_read || 0, cw = u.cache_creation || 0;
+      const parts = ['in ' + inp, 'out ' + out, 'total ' + total];
+      if (cr || cw) {
+        const rate = inp > 0 ? Math.round(cr / inp * 100) : 0;
+        parts.push('cache hit ' + cr + ' (' + rate + '%)');
+        if (cw) parts.push('cache write ' + cw);
+      }
+      return parts.join(' · ');
+    },
+
+    async refreshTree() {
+      // An explicit refresh supersedes any pending scheduled one.
+      if (this._treeRefreshTimer) { clearTimeout(this._treeRefreshTimer); this._treeRefreshTimer = null; }
+      this.tree = await (await fetch('/api/tree')).json();
+      this.rebuildFlat();
+      this.refreshIcons();
+    },
+
+    // Coalesce bursts of tree refreshes (user_node / assistant_node /
+    // assistant_start arrive back-to-back at the start of every turn) into a
+    // single fetch.
+    scheduleTreeRefresh() {
+      if (this._treeRefreshTimer) return;
+      this._treeRefreshTimer = setTimeout(() => {
+        this._treeRefreshTimer = null;
+        this.refreshTree();
+      }, 150);
+    },
+
+    rebuildFlat() {
+      this.flatTree = [];
+      // While searching, ignore collapse state so matches hidden inside a
+      // collapsed subtree are still shown (dim/hit styling does the filtering).
+      const searching = !!this.search.trim();
+      // ancestors: array of booleans, one per ancestor level — true if that
+      // ancestor still has a following sibling (draw a vertical line through it).
+      // Descendants of a collapsed node are skipped entirely (unless searching).
+      const walk = (node, ancestors) => {
+        const kids = node.children || [];
+        kids.forEach((c, i) => {
+          const isLast = i === kids.length - 1;
+          const kidCount = (c.children && c.children.length) || 0;
+          const hasKids = kidCount > 0;
+          const collapsed = this.collapsed.has(c.id);
+          // Show the one-sentence summary as a second line when present.
+          const reply_preview = c.summary || '';
+          this.flatTree.push({
+            ...c, depth: ancestors.length, ancestors: [...ancestors], isLast,
+            hasKids, kidCount, collapsed, reply_preview,
+          });
+          if (hasKids && (searching || !collapsed)) walk(c, [...ancestors, !isLast]);
+        });
+      };
+      walk(this.tree, []);
+      // The x-for re-render replaces each row's <i data-lucide> caret with a
+      // fresh placeholder; convert them back to SVG or the expand carets vanish.
+      this.refreshIcons();
+    },
+
+    // Inline tree-row rename: manual names lock the node against auto-titling;
+    // submitting an empty title clears the lock and restores the auto flow.
+    startRename(n) {
+      if (n.role !== 'user' && n.role !== 'assistant') return;
+      this.renamingId = n.id;
+      this.renameText = n.title || '';
+      this.$nextTick(() => {
+        const el = document.querySelector('.rename-input');
+        if (el) { el.focus(); el.select(); }
+      });
+    },
+
+    async submitRename(id) {
+      const title = this.renameText.trim();
+      this.renamingId = null;
+      const node = this.nodeById(id);
+      if (node && (node.title || '') === title) return;  // unchanged
+      try {
+        const resp = await fetch('/api/node/' + encodeURIComponent(id) + '/rename', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({title}),
+        });
+        if (!resp.ok) { toast('Rename failed: ' + (await this.errDetail(resp)), 'error'); return; }
+        await this.refreshTree();
+      } catch (e) {
+        toast('Rename failed: ' + e, 'error');
+      }
+    },
+
+    // ---- tree search (title + summary + preview; highlight + dim non-matches) ---
+
+    searchTokens() {
+      return this.search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    },
+
+    // Text a node is matched against: its title, one-line summary, and preview.
+    nodeSearchText(n) {
+      return ((n.title || '') + ' ' + (n.summary || '') + ' ' + (n.preview || '')).toLowerCase();
+    },
+
+    nodeMatches(n) {
+      return this.nodeMatchesTokens(n, this.searchTokens());
+    },
+
+    nodeMatchesTokens(n, toks) {
+      if (!toks.length) return false;
+      const hay = this.nodeSearchText(n);
+      return toks.every(t => hay.includes(t));  // multi-word AND
+    },
+
+    get searchSummary() {
+      const toks = this.searchTokens();
+      if (!toks.length) return '';
+      const hits = this.flatTree.filter(n => this.nodeMatches(n)).length;
+      return hits ? `${hits} match${hits === 1 ? '' : 'es'}` : 'no matches';
+    },
+
+    // Escape HTML then wrap each matched token in <mark>. Used via x-html, so
+    // escaping is mandatory to avoid injecting node text as markup.
+    highlight(text) {
+      return this.markText(text, this.searchTokens());
+    },
+
+    markText(text, toks) {
+      const esc = (s) => s.replace(/[&<>"']/g, c => (
+        {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const raw = text || '';
+      if (!toks.length) return esc(raw);
+      // Build one regex of all tokens (escaped), case-insensitive.
+      const pat = toks.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      let re;
+      try { re = new RegExp('(' + pat + ')', 'gi'); } catch (e) { return esc(raw); }
+      let out = '', last = 0, m;
+      while ((m = re.exec(raw)) !== null) {
+        out += esc(raw.slice(last, m.index)) + '<mark>' + esc(m[0]) + '</mark>';
+        last = m.index + m[0].length;
+        if (m.index === re.lastIndex) re.lastIndex++;  // guard zero-width
+      }
+      out += esc(raw.slice(last));
+      return out;
+    },
+
+    toggleCollapse(n) {
+      if (this.collapsed.has(n.id)) this.collapsed.delete(n.id);
+      else this.collapsed.add(n.id);
+      this.rebuildFlat();
+    },
+
+    collapseAll() {
+      // Collapse every node that has children.
+      const mark = (node) => {
+        (node.children || []).forEach(c => {
+          if (c.children && c.children.length) { this.collapsed.add(c.id); mark(c); }
+        });
+      };
+      mark(this.tree);
+      this.rebuildFlat();
+    },
+
+    expandAll() {
+      this.collapsed.clear();
+      this.rebuildFlat();
+    },
+
+    rowClass(n) {
+      const q = this.search.trim();
+      return {
+        ['role-' + n.role]: true,   // per-role text tint (user vs assistant)
+        selected: n.id === this.selectedId,
+        onpath: this.pathIds.has(n.id) && n.id !== this.selectedId,
+        notselectable: n.role !== 'assistant' && n.role !== 'user',
+        // While searching, dim rows that don't match and mark those that do.
+        'search-dim': !!q && !this.nodeMatches(n),
+        'search-hit': !!q && this.nodeMatches(n),
+      };
+    },
+    get pathIds() { return new Set(this.messages.map(m => m.id)); },
+
+    get sessionStats() {
+      const t = this.totals;
+      if (!t.turns) return '';
+      const rate = t.in > 0 ? Math.round(t.cache_read / t.in * 100) : 0;
+      return `session: ${t.turns} turns · in ${t.in} · out ${t.out} · cache hit ${rate}%`;
+    },
+
+    async select(id, scrollMode = 'bottom') {
+      // Streams keep running in the background regardless of which node is
+      // viewed; loadPath will render live content for any streamed row on the
+      // selected branch.
+      // Selecting a USER node with a reply behaves like clicking that reply:
+      // land on the assistant node (so the view shows the answer, and a
+      // follow-up forks from it). forkParentId resolves user → its latest reply.
+      // Default scroll lands at the END of the node's reply (conversation bottom).
+      const resolved = this.forkParentId(id);
+      this.selectedId = resolved;
+      this.drawerOpen = false;
+      await this.loadPath(resolved, scrollMode);
+      // Reveal the selection inside the default-collapsed tree: expand its
+      // ancestors (pathIds = the just-loaded path).
+      let changed = false;
+      for (const pid of this.pathIds) {
+        if (this.collapsed.delete(pid)) changed = true;
+      }
+      if (changed) this.rebuildFlat();
+    },
+
+    // Find a node anywhere in the tree by id (depth-first).
+    nodeById(id, node = null) {
+      const start = node || this.tree;
+      for (const c of (start.children || [])) {
+        if (c.id === id) return c;
+        const hit = this.nodeById(id, c);
+        if (hit) return hit;
+      }
+      return null;
+    },
+
+    // The effective parent for a new message. A user node is not itself a fork
+    // point for follow-ups: continue from its assistant reply instead. If the
+    // question has multiple replies, use the most recent (last) one. Falls back
+    // to the id itself (assistant node, or a user node with no reply yet).
+    forkParentId(id) {
+      if (!id) return id;
+      const node = this.nodeById(id);
+      if (node && node.role === 'user') {
+        const replies = (node.children || []).filter(c => c.role === 'assistant');
+        if (replies.length) return replies[replies.length - 1].id;
+      }
+      return id;
+    },
+    newTrunk() { this.selectedId = null; this.messages = []; },
+    forkFromHere(id) {
+      this.selectedId = id;
+      this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // ---- mind map overlay ------------------------------------------------
+
+    exportTree(id) {
+      // The server sets the filename via Content-Disposition.
+      const a = document.createElement('a');
+      a.href = '/api/export/' + encodeURIComponent(id);
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    },
+
+    openMindmap(id) {
+      const layout = this.layoutMindmap(id);
+      if (!layout) return;
+      const center = layout.nodes.find(n => n.isCenter);
+      this.mindmap = { open: true, rootId: id,
+                       centerTitle: (center && (center.q || center.a)) || '',
+                       ...layout };
+      this.mapView = { tx: 0, ty: 0, scale: 1 };
+      this.refreshIcons();
+      this.$nextTick(() => { this.centerOnNode(id, false); this.refreshIcons(); });
+    },
+
+    closeMindmap() { this.mindmap.open = false; },
+
+    // ---- gallery (all trunk conversations as cards) -----------------------
+
+    // One card per trunk: the root question plus its latest reply's gist —
+    // same content pairing as the mind-map cards.
+    get galleryItems() {
+      return (this.tree.children || []).map(t => {
+        const replies = (t.children || []).filter(c => c.role === 'assistant');
+        const reply = replies.length ? replies[replies.length - 1] : null;
+        return {
+          id: t.id,
+          replyId: reply ? reply.id : null,
+          node: t,  // full trunk node, for subtree search
+          q: t.title || t.preview || '(untitled)',
+          a: reply ? (reply.summary || reply.title || reply.preview || '') : '',
+        };
+      });
+    },
+
+    toggleGallery() {
+      this.galleryOpen = !this.galleryOpen;
+      if (this.galleryOpen) { this.drawerOpen = false; this.bookmarksOpen = false; }
+      this.refreshIcons();
+    },
+
+    closeGallery() { this.galleryOpen = false; this.gallerySearch = ''; },
+
+    // ---- gallery search: matching cards highlighted, the rest dimmed ----
+
+    gallerySearchTokens() {
+      return this.gallerySearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    },
+
+    galleryCardMatches(g) {
+      // Same rule as the sidebar search: a card matches if ANY node in its
+      // tree matches (title/summary/preview, multi-word AND) — a hit on a
+      // child node highlights the whole conversation card.
+      const toks = this.gallerySearchTokens();
+      if (!toks.length) return false;
+      const hit = (n) => this.nodeMatchesTokens(n, toks) ||
+                         (n.children || []).some(c => hit(c));
+      return g.node ? hit(g.node) : false;
+    },
+
+    galleryCardClass(g) {
+      if (!this.gallerySearchTokens().length) return {};
+      return this.galleryCardMatches(g) ? {'search-hit': true} : {'search-dim': true};
+    },
+
+    galleryHighlight(text) {
+      return this.markText(text, this.gallerySearchTokens());
+    },
+
+    get galleryCountText() {
+      const total = this.galleryItems.length;
+      const toks = this.gallerySearchTokens();
+      if (!toks.length) return total + ' conversations';
+      const hits = this.galleryItems.filter(g => this.galleryCardMatches(g)).length;
+      return `${hits} / ${total} conversations`;
+    },
+
+    async galleryDelete(g) {
+      await this.deleteNode({id: g.id, title: g.q});  // confirm + cascade + refresh
+      this.refreshIcons();
+    },
+
+    galleryDetail(g) {
+      this.galleryOpen = false;
+      this.select(g.id);
+    },
+
+    galleryMap(g) {
+      this.galleryOpen = false;
+      this.openMindmap(g.id);
+    },
+
+    // Tidy-tree layout of the clicked node's OWN tree: the top-level trunk
+    // that contains it (siblings, uncles, cousins included) — other trunks
+    // under the synthetic ROOT are separate trees and stay hidden. Leaves
+    // share the x axis in DFS order; each parent sits at the midpoint of its
+    // children. Cards are conversation TURNS (user + latest reply), built by
+    // buildPairTree.
+    layoutMindmap(rootId) {
+      const trunk = (this.tree.children || [])
+        .find(c => c.id === rootId || this.nodeById(rootId, c));
+      if (!trunk) return null;
+      const pairRoot = this.buildPairTree(trunk);
+      const NW = this.MAP_NW, NH = this.MAP_NH, GX = this.MAP_GX, GY = this.MAP_GY;
+      const nodes = [], edgePairs = [];
+      let cursor = 0;
+      const placeSubtree = (node, depth, emit) => {
+        const kids = node.children || [];
+        const childPos = kids.map(k => placeSubtree(k, depth + 1, true));
+        let x;
+        if (childPos.length) {
+          x = (childPos[0].x + childPos[childPos.length - 1].x) / 2;
+        } else {
+          x = cursor; cursor += NW + GX;
+        }
+        if (!emit) return { x };
+        const pos = { id: node.id, replyId: node.replyId, isPair: node.isPair,
+                      q: node.q, a: node.a, kidCount: kids.length,
+                      x, y: depth * (NH + GY),
+                      isCenter: node.id === rootId || node.replyId === rootId };
+        nodes.push(pos);
+        childPos.forEach(cp => edgePairs.push([pos, cp]));
+        return pos;
+      };
+      // Lay out the trunk subtree; the trunk itself gets the top-row card.
+      placeSubtree(pairRoot, 0, true);
+      if (!nodes.length) return null;
+      // Normalize so the bounding box's top-left sits at (PAD, PAD).
+      const PAD = 60;
+      const minX = Math.min(...nodes.map(n => n.x)) - PAD;
+      const minY = Math.min(...nodes.map(n => n.y)) - PAD;
+      nodes.forEach(n => { n.x -= minX; n.y -= minY; });
+      const w = Math.max(...nodes.map(n => n.x + NW)) + PAD;
+      const h = Math.max(...nodes.map(n => n.y + NH)) + PAD;
+      // Edges are merged into a single path string so the SVG needs no
+      // per-edge template loop.
+      const edgesD = edgePairs.map(([a, b]) => this._mapEdgeD(a, b)).join(' ');
+      return { nodes, edgesD, w, h };
+    },
+
+    // Merge each turn (a user node + its latest assistant reply) into one
+    // card node for the mind map. Extra replies beside the chosen one (rare)
+    // become assistant-only cards so no branch information is lost.
+    buildPairTree(node) {
+      if (node.role === 'user') {
+        const kids = node.children || [];
+        const replies = kids.filter(c => c.role === 'assistant');
+        const reply = replies.length ? replies[replies.length - 1] : null;
+        const children = [];
+        if (reply) {
+          for (const c of (reply.children || [])) children.push(this.buildPairTree(c));
+        }
+        for (const c of replies.slice(0, -1)) children.push(this.buildPairTree(c));
+        return {
+          id: node.id,
+          replyId: reply ? reply.id : null,
+          isPair: true,
+          q: node.title || node.preview || '(untitled)',
+          a: reply ? (reply.summary || reply.title || reply.reply_preview || reply.preview || '') : '',
+          children,
+        };
+      }
+      // Unpaired assistant card (an extra reply beside the chosen one).
+      return {
+        id: node.id,
+        replyId: node.id,
+        isPair: false,
+        q: '',
+        a: node.summary || node.title || node.reply_preview || node.preview || '(empty)',
+        children: (node.children || []).map(c => this.buildPairTree(c)),
+      };
+    },
+
+    // Vertical S-curve between two laid-out cards (works in both directions).
+    _mapEdgeD(a, b) {
+      const NW = this.MAP_NW, NH = this.MAP_NH;
+      const x1 = a.x + NW / 2, y1 = a.y + (a.y <= b.y ? NH : 0);
+      const x2 = b.x + NW / 2, y2 = b.y + (a.y <= b.y ? 0 : NH);
+      const my = (y1 + y2) / 2;
+      return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
+    },
+
+    // Pan the canvas so a node lands in the viewport center. Only the view
+    // transform changes — the layout (and sibling positions) is untouched.
+    centerOnNode(id, animate = true) {
+      // Cards are keyed by user id; an assistant id matches via its replyId.
+      const n = this.mindmap.nodes.find(m => m.id === id || m.replyId === id);
+      const cv = this.$refs.mapCanvas;
+      if (!n || !cv) return;
+      this.mapAnim = animate;
+      const s = this.mapView.scale;
+      this.mapView.tx = cv.clientWidth / 2 - (n.x + this.MAP_NW / 2) * s;
+      this.mapView.ty = cv.clientHeight / 2 - (n.y + this.MAP_NH / 2) * s;
+      if (animate) setTimeout(() => { this.mapAnim = false; }, 350);
+    },
+
+    mapNodeClick(mn) {
+      // A drag ending on a node shouldn't recenter — treat it as panning.
+      if (this._mapSuppressClick) { this._mapSuppressClick = false; return; }
+      this.centerOnNode(mn.id, true);
+    },
+
+    mapShowDetail(id) {
+      this.mindmap.open = false;
+      this.select(id);
+    },
+
+    // Direct parent of a node within its trunk, or null when the node is the
+    // trunk root (its parent is the synthetic ROOT, which has no card).
+    mapParentId(id) {
+      const find = (node) => {
+        for (const c of (node.children || [])) {
+          if (c.id === id) return node;
+          const hit = find(c);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      for (const top of (this.tree.children || [])) {
+        if (top.id === id) return null;
+        const p = find(top);
+        if (p) return p.id;
+      }
+      return null;
+    },
+
+    // Delete a node (and its subtree) from inside the mind map. Reuses the
+    // tree panel's deleteNode (confirm dialog, selection reset, tree refresh).
+    // Afterwards the view re-centers on the deleted node's parent; if the
+    // node had no parent (it was the trunk root), the map closes and the user
+    // is back at the conversation.
+    async mapDeleteNode(mn) {
+      const parentId = this.mapParentId(mn.id);
+      await this.deleteNode(mn);
+      if (!this.mindmap.open) return;
+      if (this.nodeById(mn.id)) return;              // user cancelled the confirm
+      if (!parentId) {                               // trunk root deleted → back to chat
+        this.mindmap.open = false;
+        return;
+      }
+      // Re-layout around the surviving center node if it is still on the tree,
+      // otherwise around the parent (same trunk either way).
+      const anchor = this.nodeById(this.mindmap.rootId) ? this.mindmap.rootId : parentId;
+      const layout = this.layoutMindmap(anchor);
+      if (!layout) { this.mindmap.open = false; return; }
+      const center = layout.nodes.find(n => n.isCenter);
+      this.mindmap = { open: true, rootId: anchor,
+                       centerTitle: (center && (center.q || center.a)) || '',
+                       ...layout };
+      // The tree parent is the previous turn's assistant node; its card is
+      // keyed by the user id, so match via replyId.
+      const target = layout.nodes.find(n => n.replyId === parentId || n.id === parentId);
+      this.$nextTick(() => { if (target) this.centerOnNode(target.id, true); this.refreshIcons(); });
+    },
+
+    // Drag anywhere on the canvas to pan; under ~4px of movement the gesture
+    // counts as a click, not a pan.
+    mapPointerDown(e) {
+      if (e.button !== 0) return;
+      const sx = e.clientX, sy = e.clientY, tx0 = this.mapView.tx, ty0 = this.mapView.ty;
+      let moved = false;
+      const move = (ev) => {
+        if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) <= 4) return;
+        moved = true;
+        this.mapDragging = true;
+        this.mapView.tx = tx0 + (ev.clientX - sx);
+        this.mapView.ty = ty0 + (ev.clientY - sy);
+      };
+      const up = () => {
+        this.mapDragging = false;
+        this._mapSuppressClick = moved;
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    },
+
+    // Zoom around the pointer position, clamped to [0.4, 2].
+    mapWheel(e) {
+      const s0 = this.mapView.scale;
+      const s1 = Math.min(2, Math.max(0.4, s0 * (e.deltaY < 0 ? 1.1 : 0.9)));
+      if (s1 === s0) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const px = e.clientX - rect.left, py = e.clientY - rect.top;
+      const wx = (px - this.mapView.tx) / s0, wy = (py - this.mapView.ty) / s0;
+      this.mapView.tx = px - wx * s1;
+      this.mapView.ty = py - wy * s1;
+      this.mapView.scale = s1;
+    },
+
+    // Regenerate the reply to a user message: the server deletes all assistant
+    // subtrees under it and starts a fresh turn from the same question.
+    // Retry = delete the whole turn (question subtree included) and put the
+    // question back in the composer for editing; the user re-sends manually.
+    async retryUserNode(userId) {
+      if (this.streamKeyFor(userId)) return;  // still generating (button hidden)
+      let detail;
+      try {
+        const resp = await fetch('/api/node/' + encodeURIComponent(userId));
+        if (!resp.ok) throw new Error(await this.errDetail(resp));
+        detail = await resp.json();
+        const del = await fetch('/api/delete/' + encodeURIComponent(userId), {method: 'POST'});
+        if (!del.ok) throw new Error(await this.errDetail(del));
+      } catch (e) {
+        toast('Retry failed: ' + (e && e.message ? e.message : e), 'error');
+        return;
+      }
+      // Restore the original typed text (strip the attachment block prepended
+      // at send time) and rebuild ready attachment chips.
+      this.draft = this._stripAttachmentPreamble(detail.content || '');
+      const atts = (detail.metadata && detail.metadata.attachments) || [];
+      this.attachments = atts.map(a => ({
+        uid: 'att-' + (++this._attachSeq),
+        filename: a.filename, path: a.path, mime: a.mime || '', size: 0,
+        status: 'ready',
+        kind: String(a.mime || '').startsWith('image/') ? 'image' : 'file',
+      }));
+      this.refreshIcons();
+      // Fork from the deleted node's parent so the re-sent turn lands exactly
+      // where the old one was (parent null = new trunk).
+      this.selectedId = detail.parent_id || null;
+      await this.refreshTree();
+      await this.loadPath(this.selectedId, 'bottom');
+      this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // Remove the machine-facing attachment block we prepend at send time.
+    _stripAttachmentPreamble(content) {
+      if (!content) return '';
+      let text = content;
+      if (text.startsWith('Attached image(s)')) {
+        const nl = text.indexOf('\n');
+        text = nl === -1 ? '' : text.slice(nl + 1).replace(/^\s+/, '');
+      }
+      if (text.startsWith('Attached file(s)')) {
+        const lines = text.split('\n');
+        let i = 1;
+        while (i < lines.length && lines[i].startsWith('- ')) i++;
+        text = lines.slice(i).join('\n');
+      }
+      return text.replace(/^\s+/, '');
+    },
+
+    async deleteNode(n) {
+      const label = (n.title || n.preview || n.q || n.a || n.id).slice(0, 40);
+      if (!confirm(`Delete node #${n.id.slice(0,6)} "${label}" and ALL its children?`)) return;
+      let resp;
+      try {
+        resp = await fetch('/api/delete/' + encodeURIComponent(n.id), {method: 'POST'});
+      } catch (e) {
+        toast('Delete failed: ' + (e && e.message ? e.message : e), 'error');
+        return;
+      }
+      if (!resp.ok) {
+        toast('Delete failed: ' + (await this.errDetail(resp)), 'error');
+        return;
+      }
+      // if the deleted subtree contained the current selection, reset the view
+      if (this.selectedId && (this.selectedId === n.id || this.pathIds.has(n.id))) {
+        this.selectedId = null;
+        this.messages = [];
+      }
+      await this.refreshTree();
+      toast('Node deleted', 'success');
+      // if the current selection no longer exists after refresh, clear it
+      if (this.selectedId && !this.flatTree.some(x => x.id === this.selectedId)) {
+        this.selectedId = null;
+        this.messages = [];
+      }
+    },
+
+    async loadPath(id, scrollMode = 'top') {
+      if (!id) { this.messages = []; return; }
+      const data = await (await fetch('/api/path/' + id)).json();
+      this.messages = data.messages;
+      this.refreshIcons();
+      // 'top'    : land at the start of the selected node (clicking to read it).
+      // 'bottom' : jump to the end (e.g. after sending, to watch the answer).
+      if (scrollMode === 'bottom') {
+        this.$nextTick(() => this.scrollToBottomNow());
+      } else {
+        this.$nextTick(() => this.scrollNodeToTop(id));
+      }
+    },
+
+    scrollNodeToTop(id) {
+      // Bring the selected node's heading to the top of the conversation pane.
+      // The user is reading from its start, not following streamed output.
+      this.stickToBottom = false;
+      const el = document.getElementById('messages');
+      const target = document.getElementById('msg-' + id);
+      if (!el || !target) return;
+      const align = () => {
+        // Position-agnostic: offset target relative to the scroll container.
+        el.scrollTop = target.offsetTop - el.offsetTop;
+      };
+      align();
+      // Markdown + KaTeX render asynchronously and change earlier nodes' heights,
+      // which shifts the target. Re-align on the next frames so the final
+      // resting position is correct.
+      requestAnimationFrame(align);
+      setTimeout(align, 120);
+    },
+
+    scrollDown() {
+      // Only follow new content if the user is already parked at the bottom.
+      // If they scrolled up to read, leave their viewport untouched.
+      if (!this.stickToBottom) return;
+      const el = document.getElementById('messages');
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+
+    scrollToBottomNow() {
+      // Unconditional scroll, used when the user themselves triggers a view
+      // change (sending a message, selecting a node).
+      this.stickToBottom = true;
+      const el = document.getElementById('messages');
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+
+    onScroll() {
+      const el = document.getElementById('messages');
+      if (!el) return;
+      // Within ~40px of the bottom counts as "at bottom" (tolerates rounding
+      // and the last line's padding).
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      this.stickToBottom = atBottom;
+    },
+
+    async send() {
+      const typed = this.draft.trim();
+      // Ready (successfully uploaded) attachments for this turn.
+      const ready = this.attachments.filter(a => a.status === 'ready' && a.path);
+      if (this.attachments.some(a => a.status === 'uploading')) return;  // wait for uploads
+      if (!typed && !ready.length) return;
+      // Resolve the fork point. If a USER node is selected, a follow-up should
+      // continue from that question's assistant reply — not re-fork the question
+      // — so redirect the parent to the user node's assistant child.
+      const parentId = this.forkParentId(this.selectedId);
+      // Concurrent sends are allowed, even from the same fork point — siblings
+      // are natural in a tree structure. Each stream runs independently.
+
+      // Compose the message: prepend an attachment block that points the model
+      // at the uploaded files by their server-side path (web_fetch reads them,
+      // incl. PDF text extraction). The block is part of the persisted message.
+      // Images are NOT in that block — they travel as inline vision parts.
+      let content = typed;
+      const files = ready.filter(a => a.kind !== 'image');
+      const images = ready.filter(a => a.kind === 'image');
+      if (files.length) {
+        // Markdown link: the UI bubble renders it clickable (new tab), while
+        // the model still gets the exact server-side path for web_fetch.
+        const lines = files.map(a =>
+          `- [${a.filename}](/api/files/${encodeURIComponent(a.filename)}): ${a.path}`).join('\n');
+        const preamble =
+          `Attached file(s) — read them with web_fetch using the exact path shown, ` +
+          `then answer:\n${lines}`;
+        content = typed ? `${preamble}\n\n${typed}` : preamble;
+      }
+      if (images.length) {
+        const names = images.map(a => a.filename).join(', ');
+        const note = `Attached image(s) are provided inline in this message: ${names}`;
+        content = content ? `${note}\n\n${content}` : note;
+      }
+      this.draft = '';
+      this.attachments = [];
+
+      // Per-stream state. Keyed by a temp id until the real assistant id arrives.
+      const tempKey = 'temp-' + (++this._tmpSeq);
+      let st = {
+        userId: null, parentId, content,
+        // Raw composer state for this turn, so a stop can restore it for editing.
+        typed, attachments: ready.slice(),
+        text: '', reasoning: '', tools: [], stats: '', ctx: '',
+        usage: null, abortCtrl: new AbortController(), stopped: false,
+        tempKey, assistantId: null, pendId: tempKey + '-user',
+        evIndex: 0,   // count of SSE events consumed, for reconnect offset
+      };
+      this.streams = {...this.streams, [tempKey]: st};
+      // Rebind to Alpine's reactive proxy: the object above is raw, and per-delta
+      // mutations (st.text += …) on the raw ref bypass the reactive set-trap, so
+      // the streaming bubble wouldn't re-render until the turn settled. Mutating
+      // the proxy instead makes each delta paint live.
+      st = this.streams[tempKey];
+
+      // This turn is being sent from the currently-viewed branch, so show the
+      // user's message immediately. (If the user navigates away, the row simply
+      // won't be in `messages` and we skip view updates for this stream.)
+      const pendId = st.pendId;
+      this.messages.push({id: pendId, role: 'user', content,
+                          attachments: ready.map(a => ({filename: a.filename, path: a.path, mime: a.mime}))});
+      this.stickToBottom = true;
+      this.refreshIcons();
+      this.$nextTick(() => this.scrollToBottomNow());
+
+      // Does this stream's turn currently live in the viewed branch?
+      const onView = () =>
+        this.messages.some(m => m.id === pendId || m.id === st.userId || m.id === st.assistantId);
+
+      let resp;
+      try {
+        resp = await fetch('/api/send', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            content, parent_id: parentId,
+            attachments: ready.map(a => ({filename: a.filename, path: a.path, mime: a.mime})),
+          }),
+          signal: st.abortCtrl.signal,
+        });
+      } catch (e) {
+        if (st.stopped || (e && e.name === 'AbortError')) {
+          await this.discardStream(st.assistantId || tempKey);
+          return;
+        }
+        // Network-level failure: the turn never started. Restore the composer
+        // and drop the pending row instead of leaving a hung spinner.
+        toast('Send failed: ' + (e && e.message ? e.message : e), 'error');
+        this.failSend(st);
+        return;
+      }
+      if (!resp.ok) {
+        // HTTP error (e.g. 400): the body is JSON, not SSE — handle it here
+        // instead of feeding it to consumeStream, which would silently hang.
+        if (st.stopped) { await this.discardStream(tempKey); return; }
+        toast('Send failed: ' + (await this.errDetail(resp)), 'error');
+        this.failSend(st);
+        return;
+      }
+      await this.consumeStream(resp, st, onView);
+    },
+
+    // Best-effort extraction of FastAPI's {"detail": …} error body.
+    async errDetail(resp) {
+      try {
+        const d = await resp.json();
+        if (d && d.detail) return typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail);
+      } catch (e) { /* fall through */ }
+      return 'HTTP ' + resp.status;
+    },
+
+    // A send that never reached the model: drop the pending row + stream entry
+    // and put the text/attachments back in the composer (unless the user has
+    // already typed something new).
+    failSend(st) {
+      const s = {...this.streams};
+      if (st.tempKey) delete s[st.tempKey];
+      if (st.assistantId) delete s[st.assistantId];
+      this.streams = s;
+      // The pending row may already carry the real user id (renamed on the
+      // user_node event), so drop by both ids.
+      const drop = new Set([st.pendId, st.userId, st.assistantId]);
+      this.messages = this.messages.filter(m => !drop.has(m.id));
+      if (st.userId) {
+        // The user node reached the server before the connection died.
+        fetch('/api/delete/' + encodeURIComponent(st.userId), {method: 'POST'})
+          .then(() => this.refreshTree()).catch(() => {});
+      }
+      if (!this.draft.trim() && st.typed) {
+        this.draft = st.typed;
+        const atts = st.attachments || [];
+        if (atts.length) this.attachments = [...this.attachments, ...atts];
+        this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+      }
+    },
+
+    // Read an SSE response for one stream, updating state/messages. Shared by
+    // the initial send() and reconnect() after a refresh. `st.evIndex` tracks
+    // how many events have been consumed so a reconnect resumes at the offset.
+    async consumeStream(resp, st, onView) {
+      const tempKey = st.tempKey;
+      let assistantId = st.assistantId;
+      let errored = null;
+      let gone = false;
+      try {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, {stream: true});
+          const parts = buf.split('\n\n');
+          buf = parts.pop();
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith('data:')) continue;
+            const evt = JSON.parse(line.slice(5).trim());
+            // `end` is a stream-close marker, not a turn event; don't count it.
+            if (evt.type === 'end') continue;
+            // `gone`: server has no live buffer for this id (finished + reaped).
+            if (evt.type === 'gone') { gone = true; continue; }
+            st.evIndex = (st.evIndex || 0) + 1;
+            if (evt.type === 'user_node') {
+              st.userId = evt.id;
+              const pend = this.messages.find(m => m.id === st.pendId);
+              if (pend) pend.id = evt.id;
+              this.scheduleTreeRefresh();
+            } else if (evt.type === 'assistant_node') {
+              assistantId = evt.id;
+              st.assistantId = evt.id;
+              // Re-key the stream from tempKey to the real assistant id.
+              if (tempKey && this.streams[tempKey]) {
+                const s = {...this.streams};
+                delete s[tempKey];
+                s[evt.id] = st;
+                st.tempKey = null;
+                this.streams = s;
+              }
+              // Append a placeholder row if this branch is being viewed.
+              if (this.messages.some(m => m.id === st.userId) &&
+                  !this.messages.some(m => m.id === evt.id)) {
+                this.messages.push({id: evt.id, role: 'assistant', content: ''});
+                this.$nextTick(() => { if (onView()) this.scrollDown(); });
+              }
+              this.scheduleTreeRefresh();
+            } else if (evt.type === 'assistant_start') {
+              this.scheduleTreeRefresh();
+              this.handleEvent(evt, st, onView);
+            } else {
+              this.handleEvent(evt, st, onView);
+            }
+            if (evt.type === 'done' || evt.type === 'error') assistantId = evt.id;
+          }
+        }
+      } catch (e) {
+        if (st.stopped || (e && e.name === 'AbortError')) {
+          // interrupted by the user — discard this turn entirely
+          await this.discardStream(st.assistantId || tempKey);
+          return;
+        }
+        errored = e;
+      }
+
+      // If the connection dropped (clean EOF or read error) before the turn
+      // settled — no done/error consumed and no `gone` — the reply is still
+      // being generated on the server. Auto-resume from the last consumed
+      // event instead of leaving a frozen spinner.
+      const finished = st._sawDone || gone;
+      if (!finished) {
+        if (!st.stopped) this.scheduleResume(st, onView);
+        return;
+      }
+
+      // Capture the streamed result, then settle the placeholder row in place
+      // (wherever it currently lives, if the branch is viewed) and drop the
+      // live stream so rows render their own persisted content.
+      const streamedText = st.text;
+      const streamedTools = st.tools.map(t => ({
+        name: t.name, arguments: t.arguments, ok: t.ok,
+        error: t.error, output: t.output, duration_ms: t.duration_ms,
+        images: t.images || 0,
+      }));
+      const streamedUsage = st.usage;
+
+      if (assistantId) {
+        const row = this.messages.find(m => m.id === assistantId);
+        if (row) {
+          if (streamedText) {
+            row.content = streamedText;
+            row.tool_results = streamedTools;
+            row.usage = streamedUsage;
+          }
+          // Persisted reasoning renders collapsed; carry the live text over.
+          if (st.reasoning) row.reasoning = st.reasoning;
+          this.$nextTick(() => { if (onView()) this.scrollDown(); });
+        }
+      }
+
+      // Remove this stream (whichever key it ended up under).
+      const key = st.assistantId || tempKey;
+      const s2 = {...this.streams};
+      delete s2[key];
+      this.streams = s2;
+
+      if (errored) this.status = 'error: ' + errored;
+      await this.refreshTree();
+
+      // Stay on the current node (no auto-jump): the user asked here and may
+      // want to move on to another branch. Auto-title in the background.
+      if (assistantId && this.config.auto_title && !gone) {
+        this.autoTitle(assistantId);
+      }
+    },
+
+    async autoTitle(nodeId) {
+      try {
+        const resp = await fetch('/api/title/' + encodeURIComponent(nodeId), {method: 'POST'});
+        const data = await resp.json();
+        if (data && data.ok && data.title) {
+          // A new title was set — refresh the tree so the left-pane label shows it.
+          await this.refreshTree();
+        }
+      } catch (e) { /* titling is best-effort; ignore */ }
+    },
+
+    // Reconnect a dropped SSE connection, resuming at the last consumed event
+    // (st.evIndex). Exponential backoff; after several failures surface a
+    // manual retry on the message row (st.resumeFailed).
+    scheduleResume(st, onView) {
+      if (st.stopped) return;
+      if (!st.assistantId) {
+        // The connection died before the reply node existed — nothing to
+        // resume against. Fail the turn loudly instead of hanging forever.
+        toast('Connection lost before the reply started.', 'error');
+        this.failSend(st);
+        return;
+      }
+      st.retries = (st.retries || 0) + 1;
+      if (st.retries > 5) {
+        st.resumeFailed = true;
+        return;
+      }
+      const delay = Math.min(1000 * 2 ** (st.retries - 1), 15000);
+      clearTimeout(st._resumeTimer);
+      st._resumeTimer = setTimeout(() => this.resumeStream(st, onView), delay);
+    },
+
+    async resumeStream(st, onView) {
+      const key = st.assistantId;
+      if (!key || st.stopped || !this.streams[key]) return;
+      let resp;
+      try {
+        resp = await fetch('/api/stream/' + encodeURIComponent(key) + '?from_index=' + (st.evIndex || 0),
+                           {signal: st.abortCtrl.signal});
+      } catch (e) {
+        if (st.stopped || (e && e.name === 'AbortError')) return;
+        this.scheduleResume(st, onView);
+        return;
+      }
+      if (!resp.ok) { this.scheduleResume(st, onView); return; }
+      await this.consumeStream(resp, st, onView);
+    },
+
+    // Manual retry after auto-resume gave up (row-level "retry" button).
+    retryResume(key) {
+      const st = this.streams[key];
+      if (!st) return;
+      st.retries = 0;
+      st.resumeFailed = false;
+      const onView = () => this.messages.some(m => m.id === key || m.id === st.userId);
+      this.resumeStream(st, onView);
+    },
+
+    // The streams key whose turn owns a given message row: the assistant id
+    // once known, or the pending/real user id while the reply is starting.
+    // Lets the stop button appear before the assistant node exists.
+    streamKeyFor(mId) {
+      if (this.streams[mId]) return mId;
+      for (const k in this.streams) {
+        const s = this.streams[k];
+        if (s.pendId === mId || (s.userId && s.userId === mId)) return k;
+      }
+      return null;
+    },
+
+    stopStream(id) {
+      const st = this.streams[id];
+      if (!st) return;
+      st.stopped = true;
+      clearTimeout(st._resumeTimer);
+      // Tell the server to halt background generation (it runs detached from
+      // this connection), then abort the local SSE read.
+      if (st.assistantId) {
+        fetch('/api/stop/' + encodeURIComponent(st.assistantId), {method: 'POST'}).catch(() => {});
+      }
+      if (st.abortCtrl) st.abortCtrl.abort();
+    },
+
+    async discardStream(id) {
+      // Abort path for one stream: delete its server-side user subtree (the
+      // assistant node + folded tool results live under it) and drop its rows.
+      const st = this.streams[id];
+      const userId = st ? st.userId : null;
+      const assistantId = st ? st.assistantId : null;
+      const tempKey = st ? st.tempKey : null;
+      const pendId = st ? st.pendId : null;
+      // When the user explicitly stopped, put their message back in the composer
+      // for re-editing (raw typed text + any attachments), unless they've since
+      // started typing something new.
+      const restore = st && st.stopped;
+      const typed = st ? (st.typed || '') : '';
+      const atts = st && st.attachments ? st.attachments : [];
+      if (userId) {
+        try { await fetch('/api/delete/' + userId, {method: 'POST'}); } catch (e) {}
+      }
+      const drop = new Set([userId, assistantId, pendId]);
+      this.messages = this.messages.filter(m => !drop.has(m.id));
+      const s = {...this.streams};
+      delete s[id];
+      if (tempKey) delete s[tempKey];
+      this.streams = s;
+      if (restore && !this.draft.trim()) {
+        this.draft = typed;
+        if (atts.length) this.attachments = [...this.attachments, ...atts];
+        this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+        this.refreshIcons();
+      }
+      await this.refreshTree();
+    },
+
+    handleEvent(evt, st, onView) {
+      // Coalesce scroll-follow to at most one per animation frame: a burst of
+      // deltas would otherwise trigger a forced layout (scrollHeight read)
+      // per token.
+      const follow = () => {
+        if (st._followPending) return;
+        st._followPending = true;
+        requestAnimationFrame(() => {
+          st._followPending = false;
+          if (onView && onView()) this.scrollDown();
+        });
+      };
+      // Any concrete progress (reasoning/text/tool/finish) ends the "planning"
+      // indicator; a fresh `planning` event re-arms it for the next round.
+      if (['reasoning', 'delta', 'tool_call', 'tool_result', 'tool_skipped', 'done', 'error', 'reset'].includes(evt.type)) {
+        st.planning = false;
+      }
+      switch (evt.type) {
+        case 'reset':
+          // The upstream stream was truncated; the server is regenerating the
+          // reply from scratch — drop the partial text and re-render.
+          st.text = '';
+          st.reasoning = '';
+          break;
+        case 'assistant_start':
+          st.ctx = '· ' + evt.context.messages + ' msgs ~' + evt.context.estimated_tokens + ' tok';
+          this.refreshIcons();
+          break;
+        case 'planning':
+          st.planning = true;
+          this.refreshIcons();
+          follow();
+          break;
+        case 'reasoning':
+          st.reasoning += evt.text;
+          follow();
+          break;
+        case 'delta':
+          st.text += evt.text;
+          follow();
+          break;
+        case 'tool_call':
+          st.tools.push({
+            name: evt.name, arguments: evt.arguments,
+            ok: null, output: '', error: '', running: true,
+          });
+          this.refreshIcons();
+          follow();
+          break;
+        case 'tool_result': {
+          // match the most recent running call with the same name
+          let rec = null;
+          for (let i = st.tools.length - 1; i >= 0; i--) {
+            if (st.tools[i].running && st.tools[i].name === evt.name) { rec = st.tools[i]; break; }
+          }
+          if (!rec) { rec = {name: evt.name, arguments: evt.arguments}; st.tools.push(rec); }
+          rec.running = false; rec.ok = evt.ok; rec.output = evt.output || '';
+          rec.error = evt.error || ''; rec.duration_ms = evt.duration_ms;
+          rec.images = evt.images || 0;
+          follow();
+          break;
+        }
+        case 'tool_skipped':
+          break;
+        case 'done':
+          st._sawDone = true;
+          // The server sends the scrubbed final text (tool-call markup etc.
+          // removed) — swap it in so the settled view matches the persisted one.
+          if (typeof evt.content === 'string') st.text = evt.content;
+          st.stats = evt.stats;
+          st.usage = evt.usage || null;
+          // Count session totals once per turn (guard against replay on reconnect).
+          if (evt.usage && !st._counted) {
+            st._counted = true;
+            this.totals.turns += 1;
+            this.totals.in += evt.usage.input || 0;
+            this.totals.out += evt.usage.output || 0;
+            this.totals.cache_read += evt.usage.cache_read || 0;
+            this.totals.cache_creation += evt.usage.cache_creation || 0;
+          }
+          break;
+        case 'error':
+          st._sawDone = true;
+          st.text += '\n\n[error: ' + evt.message + ']';
+          break;
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>
