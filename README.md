@@ -8,21 +8,41 @@ Ask a question at any point, fork the conversation, and come back to a mind
 map of where you've been.
 
 It's built for paper/blog reading, math/proof discussion, and algorithm idea
-exploration — workflows that a linear chat UI handles poorly:
+exploration — workflows that have:
 
 - **Natural mind map.** Your conversation is already a tree, so you get a
-  visual overview of your reading for free.
-- **Context pollution.** Later turns can derail the context; jump back to any
-  earlier definition, claim, or answer instead of scrolling and re-explaining.
+visual overview of your reading for free.
+- **No Context pollution.** Later turns can derail the context; jump back to any
+earlier definition, claim, or answer instead of scrolling and re-explaining.
 - **Fork from anywhere.** Any message can be a fork point — ask a side
-  question about a single sentence without touching the main-line context.
+question about a single sentence without touching the main-line context.
 - **Cheaper context.** Forking reuses the shared prefix instead of repeating
-  it, saving context length (and staying cache-friendly).
+it, saving context length (and staying cache-friendly).
 - **Private by default.** It runs against your own LLM API key and stores
-  everything on your local filesystem — nothing is uploaded to any
-  third-party service.
+everything on your local filesystem — nothing is uploaded to any
+third-party service.
+- **Configurable in the browser.** Model, base URL, and API key can be
+switched from the settings panel without restarting, and the UI appearance
+(theme color, font size) is adjustable too.
+- **Bookmarks / read-it-later.** Save URLs (blogs, papers, articles) in the
+bookmark sidebar; the server fetches a title and summary, and you can start
+a chat from any bookmark to discuss it with the model.
 
-![screenshot](docs/screenshot.png)
+
+
+## Screenshots
+
+**Start screen** — pick a suggested prompt or ask anything to open a new trunk.
+
+![Start screen](image/开始界面.png)
+
+**Tree + chat** — the conversation tree on the left; click any assistant node to fork a new branch from it.
+
+![Chat view](image/chat页面.png)
+
+**Mind map** — the whole conversation tree as an interactive map.
+
+![Mind map](image/mindmap.png)
 
 ## Installation
 
@@ -31,6 +51,8 @@ Requires Python 3.10+.
 ```bash
 pip install -e .
 ```
+
+
 
 ## Usage
 
@@ -42,13 +64,15 @@ DEEPSEEK_API_KEY=sk-... chatable-web
 ```
 
 - Click an assistant node in the tree pane to fork the conversation from that
-  point.
+point.
 - Conversation state is persisted as JSONL under `~/.chatable`; pass
-  `--data-dir <path>` to keep history in a specific folder.
+`--data-dir <path>` to keep history in a specific folder.
 - Common overrides via environment variables: `DEEPSEEK_BASE_URL`,
-  `DEEPSEEK_MODEL`, `TAVILY_API_KEY` (web search), `CHATTABLE_WEB_HOST` /
-  `CHATTABLE_WEB_PORT` (bind address), and more — the in-app settings panel
-  covers model, base URL, API key, and storage folder.
+`DEEPSEEK_MODEL`, `TAVILY_API_KEY` (web search), `CHATTABLE_WEB_HOST` /
+`CHATTABLE_WEB_PORT` (bind address), and more — the in-app settings panel
+covers model, base URL, API key, and storage folder.
+
+
 
 ## License
 
