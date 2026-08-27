@@ -30,6 +30,9 @@ import threading
 import time
 from typing import Any, Iterator, Optional
 
+import httpx
+from openai import APIConnectionError
+
 import main
 from main import build_context, call_backend, extract_text, extract_tool_calls, extract_usage, stream_backend
 from models import Node
@@ -52,6 +55,15 @@ AUTO_TITLE_ENABLED = os.environ.get("CHATTABLE_AUTO_TITLE", "1").lower() not in 
 # Vision: attach images as inline data URLs to the current turn's user message.
 # Disable if the backend rejects image inputs.
 VISION_ENABLED = os.environ.get("CHATTABLE_VISION", "1").lower() not in ("0", "false", "no")
+
+# Transient mid-stream failures worth one automatic retry: a cleanly-ended but
+# truncated stream, or the upstream/middlebox dropping the connection
+# mid-response. Partial text already emitted is discarded via `reset`, so
+# retrying is safe.
+# Looked up dynamically because tests importlib.reload(main), which re-creates
+# StreamTruncatedError — a module-level tuple would go stale.
+def _is_transient_stream_error(e: Exception) -> bool:
+    return isinstance(e, (main.StreamTruncatedError, httpx.RemoteProtocolError, APIConnectionError))
 # Replay past turns' tool exchanges as native OpenAI tool messages (instead of
 # folded system text) so the next turn's request shares a byte-identical prefix
 # with the previous turn's — the whole investigation stays cache-hittable.
@@ -1158,9 +1170,10 @@ class ChatService:
             )
             tools = TOOL_REGISTRY.openai_tools() if allow_tools else None
 
-            # One stream iteration, with a single retry on silent upstream
-            # truncation (clients drop partial text on `reset`; the done
-            # event's final content self-heals the live view).
+            # One stream iteration, with a single retry on transient upstream
+            # failures (truncated stream or dropped connection; clients drop
+            # partial text on `reset`, the done event's final content
+            # self-heals the live view).
             text_parts: list[str] = []
             iter_calls: list[dict] = []
             iter_reasoning: list[str] = []
@@ -1196,7 +1209,7 @@ class ChatService:
                         emit({"type": "delta", "text": tail})
                     break
                 except Exception as e:  # noqa: BLE001 - surface stream failures on the node
-                    if isinstance(e, main.StreamTruncatedError) and attempt == 1:
+                    if _is_transient_stream_error(e) and attempt == 1:
                         continue
                     err = f"{type(e).__name__}: {e}"
                     self.store.append_content(assistant_node.id, f"[error: {err}]")
@@ -1448,7 +1461,7 @@ class ChatService:
                         if safe:
                             emit({"type": "delta", "text": safe})
             except Exception as e:  # noqa: BLE001 - surface stream failures on the node
-                if isinstance(e, main.StreamTruncatedError) and attempt == 1:
+                if _is_transient_stream_error(e) and attempt == 1:
                     continue
                 err = f"{type(e).__name__}: {e}"
                 self.store.append_content(assistant_node.id, f"[error: {err}]")

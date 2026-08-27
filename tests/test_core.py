@@ -681,6 +681,24 @@ class GenerateRetryTests(unittest.TestCase):
         self.assertEqual(res["content"], "full answer")
         self.assertEqual(len(calls), 2)
 
+    def test_dropped_connection_regenerates(self):
+        import httpx
+
+        calls = []
+
+        def fake_stream(messages, tools=None):
+            calls.append(messages)
+            if len(calls) == 1:
+                yield ("delta", "partial")
+                raise httpx.RemoteProtocolError("peer closed connection")
+            yield ("delta", "full answer")
+            yield ("done", {"input": 1, "output": 1})
+
+        res = self._run_turn(fake_stream)
+
+        self.assertEqual(res["content"], "full answer")
+        self.assertEqual(len(calls), 2)
+
     def test_double_failure_persists_guard_text(self):
         def fake_stream(messages, tools=None):
             yield ("done", {"input": 1, "output": 0})

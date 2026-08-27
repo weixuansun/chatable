@@ -289,7 +289,7 @@ if _saved.get("model"):
     OPENAI_MODEL = str(_saved["model"])
 
 # ---- shared ----------------------------------------------------------------
-MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "32768"))
+MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "16384"))
 CONTEXT_MAX_PATH_MESSAGES = int(os.environ.get("CHATTABLE_CONTEXT_MAX_PATH_MESSAGES", "80"))
 CONTEXT_KEEP_RECENT_MESSAGES = int(os.environ.get("CHATTABLE_CONTEXT_KEEP_RECENT_MESSAGES", "24"))
 CACHE_POLICY = os.environ.get("CHATTABLE_CACHE_POLICY", "auto").lower()
