@@ -1020,6 +1020,9 @@ try {
         <h3><i data-lucide="network"></i> Mind map
           <span class="mm-title" x-text="mindmap.centerTitle"></span></h3>
         <span class="count" x-text="mindmap.nodes.length + ' nodes · drag to pan · scroll to zoom · click a node to center'"></span>
+        <button class="icon-btn" @click="mapZoom(0.8)" title="Zoom out"><i data-lucide="minus"></i></button>
+        <span class="count" x-text="Math.round(mapView.scale * 100) + '%'"></span>
+        <button class="icon-btn" @click="mapZoom(1.25)" title="Zoom in"><i data-lucide="plus"></i></button>
         <button class="icon-btn" @click="closeMindmap()" title="Close (Esc)"><i data-lucide="x"></i></button>
       </div>
       <div class="mindmap-canvas" x-ref="mapCanvas"
@@ -2454,6 +2457,22 @@ function chatable() {
       if (s1 === s0) return;
       const rect = e.currentTarget.getBoundingClientRect();
       const px = e.clientX - rect.left, py = e.clientY - rect.top;
+      this.mapZoomTo(s1, px, py);
+    },
+
+    // Toolbar +/- buttons: zoom around the canvas centre, same math as the wheel.
+    mapZoom(factor) {
+      const cv = this.$refs.mapCanvas;
+      if (!cv) return;
+      this.mapZoomTo(this.mapView.scale * factor, cv.clientWidth / 2, cv.clientHeight / 2);
+    },
+
+    // Shared zoom math: keep the canvas point (px, py) stationary while
+    // scaling, clamped to [0.4, 2].
+    mapZoomTo(scale, px, py) {
+      const s0 = this.mapView.scale;
+      const s1 = Math.min(2, Math.max(0.4, scale));
+      if (s1 === s0) return;
       const wx = (px - this.mapView.tx) / s0, wy = (py - this.mapView.ty) / s0;
       this.mapView.tx = px - wx * s1;
       this.mapView.ty = py - wy * s1;
