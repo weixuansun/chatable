@@ -197,11 +197,11 @@ try {
   .branch-badge { flex: none; font-size: 10px; font-weight: 600; color: var(--branch);
             background: var(--branch-soft); padding: 1px 5px; border-radius: 5px; }
   .node-dot-live { color: var(--accent); }
-  .node-del { flex: none; opacity: 0; background: transparent; border: 0;
+  .node-menu-btn { flex: none; opacity: 0; background: transparent; border: 0;
             color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
-            justify-content: center; border-radius: 5px; margin-top: -1px; }
-  .node-row:hover .node-del { opacity: 1; }
-  .node-del:hover { color: var(--fail); background: rgba(248,113,113,0.12); }
+            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
+  .node-row:hover .node-menu-btn, .node-row:focus-within .node-menu-btn { opacity: 1; }
+  .node-menu-btn:hover { color: var(--accent); background: var(--accent-soft); }
   /* ---- right: conversation ---- */
   #conv { display: flex; flex-direction: column; height: 100vh; min-width: 0; background: var(--bg); transition: margin-right .2s ease; }
   #messages { flex: 1; overflow-y: auto; padding: 22px 24px; min-width: 0; }
@@ -460,21 +460,24 @@ try {
   .suggestions button:hover { background: var(--card-hover); border-color: var(--accent); }
 
   /* ---- mind map overlay ---- */
-  .node-map { flex: none; opacity: 0; background: transparent; border: 0;
-            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
-            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
-  .node-row:hover .node-map, .node-row:focus-within .node-map { opacity: 1; }
-  .node-map:hover { color: var(--accent); background: var(--accent-soft); }
-  .node-export { flex: none; opacity: 0; background: transparent; border: 0;
-            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
-            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
-  .node-row:hover .node-export, .node-row:focus-within .node-export { opacity: 1; }
-  .node-export:hover { color: var(--accent); background: var(--accent-soft); }
-  .node-rename { flex: none; opacity: 0; background: transparent; border: 0;
-            color: var(--dim-2); width: 22px; height: 22px; display: flex; align-items: center;
-            justify-content: center; border-radius: 5px; margin-top: -1px; transition: opacity .12s; }
-  .node-row:hover .node-rename, .node-row:focus-within .node-rename { opacity: 1; }
-  .node-rename:hover { color: var(--accent); background: var(--accent-soft); }
+  /* tree-row "⋯" dropdown menu: fixed-position, closed via the backdrop */
+  .node-menu-backdrop { position: fixed; inset: 0; z-index: 70; }
+  .node-menu { position: fixed; z-index: 71; min-width: 150px; background: var(--panel);
+            border: 1px solid var(--border-2); border-radius: 10px; padding: 4px;
+            box-shadow: var(--shadow-md); display: flex; flex-direction: column;
+            animation: fade-in .12s ease; }
+  .node-menu-item { display: flex; align-items: center; gap: 8px; background: transparent;
+            border: 0; border-radius: 6px; padding: 7px 10px; font-size: 13px;
+            cursor: pointer; text-align: left; white-space: nowrap; }
+  .node-menu-item .lucide { width: 14px; height: 14px; flex: none; }
+  .node-menu-item.mi-export { color: var(--ok); }
+  .node-menu-item.mi-map { color: var(--accent); }
+  .node-menu-item.mi-rename { color: var(--branch); }
+  .node-menu-item.mi-del { color: var(--fail); }
+  .node-menu-item.mi-export:hover { background: rgba(52,211,153,.12); }
+  .node-menu-item.mi-map:hover { background: var(--accent-soft); }
+  .node-menu-item.mi-rename:hover { background: var(--branch-soft); }
+  .node-menu-item.mi-del:hover { background: rgba(248,113,113,.12); }
   .rename-input { flex: 1; min-width: 0; background: var(--card);
             border: 1px solid var(--accent); border-radius: 6px; color: var(--fg);
             font: inherit; font-size: 13px; padding: 1px 6px; outline: none; }
@@ -742,14 +745,8 @@ try {
               <div class="preview" x-html="highlight(n.reply_preview)"></div>
             </template>
           </span>
-          <button class="node-export" x-show="n.depth === 0" title="导出整棵对话树为 Markdown"
-                  @click.stop="exportTree(n.id)"><i data-lucide="download"></i></button>
-          <button class="node-map" title="Open mind map centered on this node"
-                  @click.stop="openMindmap(n.id)"><i data-lucide="network"></i></button>
-          <button class="node-rename" title="Rename this node (locks the auto title; submit empty to restore)"
-                  @click.stop="startRename(n)"><i data-lucide="pencil"></i></button>
-          <button class="node-del" title="Delete this node and all its children"
-                  @click.stop="deleteNode(n)"><i data-lucide="trash-2"></i></button>
+          <button class="node-menu-btn" title="More actions"
+                  @click.stop="openNodeMenu(n, $event)"><i data-lucide="more-horizontal"></i></button>
         </div>
       </template>
     </div>
@@ -1000,6 +997,22 @@ try {
     </div>
   </div>
 
+  <!-- tree-row "⋯" action menu -->
+  <template x-if="nodeMenu.node">
+    <div class="node-menu-backdrop" @click="nodeMenu.node=null" @contextmenu.prevent="nodeMenu.node=null">
+      <div class="node-menu" :style="`left:${nodeMenu.x}px; top:${nodeMenu.y}px`" @click.stop>
+        <button class="node-menu-item mi-export" x-show="nodeMenu.node.depth === 0"
+                @click="nodeMenuAction('export')"><i data-lucide="download"></i>导出 Markdown</button>
+        <button class="node-menu-item mi-map"
+                @click="nodeMenuAction('map')"><i data-lucide="network"></i>思维图</button>
+        <button class="node-menu-item mi-rename"
+                @click="nodeMenuAction('rename')"><i data-lucide="pencil"></i>编辑名称</button>
+        <button class="node-menu-item mi-del"
+                @click="nodeMenuAction('delete')"><i data-lucide="trash-2"></i>删除节点</button>
+      </div>
+    </div>
+  </template>
+
   <!-- FULLSCREEN: mind map overlay -->
   <template x-if="mindmap.open">
     <div class="mindmap-backdrop">
@@ -1216,6 +1229,7 @@ function chatable() {
     collapsed: new Set(),
     search: '',   // tree filter query; matches node title + summary + preview
     renamingId: null, renameText: '',  // inline tree-row rename state
+    nodeMenu: {node: null, x: 0, y: 0},  // tree-row "⋯" dropdown state
     selectedId: null, messages: [],
     copiedMsgId: null,  // message id whose copy button just succeeded (icon feedback)
     draft: '', status: '',
@@ -1336,6 +1350,7 @@ function chatable() {
       // Escape closes the topmost overlay: mind map > settings > gallery > bookmarks > drawer.
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
+        if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
         if (this.mindmap.open) { this.closeMindmap(); return; }
         if (this.settingsOpen) { this.closeSettings(); return; }
         if (this.galleryOpen) { this.closeGallery(); return; }
@@ -1942,6 +1957,30 @@ function chatable() {
       // The x-for re-render replaces each row's <i data-lucide> caret with a
       // fresh placeholder; convert them back to SVG or the expand carets vanish.
       this.refreshIcons();
+    },
+
+    // Tree-row "⋯" menu: one button per row opens a fixed-position dropdown
+    // with the export / mind map / rename / delete actions.
+    openNodeMenu(n, ev) {
+      if (this.nodeMenu.node && this.nodeMenu.node.id === n.id) { this.nodeMenu.node = null; return; }
+      const r = ev.currentTarget.getBoundingClientRect();
+      const w = 160;  // approx menu width; keep it inside the viewport
+      this.nodeMenu = {
+        node: n,
+        x: Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)),
+        y: Math.min(r.bottom + 4, window.innerHeight - 150),
+      };
+      this.refreshIcons();
+    },
+
+    nodeMenuAction(kind) {
+      const n = this.nodeMenu.node;
+      this.nodeMenu.node = null;
+      if (!n) return;
+      if (kind === 'export') this.exportTree(n.id);
+      else if (kind === 'map') this.openMindmap(n.id);
+      else if (kind === 'rename') this.startRename(n);
+      else if (kind === 'delete') this.deleteNode(n);
     },
 
     // Inline tree-row rename: manual names lock the node against auto-titling;

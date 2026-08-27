@@ -3,9 +3,13 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![CI](https://github.com/weixuansun/chatable/actions/workflows/ci.yml/badge.svg)](https://github.com/weixuansun/chatable/actions/workflows/ci.yml)
 
+![Concept: fork to explore, prune to focus, build your mindmap](image/concept.png)
+
 A tree-structured research chat web UI for paper and blog reading with LLMs.
 Ask a question at any point, fork the conversation, and come back to a mind
 map of where you've been.
+When you talk to LLM, not all context is neccesary, you can control your context 
+by forking at any conversation turn.
 
 It's built for paper/blog reading, math/proof discussion, and algorithm idea
 exploration — workflows that have:
