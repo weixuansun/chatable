@@ -1047,7 +1047,7 @@ try {
                 <span class="role-dot role-assistant" x-show="!mn.isPair"></span><span x-text="mn.a"></span>
               </div>
               <div class="map-node-foot">
-                <button class="map-del-btn" x-show="mn.isCenter" @click.stop="exportTree(mn.id)"
+                <button class="map-del-btn" x-show="mn.isTrunk" @click.stop="exportTree(mn.id)"
                         title="导出整棵对话树为 Markdown">
                   <i data-lucide="download"></i>
                 </button>
@@ -2291,6 +2291,7 @@ function chatable() {
         const pos = { id: node.id, replyId: node.replyId, isPair: node.isPair,
                       q: node.q, a: node.a, kidCount: kids.length,
                       x, y: depth * (NH + GY),
+                      isTrunk: depth === 0,
                       isCenter: node.id === rootId || node.replyId === rootId };
         nodes.push(pos);
         childPos.forEach(cp => edgePairs.push([pos, cp]));
