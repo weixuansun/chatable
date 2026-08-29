@@ -842,6 +842,57 @@ class GenerateRetryTests(unittest.TestCase):
         d.cleanup()
 
 
+class WebSearchChainTests(unittest.TestCase):
+    """web_search_async: keyed providers (Tavily → Exa) fall back to DDG."""
+
+    def test_exa_used_after_tavily_failure(self):
+        import web_tools
+        from unittest.mock import patch
+
+        calls = []
+
+        async def fail(client, key, query, max_results):
+            calls.append("tavily")
+            raise RuntimeError("boom")
+
+        async def ok_exa(client, key, query, max_results):
+            calls.append("exa")
+            return [{"title": "T", "url": "https://x.com", "snippet": "s"}]
+
+        env = {"TAVILY_API_KEY": "t", "EXA_API_KEY": "e"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(web_tools, "_tavily_search", fail), \
+             patch.object(web_tools, "_exa_search", ok_exa):
+            res = web_tools.web_search("q")
+
+        self.assertTrue(res.ok)
+        self.assertEqual(calls, ["tavily", "exa"])
+        self.assertEqual(res.metadata["source"], "exa")
+        self.assertIn("fallback from", res.output)
+
+    def test_ddg_fallback_after_all_keyed_providers_fail(self):
+        import web_tools
+        from unittest.mock import patch
+
+        async def fail(client, key, query, max_results):
+            raise RuntimeError("boom")
+
+        async def ok_ddg(client, query, max_results, language=""):
+            return [{"title": "T", "url": "https://x.com", "snippet": "s"}]
+
+        env = {"TAVILY_API_KEY": "t", "EXA_API_KEY": "e"}
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(web_tools, "_tavily_search", fail), \
+             patch.object(web_tools, "_exa_search", fail), \
+             patch.object(web_tools, "_ddg_search", ok_ddg):
+            res = web_tools.web_search("q")
+
+        self.assertTrue(res.ok)
+        self.assertEqual(res.metadata["source"], "duckduckgo")
+        self.assertIn("Tavily", res.output)
+        self.assertIn("Exa", res.output)
+
+
 class NodeGistTests(unittest.TestCase):
     """generate_title fills title+summary; rename_node manages the lock."""
 

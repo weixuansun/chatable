@@ -72,9 +72,27 @@ point.
 - Conversation state is persisted as JSONL under `~/.chatable`; pass
 `--data-dir <path>` to keep history in a specific folder.
 - Common overrides via environment variables: `DEEPSEEK_BASE_URL`,
-`DEEPSEEK_MODEL`, `TAVILY_API_KEY` (web search), `CHATTABLE_WEB_HOST` /
-`CHATTABLE_WEB_PORT` (bind address), and more — the in-app settings panel
-covers model, base URL, API key, and storage folder.
+`DEEPSEEK_MODEL`, `CHATTABLE_WEB_HOST` / `CHATTABLE_WEB_PORT` (bind address),
+and more — the in-app settings panel covers model, base URL, API key, and
+storage folder.
+
+### Web search (optional)
+
+Automatic `web_search` works out of the box via DuckDuckGo (free, no key).
+For higher-quality results, add one or both provider keys — they are tried in
+the order **Tavily → Exa → DuckDuckGo**, falling back on failure:
+
+```bash
+TAVILY_API_KEY=tvly-... EXA_API_KEY=... chatable-web
+```
+
+- `TAVILY_API_KEY` — create a key at [tavily.com](https://tavily.com);
+  the free tier includes 1,000 searches/month.
+- `EXA_API_KEY` — create a key at [exa.ai](https://exa.ai);
+  the free tier adds $10 of credits every month (no card required).
+
+Both are read from the environment at request time, so exporting them in your
+shell rc file (e.g. `~/.zshrc`) also works.
 
 
 

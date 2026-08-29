@@ -172,10 +172,11 @@ class WebToolResult:
 
 
 # ---------------------------------------------------------------------------
-# Web search: Tavily primary, DuckDuckGo fallback
+# Web search: Tavily → Exa → DuckDuckGo fallback chain
 # ---------------------------------------------------------------------------
 
 _TAVILY_URL = "https://api.tavily.com/search"
+_EXA_URL = "https://api.exa.ai/search"
 _DDG_URL = "https://html.duckduckgo.com/html/"
 
 _DDG_HEADERS: dict[str, str] = {
@@ -264,6 +265,39 @@ async def _tavily_search(
     return results
 
 
+async def _exa_search(
+    client: httpx.AsyncClient,
+    api_key: str,
+    query: str,
+    max_results: int,
+) -> list[dict[str, str]]:
+    # contents.text comes free with the first 10 results per search (Exa's
+    # March 2026 pricing), so asking for a short text snippet costs nothing extra.
+    payload = {
+        "query": query,
+        "numResults": max_results,
+        "contents": {"text": {"maxCharacters": 300}},
+    }
+    response = await client.post(
+        _EXA_URL,
+        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        json=payload,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    results = []
+    for item in data.get("results", []):
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        snippet = (item.get("text") or "").strip().replace("\n", " ")
+        if len(snippet) > 300:
+            snippet = snippet[:297] + "..."
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
 async def _ddg_search(
     client: httpx.AsyncClient,
     query: str,
@@ -304,22 +338,36 @@ async def web_search_async(query: str, max_results: int = 8, language: str = "")
     if httpx is None:
         return WebToolResult.error("httpx is required for web_search; install requirements.txt")
 
+    # Keyed providers in fallback order: recurring free quotas first (Tavily
+    # 1k/month, then Exa $10/month). DuckDuckGo (free, keyless) is always the
+    # final fallback.
+    keyed: list[tuple[str, Any, str]] = []
     tavily_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    exa_key = os.environ.get("EXA_API_KEY", "").strip()
+    if tavily_key:
+        keyed.append(("Tavily", _tavily_search, tavily_key))
+    if exa_key:
+        keyed.append(("Exa", _exa_search, exa_key))
+
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        tavily_fail_reason: Optional[str] = None
-        if tavily_key:
+        fail_parts: list[str] = []
+        for name, fn, key in keyed:
             try:
-                results = await _tavily_search(client, tavily_key, query, max_results)
-                if results:
-                    return WebToolResult.success(
-                        _format_search_results(results, query, "Tavily"),
-                        query=query,
-                        result_count=len(results),
-                        source="tavily",
-                    )
-                tavily_fail_reason = "no results"
+                results = await fn(client, key, query, max_results)
             except Exception as exc:  # noqa: BLE001
-                tavily_fail_reason = str(exc)
+                fail_parts.append(f"{name}: {exc}")
+                continue
+            if results:
+                source = name
+                if fail_parts:
+                    source += f" (fallback from: {'; '.join(fail_parts)})"
+                return WebToolResult.success(
+                    _format_search_results(results, query, source),
+                    query=query,
+                    result_count=len(results),
+                    source=name.lower(),
+                )
+            fail_parts.append(f"{name}: no results")
 
         ddg_error: Optional[str] = None
         try:
@@ -330,8 +378,8 @@ async def web_search_async(query: str, max_results: int = 8, language: str = "")
 
         if results:
             source = "DuckDuckGo"
-            if tavily_fail_reason:
-                source += f" (Tavily fallback: {tavily_fail_reason})"
+            if fail_parts:
+                source += f" (fallback from: {'; '.join(fail_parts)})"
             return WebToolResult.success(
                 _format_search_results(results, query, source),
                 query=query,
@@ -340,9 +388,7 @@ async def web_search_async(query: str, max_results: int = 8, language: str = "")
             )
 
         search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}"
-        parts = []
-        if tavily_fail_reason:
-            parts.append(f"Tavily: {tavily_fail_reason}")
+        parts = list(fail_parts)
         if ddg_error:
             parts.append(f"DuckDuckGo: {ddg_error}")
         else:
