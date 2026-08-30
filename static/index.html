@@ -706,7 +706,7 @@ try {
         <div class="empty" style="font-size:13px;margin-top:20px;">no nodes yet — ask something →</div>
       </template>
       <template x-for="n in flatTree" :key="n.id">
-        <div class="node-row" :class="rowClass(n)" role="button"
+        <div class="node-row" :class="rowClass(n)" role="button" :data-nid="n.id"
              :tabindex="(n.role === 'assistant' || n.role === 'user') ? 0 : -1"
              @click="(n.role === 'assistant' || n.role === 'user') && select(n.id)"
              @keydown.enter.space.prevent="(n.role === 'assistant' || n.role === 'user') && select(n.id)"
@@ -2131,6 +2131,23 @@ function chatable() {
         if (this.collapsed.delete(pid)) changed = true;
       }
       if (changed) this.rebuildFlat();
+      // Bring the selected row into view in the sidebar (e.g. after jumping
+      // here from the mind map's 查看细节). No-op if the row is already
+      // visible or filtered out by search.
+      this.$nextTick(() => this.scrollTreeTo(resolved));
+    },
+
+    // Scroll the tree so the row for `id` is visible; only scrolls when the
+    // row is outside the current viewport to avoid jarring recenters. The
+    // scroll container is the #tree panel (overflow-y:auto), not .tree-list.
+    scrollTreeTo(id) {
+      const el = document.querySelector('.tree-list [data-nid="' + id + '"]');
+      const scroller = document.getElementById('tree');
+      if (!el || !scroller) return;
+      const r = el.getBoundingClientRect(), lr = scroller.getBoundingClientRect();
+      if (r.top < lr.top || r.bottom > lr.bottom) {
+        el.scrollIntoView({ block: 'center' });
+      }
     },
 
     // Find a node anywhere in the tree by id (depth-first).
