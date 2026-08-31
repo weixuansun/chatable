@@ -478,6 +478,14 @@ try {
   .node-menu-item.mi-map:hover { background: var(--accent-soft); }
   .node-menu-item.mi-rename:hover { background: var(--branch-soft); }
   .node-menu-item.mi-del:hover { background: rgba(248,113,113,.12); }
+  /* quote-fork popup: floats above a text selection inside a message bubble */
+  .quote-pop { position: fixed; z-index: 72; display: flex; align-items: center;
+            gap: 5px; padding: 5px 10px; border-radius: 8px; background: var(--panel);
+            border: 1px solid var(--border-2); color: var(--fg); font-size: 12.5px;
+            box-shadow: var(--shadow-md); cursor: pointer; white-space: nowrap;
+            animation: fade-in .12s ease; }
+  .quote-pop:hover { color: var(--branch); border-color: var(--branch); }
+  .quote-pop .lucide { width: 13px; height: 13px; }
   .rename-input { flex: 1; min-width: 0; background: var(--card);
             border: 1px solid var(--accent); border-radius: 6px; color: var(--fg);
             font: inherit; font-size: 13px; padding: 1px 6px; outline: none; }
@@ -1013,6 +1021,15 @@ try {
     </div>
   </template>
 
+  <!-- quote-fork popup: appears above a text selection inside a message bubble.
+       mousedown.prevent so the selection survives until quoteAsk reads it. -->
+  <template x-if="quotePop.show">
+    <button class="quote-pop" :style="`left:${quotePop.x}px; top:${quotePop.y}px`"
+            @mousedown.prevent="quoteAsk()" title="基于选中内容追问">
+      <i data-lucide="message-circle-question"></i>追问
+    </button>
+  </template>
+
   <!-- FULLSCREEN: mind map overlay -->
   <template x-if="mindmap.open">
     <div class="mindmap-backdrop">
@@ -1233,6 +1250,8 @@ function chatable() {
     search: '',   // tree filter query; matches node title + summary + preview
     renamingId: null, renameText: '',  // inline tree-row rename state
     nodeMenu: {node: null, x: 0, y: 0},  // tree-row "⋯" dropdown state
+    // quote-fork popup: selected text + its message id + fixed-position coords
+    quotePop: {show: false, x: 0, y: 0, text: '', msgId: null},
     selectedId: null, messages: [],
     copiedMsgId: null,  // message id whose copy button just succeeded (icon feedback)
     draft: '', status: '',
@@ -1338,6 +1357,7 @@ function chatable() {
       this.loadTreeWidth();
       this.loadAppearance();
       this.initDragDrop();
+      this.initQuotePop();
       this.config = await (await fetch('/api/config')).json();
       await this.refreshTree();
       // Open as a top-level conversation list (one row per trunk); carets
@@ -1353,6 +1373,7 @@ function chatable() {
       // Escape closes the topmost overlay: mind map > settings > gallery > bookmarks > drawer.
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
+        if (this.quotePop.show) { this.quotePop.show = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
         if (this.mindmap.open) { this.closeMindmap(); return; }
         if (this.settingsOpen) { this.closeSettings(); return; }
@@ -2178,6 +2199,113 @@ function chatable() {
     forkFromHere(id) {
       this.selectedId = id;
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // ---- quote-fork popup (select text in a bubble → follow-up on it) ------
+
+    initQuotePop() {
+      const msgs = document.getElementById('messages');
+      // Judge the selection once the mouse is released (shift+click extension
+      // also ends with a mouseup). setTimeout lets the selection settle first.
+      msgs.addEventListener('mouseup', () => setTimeout(() => this.updateQuotePop(), 0));
+      // Selection cleared (click elsewhere, keyboard, programmatic) → hide.
+      document.addEventListener('selectionchange', () => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) this.quotePop.show = false;
+      });
+      // Scrolling the conversation invalidates the popup's fixed position.
+      msgs.addEventListener('scroll', () => { this.quotePop.show = false; }, {passive: true});
+    },
+
+    // Show the popup if the current selection is usable: non-trivial text
+    // fully inside ONE non-streaming message bubble.
+    updateQuotePop() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) { this.quotePop.show = false; return; }
+      const text = sel.toString().trim();
+      if (text.length < 2) { this.quotePop.show = false; return; }
+      const a = sel.anchorNode && sel.anchorNode.parentElement;
+      const f = sel.focusNode && sel.focusNode.parentElement;
+      const bA = a && a.closest('.bubble'), bF = f && f.closest('.bubble');
+      if (!bA || bA !== bF || bA.classList.contains('streaming-bubble')) {
+        this.quotePop.show = false; return;
+      }
+      const msgEl = bA.closest('.msg');   // id="msg-<nodeId>"
+      if (!msgEl || !msgEl.id.startsWith('msg-')) { this.quotePop.show = false; return; }
+      // Convert the selected rendered HTML back to markdown so code fences,
+      // inline code and KaTeX formulas survive as source, not flattened text.
+      let md = this.fragmentToMarkdown(sel.getRangeAt(0).cloneContents())
+                 .replace(/\n{3,}/g, '\n\n').trim() || text;
+      if (md.length > 500) {
+        md = md.slice(0, 500);
+        // Truncation may cut a code fence in half — close it so the quote
+        // still renders as a block instead of swallowing the follow-up text.
+        if ((md.match(/```/g) || []).length % 2) md += '\n```';
+      }
+      // Float above the selection, horizontally centered, clamped to viewport.
+      const r = sel.getRangeAt(0).getBoundingClientRect();
+      const x = Math.min(Math.max(r.left + r.width / 2 - 40, 8), window.innerWidth - 100);
+      const y = Math.max(r.top - 40, 8);
+      this.quotePop = {show: true, x, y, text: md, msgId: msgEl.id.slice(4)};
+      this.refreshIcons();
+    },
+
+    // Rendered-bubble HTML → markdown, covering what renderMarkdownWithMath
+    // can emit: headings, bold/italic, links, lists, code (block + inline),
+    // KaTeX (source recovered from the embedded annotation), images.
+    fragmentToMarkdown(root) {
+      const walk = (node) => {
+        if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
+        if (node.nodeType !== Node.ELEMENT_NODE &&
+            node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return '';
+        const el = node;
+        const cls = el.classList || {contains: () => false};
+        if (cls.contains('copy-btn')) return '';   // injected UI, not content
+        if (cls.contains('katex')) {
+          const ann = el.querySelector('annotation[encoding="application/x-tex"]');
+          const tex = (ann ? ann.textContent : el.textContent).trim();
+          const display = el.parentElement && el.parentElement.classList &&
+                          el.parentElement.classList.contains('katex-display');
+          return display ? `\n$$\n${tex}\n$$\n` : `$${tex}$`;
+        }
+        const kids = () => Array.from(el.childNodes).map(walk).join('');
+        const tag = el.tagName ? el.tagName.toLowerCase() : '';
+        switch (tag) {
+          case 'pre': {
+            // Skip the injected copy button; keep the raw code text.
+            const code = Array.from(el.childNodes)
+              .filter(n => !(n.nodeType === 1 && n.classList.contains('copy-btn')))
+              .map(n => n.textContent).join('').replace(/\n$/, '');
+            return `\n\`\`\`\n${code}\n\`\`\`\n`;
+          }
+          case 'code': return '`' + el.textContent + '`';
+          case 'strong': case 'b': return '**' + kids() + '**';
+          case 'em': case 'i': return '*' + kids() + '*';
+          case 'a': return '[' + kids() + '](' + (el.getAttribute('href') || '') + ')';
+          case 'li': return '- ' + kids().trim() + '\n';
+          case 'ul': case 'ol': return '\n' + kids();
+          case 'blockquote':
+            return kids().trim().split('\n').map(l => '> ' + l).join('\n') + '\n';
+          case 'br': return '\n';
+          case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6':
+            return '\n' + '#'.repeat(Number(tag[1])) + ' ' + kids().trim() + '\n';
+          case 'img': return el.getAttribute('alt') || '';
+          case 'p': case 'div': return kids() + '\n';
+          default: return kids();
+        }
+      };
+      return walk(root);
+    },
+
+    // Prefill the composer with the quote as a markdown blockquote and fork
+    // from the message it was selected in. send() resolves a user-node fork
+    // to its assistant reply via forkParentId, same as the 追问 button.
+    quoteAsk() {
+      const q = this.quotePop.text, id = this.quotePop.msgId;
+      this.quotePop.show = false;
+      window.getSelection().removeAllRanges();
+      this.draft = q.split('\n').map(l => '> ' + l).join('\n') + '\n\n';
+      this.forkFromHere(id);
     },
 
     // ---- mind map overlay ------------------------------------------------
