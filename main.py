@@ -855,7 +855,9 @@ def _openai_stream(messages: list[dict], tools: list[dict] | None = None):
                     part["name"] += fn["name"]
                 if fn.get("arguments"):
                     part["arguments"] += fn["arguments"]
-            rc = delta.get("reasoning_content")
+            # DeepSeek/GLM-native streams reasoning as `reasoning_content`;
+            # OpenRouter normalizes it to `reasoning` (+ reasoning_details).
+            rc = delta.get("reasoning_content") or delta.get("reasoning")
             if rc:
                 yield ("reasoning", rc)
             content = delta.get("content")
