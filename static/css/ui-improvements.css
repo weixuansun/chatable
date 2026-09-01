@@ -190,7 +190,7 @@
 }
 .msg.role-assistant .bubble {
   border-top-left-radius: 6px;
-  max-width: 92%;
+  max-width: 100%;  /* align with reasoning/tool blocks above it */
 }
 
 .msg .who {
