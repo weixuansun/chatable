@@ -215,12 +215,6 @@ try {
   .msg.role-system_note .who { color: var(--note); }
   .msg .who .lucide { width: 13px; height: 13px; }
   .bubble-wrap { position: relative; }
-  .msg-copy-btn { position: absolute; top: 6px; right: 6px; z-index: 1;
-            background: var(--card); border: 1px solid var(--border-2); border-radius: 6px;
-            cursor: pointer; color: var(--dim); opacity: 0; transition: opacity .15s;
-            padding: 3px; display: inline-flex; align-items: center; }
-  .bubble-wrap:hover .msg-copy-btn, .msg-copy-btn:focus { opacity: 1; }
-  .msg-copy-btn .lucide { width: 12px; height: 12px; }
   .bubble { background: var(--card); border: 1px solid var(--border-2);
             border-radius: var(--radius-lg); padding: 11px 15px; overflow-x: auto;
             overflow-wrap: anywhere; max-width: 100%; }
@@ -876,11 +870,6 @@ try {
                 <template x-if="!streams[m.id]">
                   <div class="bubble" x-md="m.content"></div>
                 </template>
-                <!-- copy this message's raw markdown to the clipboard -->
-                <button class="msg-copy-btn" @click="copyMessage(m)"
-                        :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
-                  <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>
-                </button>
               </div>
               <!-- stats: live while streaming, else persisted usage -->
               <template x-if="streams[m.id] && streams[m.id].stats">
@@ -893,15 +882,24 @@ try {
               <template x-if="!streams[m.id] && m.usage && (m.usage.input || m.usage.output)">
                 <div class="stats" x-text="fmtUsage(m.usage)"></div>
               </template>
-              <!-- fork button below assistant reply, only after generation completes -->
-              <template x-if="m.role === 'assistant' && !streams[m.id]">
+              <!-- per-message actions below the bubble, after generation
+                   completes: copy for every message; fork/map for assistant -->
+              <template x-if="!streams[m.id]">
                 <div class="fork-actions">
-                  <button class="fork-btn" @click="forkFromHere(m.id)" title="从此回复分叉追问">
-                    <i data-lucide="git-branch"></i>追问
+                  <button class="fork-btn" @click="copyMessage(m)"
+                          :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
+                    <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>复制
                   </button>
-                  <button class="fork-btn map-open-btn" @click="openMindmap(m.id)" title="以这条回复为中心打开思维结构图">
-                    <i data-lucide="network"></i>思维图
-                  </button>
+                  <template x-if="m.role === 'assistant'">
+                    <button class="fork-btn" @click="forkFromHere(m.id)" title="从此回复分叉追问">
+                      <i data-lucide="git-branch"></i>追问
+                    </button>
+                  </template>
+                  <template x-if="m.role === 'assistant'">
+                    <button class="fork-btn map-open-btn" @click="openMindmap(m.id)" title="以这条回复为中心打开思维结构图">
+                      <i data-lucide="network"></i>思维图
+                    </button>
+                  </template>
                 </div>
               </template>
             </div>
