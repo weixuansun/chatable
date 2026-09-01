@@ -929,6 +929,39 @@ class ChatService:
             "images": (result.metadata or {}).get("images") or [],
         }
 
+    def _images_dir(self) -> str:
+        """Sidecar folder for captured images: <data_dir>/images/. Written by
+        the image-capture feature; replay must resolve these references."""
+        return os.path.join(os.path.dirname(os.path.abspath(self.store.db_path)), "images")
+
+    def _restore_image_message(self, m: dict) -> Optional[dict]:
+        """Reconstruct a persisted image message for replay: image_file parts
+        become image_url data-URLs read back from the sidecar files (same
+        bytes → same base64 → byte-identical to the live turn's message).
+        Returns None when the backend is blind or a sidecar file is missing —
+        the message is then dropped from the context."""
+        content = m.get("content")
+        if not isinstance(content, list) or not any(
+                isinstance(p, dict) and p.get("type") == "image_file" for p in content):
+            return m
+        if not main.VISION_SUPPORTED:
+            return None  # a blind backend would 400 on image parts
+        img_dir = self._images_dir()
+        parts: list[dict] = []
+        for p in content:
+            if p.get("type") != "image_file":
+                parts.append(p)
+                continue
+            try:
+                with open(os.path.join(img_dir, os.path.basename(p["path"])), "rb") as f:
+                    raw = f.read()
+            except OSError:
+                return None
+            b64 = base64.b64encode(raw).decode()
+            parts.append({"type": "image_url",
+                          "image_url": {"url": f"data:{p.get('mime', 'image/jpeg')};base64,{b64}"}})
+        return {**m, "content": parts}
+
     def _expand_path(self, path: list[Node]) -> list[Node]:
         """Insert ephemeral nodes for each assistant's tool exchange.
 
@@ -946,6 +979,12 @@ class ChatService:
                 replay = n.metadata.get("tool_messages") if NATIVE_TOOL_HISTORY else None
                 if replay:
                     for m in replay:
+                        # image_file sidecar refs (written by the image-capture
+                        # feature) must be resolved back to image_url parts —
+                        # upstreams reject the image_file type with a 400.
+                        m = self._restore_image_message(m)
+                        if m is None:
+                            continue
                         ephem = Node.new(
                             role="raw_message",
                             # Sorted keys: Node serialization flushes with
