@@ -883,13 +883,9 @@ try {
                 <div class="stats" x-text="fmtUsage(m.usage)"></div>
               </template>
               <!-- per-message actions below the bubble, after generation
-                   completes: copy for every message; fork/map for assistant -->
+                   completes: fork/map for assistant; copy for every message -->
               <template x-if="!streams[m.id]">
                 <div class="fork-actions">
-                  <button class="fork-btn" @click="copyMessage(m)"
-                          :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
-                    <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>复制
-                  </button>
                   <template x-if="m.role === 'assistant'">
                     <button class="fork-btn" @click="forkFromHere(m.id)" title="从此回复分叉追问">
                       <i data-lucide="git-branch"></i>追问
@@ -900,6 +896,10 @@ try {
                       <i data-lucide="network"></i>思维图
                     </button>
                   </template>
+                  <button class="fork-btn" @click="copyMessage(m)"
+                          :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
+                    <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>复制
+                  </button>
                 </div>
               </template>
             </div>
