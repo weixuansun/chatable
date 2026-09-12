@@ -502,6 +502,12 @@ try {
   .mindmap-canvas.animating .mindmap-world { transition: transform .3s cubic-bezier(.4,0,.2,1); }
   .map-edges { position: absolute; top: 0; left: 0; overflow: visible; }
   .map-edge { fill: none; stroke: #4a5163; stroke-width: 2; }
+  /* in-map search: hits get the gallery-style accent ring, the rest fade */
+  .map-node.search-hit { border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent), var(--shadow-md); }
+  .map-node.search-dim { opacity: .38; }
+  .mm-search { margin-top: 0; flex: 0 1 240px; }
+  .mm-search-nav { display: flex; gap: 2px; flex: none; }
   .map-node { position: absolute; width: 220px; height: 112px; background: var(--card);
             border: 1px solid var(--border-2); border-radius: var(--radius); padding: 8px 12px;
             cursor: pointer; display: flex; flex-direction: column; justify-content: space-between;
@@ -1035,6 +1041,24 @@ try {
         <h3><i data-lucide="network"></i> Mind map
           <span class="mm-title" x-text="mindmap.centerTitle"></span></h3>
         <span class="count" x-text="mindmap.nodes.length + ' nodes · drag to pan · scroll to zoom · click a node to center'"></span>
+        <div class="tree-search mm-search">
+          <i data-lucide="search"></i>
+          <input type="text" x-model="mmSearch" @input="mmSearchInput()"
+                 @keydown.enter.prevent="mmSearchGo($event.shiftKey ? -1 : 1)"
+                 @keydown.esc.stop="mmSearch = ''; mmSearchIdx = 0"
+                 placeholder="Search in map…" spellcheck="false" />
+          <template x-if="mmSearching">
+            <span class="count" x-text="mmHitList.length ? (Math.min(mmSearchIdx, mmHitList.length - 1) + 1) + '/' + mmHitList.length : '0/0'"></span>
+          </template>
+          <button class="clear" x-show="mmSearch" @click="mmSearch = ''; mmSearchIdx = 0" title="Clear"><i data-lucide="x"></i></button>
+        </div>
+        <template x-if="mmSearching && mmHitList.length > 1">
+          <div class="mm-search-nav">
+            <button class="icon-btn" @click="mmSearchGo(-1)" title="Previous match (Shift+Enter)"><i data-lucide="chevron-up"></i></button>
+            <button class="icon-btn" @click="mmSearchGo(1)" title="Next match (Enter)"><i data-lucide="chevron-down"></i></button>
+          </div>
+        </template>
+        <button class="icon-btn" @click="mapFit()" title="Fit the whole tree to the screen"><i data-lucide="maximize"></i></button>
         <button class="icon-btn" @click="mapZoom(0.8)" title="Zoom out"><i data-lucide="minus"></i></button>
         <span class="count" x-text="Math.round(mapView.scale * 100) + '%'"></span>
         <button class="icon-btn" @click="mapZoom(1.25)" title="Zoom in"><i data-lucide="plus"></i></button>
@@ -1050,7 +1074,7 @@ try {
             <path class="map-edge" :d="mindmap.edgesD"></path>
           </svg>
           <template x-for="mn in mindmap.nodes" :key="mn.id">
-            <div class="map-node" :class="{center: mn.isCenter}"
+            <div class="map-node" :class="{center: mn.isCenter, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
                  :style="`left:${mn.x}px; top:${mn.y}px;`"
                  :title="mn.q || mn.a"
                  @click.stop="mapNodeClick(mn)">
@@ -1338,6 +1362,7 @@ function chatable() {
     gallerySearch: '',
     mapView: { tx: 0, ty: 0, scale: 1 },
     mapAnim: false, mapDragging: false, _mapSuppressClick: false,
+    mmSearch: '', mmSearchIdx: 0,   // in-map search query + current hit index
 
   toggleDrawer() {
     this.drawerOpen = !this.drawerOpen;
@@ -1373,7 +1398,11 @@ function chatable() {
         if (e.key !== 'Escape') return;
         if (this.quotePop.show) { this.quotePop.show = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
-        if (this.mindmap.open) { this.closeMindmap(); return; }
+        if (this.mindmap.open) {
+          if (this.mmSearch) { this.mmSearch = ''; this.mmSearchIdx = 0; }  // clear search before closing
+          else this.closeMindmap();
+          return;
+        }
         if (this.settingsOpen) { this.closeSettings(); return; }
         if (this.galleryOpen) { this.closeGallery(); return; }
         if (this.bookmarksOpen) { this.bookmarksOpen = false; return; }
@@ -2326,11 +2355,64 @@ function chatable() {
                        centerTitle: (center && (center.q || center.a)) || '',
                        ...layout };
       this.mapView = { tx: 0, ty: 0, scale: 1 };
+      this.mmSearch = ''; this.mmSearchIdx = 0;
       this.refreshIcons();
       this.$nextTick(() => { this.centerOnNode(id, false); this.refreshIcons(); });
     },
 
-    closeMindmap() { this.mindmap.open = false; },
+    closeMindmap() { this.mindmap.open = false; this.mmSearch = ''; this.mmSearchIdx = 0; },
+
+    // ---- in-map search: matching cards get the accent ring, the rest fade.
+    // Multi-word AND over the card's question + answer text (same rule as the
+    // sidebar/gallery search). Enter / Shift+Enter (or the chevron buttons)
+    // cycle through the hits and center the view on each.
+
+    get mmSearching() { return !!this.mmSearch.trim(); },
+
+    get mmHitList() {
+      const toks = this.mmSearch.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (!toks.length) return [];
+      return this.mindmap.nodes
+        .filter(n => {
+          const hay = ((n.q || '') + ' ' + (n.a || '')).toLowerCase();
+          return toks.every(t => hay.includes(t));
+        })
+        .map(n => n.id);
+    },
+
+    get mmHitSet() { return new Set(this.mmHitList); },
+
+    // Typing resets the cycle and jumps straight to the first hit.
+    mmSearchInput() {
+      this.mmSearchIdx = 0;
+      this.$nextTick(() => {
+        const hits = this.mmHitList;
+        if (hits.length) this.centerOnNode(hits[0], true);
+      });
+    },
+
+    mmSearchGo(dir = 1) {
+      const hits = this.mmHitList;
+      if (!hits.length) return;
+      this.mmSearchIdx = ((this.mmSearchIdx + dir) % hits.length + hits.length) % hits.length;
+      this.centerOnNode(hits[this.mmSearchIdx], true);
+    },
+
+    // Scale and pan so the whole laid-out tree fits the viewport. Small trees
+    // are never blown up past 100%.
+    mapFit(animate = true) {
+      const cv = this.$refs.mapCanvas;
+      if (!cv || !this.mindmap.w) return;
+      const PAD = 24;
+      const s = Math.min(1, Math.max(0.1,
+        Math.min((cv.clientWidth - PAD * 2) / this.mindmap.w,
+                 (cv.clientHeight - PAD * 2) / this.mindmap.h)));
+      this.mapAnim = animate;
+      this.mapView.scale = s;
+      this.mapView.tx = (cv.clientWidth - this.mindmap.w * s) / 2;
+      this.mapView.ty = (cv.clientHeight - this.mindmap.h * s) / 2;
+      if (animate) setTimeout(() => { this.mapAnim = false; }, 350);
+    },
 
     // ---- gallery (all trunk conversations as cards) -----------------------
 
@@ -2594,10 +2676,11 @@ function chatable() {
       window.addEventListener('pointerup', up);
     },
 
-    // Zoom around the pointer position, clamped to [0.4, 2].
+    // Zoom around the pointer position, clamped to [0.1, 2]. The low floor
+    // lets huge trees zoom out far enough to stay navigable.
     mapWheel(e) {
       const s0 = this.mapView.scale;
-      const s1 = Math.min(2, Math.max(0.4, s0 * (e.deltaY < 0 ? 1.1 : 0.9)));
+      const s1 = Math.min(2, Math.max(0.1, s0 * (e.deltaY < 0 ? 1.1 : 0.9)));
       if (s1 === s0) return;
       const rect = e.currentTarget.getBoundingClientRect();
       const px = e.clientX - rect.left, py = e.clientY - rect.top;
@@ -2612,10 +2695,10 @@ function chatable() {
     },
 
     // Shared zoom math: keep the canvas point (px, py) stationary while
-    // scaling, clamped to [0.4, 2].
+    // scaling, clamped to [0.1, 2].
     mapZoomTo(scale, px, py) {
       const s0 = this.mapView.scale;
-      const s1 = Math.min(2, Math.max(0.4, scale));
+      const s1 = Math.min(2, Math.max(0.1, scale));
       if (s1 === s0) return;
       const wx = (px - this.mapView.tx) / s0, wy = (py - this.mapView.ty) / s0;
       this.mapView.tx = px - wx * s1;
