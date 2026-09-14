@@ -275,7 +275,7 @@ try {
             border-radius: var(--radius-lg); padding: 8px 8px 8px 12px; transition: border-color .12s; }
   .input-wrap:focus-within { border-color: var(--accent); }
   .input-wrap textarea { flex: 1; resize: none; min-height: 24px; max-height: 200px;
-            overflow: hidden; scrollbar-width: none; -ms-overflow-style: none;
+            overflow: hidden auto; scrollbar-width: none; -ms-overflow-style: none;
             background: transparent; color: var(--fg); border: 0; outline: none;
             padding: 4px 0; font: inherit; line-height: 1.5; }
   .input-wrap textarea::-webkit-scrollbar { display: none; }
@@ -2333,6 +2333,16 @@ function chatable() {
       window.getSelection().removeAllRanges();
       this.draft = q.split('\n').map(l => '> ' + l).join('\n') + '\n\n';
       this.forkFromHere(id);
+      // Put the caret after the quote and scroll the composer to its bottom,
+      // so a long quote doesn't hide where the user is about to type.
+      // (setTimeout runs after autoGrow has resized the textarea.)
+      this.$nextTick(() => setTimeout(() => {
+        const el = this.$refs.composerInput;
+        if (!el) return;
+        el.focus();
+        el.selectionStart = el.selectionEnd = el.value.length;
+        el.scrollTop = el.scrollHeight;
+      }, 0));
     },
 
     // ---- mind map overlay ------------------------------------------------
