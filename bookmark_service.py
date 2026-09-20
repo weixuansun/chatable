@@ -93,11 +93,11 @@ class BookmarkService:
         self,
         store: Optional[BookmarkStore] = None,
         fetcher: Optional[Callable[[str], object]] = None,
-        summarizer: Optional[Callable[[str], str]] = None,
+        summarizer: Optional[Callable[[str], dict]] = None,
     ) -> None:
         self.store = store or BookmarkStore()
         self.fetcher = fetcher or web_fetch
-        self.summarizer = summarizer or main.summarize_for_bookmark
+        self.summarizer = summarizer or main.describe_bookmark
 
     def list_bookmarks(self) -> list[Bookmark]:
         return self.store.list()
@@ -165,7 +165,14 @@ class BookmarkService:
         summary = bm.summary
         if ok and content:
             try:
-                summary = self.summarizer(content)
+                desc = self.summarizer(content)
+                if isinstance(desc, dict):
+                    title_zh = (desc.get("title_zh") or "").strip()
+                    if title_zh:
+                        metadata["title_zh"] = title_zh
+                    summary = desc.get("summary") or summary
+                else:  # a plain-text summarizer only yields the summary
+                    summary = desc
             except Exception as exc:  # noqa: BLE001 - summary is best-effort
                 metadata["summary_error"] = str(exc)
 
@@ -200,7 +207,14 @@ class BookmarkService:
         summary = bm.summary
         if ok and content:
             try:
-                summary = self.summarizer(content)
+                desc = self.summarizer(content)
+                if isinstance(desc, dict):
+                    title_zh = (desc.get("title_zh") or "").strip()
+                    if title_zh:
+                        metadata["title_zh"] = title_zh
+                    summary = desc.get("summary") or summary
+                else:  # a plain-text summarizer only yields the summary
+                    summary = desc
             except Exception as exc:  # noqa: BLE001
                 metadata["summary_error"] = str(exc)
 

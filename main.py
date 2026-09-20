@@ -508,19 +508,44 @@ def summarize_for_title(user_text: str, assistant_text: str) -> str:
     return summarize_turn(user_text, assistant_text)["title"]
 
 
-def summarize_for_bookmark(text: str, max_chars: int = 160) -> str:
-    """Generate a minimal one-sentence summary of an article/blog/paper.
+def _parse_describe_output(raw: str, max_chars: int = 200) -> dict:
+    """Parse the model's {"title_zh", "summary"} JSON; degrade gracefully.
 
-    Uses the currently configured OpenAI backend. Returns a single-sentence
-    summary (capped at ``max_chars``) or an empty string if the backend is
-    unavailable.
+    Falls back to treating the whole output as the summary when the model
+    didn't emit parseable JSON (fence-wrapped or plain text included).
+    """
+    text = (raw or "").strip()
+    data = None
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            data = None
+    if isinstance(data, dict):
+        title_zh = " ".join(str(data.get("title_zh") or "").split())
+        summary = " ".join(str(data.get("summary") or "").split())
+    else:
+        title_zh, summary = "", " ".join(text.split())
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 1].rstrip() + "…"
+    return {"title_zh": title_zh[:40], "summary": summary}
+
+
+def describe_bookmark(text: str) -> dict:
+    """Generate a Chinese title + short Chinese summary for a saved article.
+
+    One cheap non-streaming call on the currently configured backend.
+    Returns {"title_zh": ..., "summary": ...}; both empty when the backend
+    is unavailable (best-effort, never raises).
     """
     client = _get_openai_client()
     truncated = " ".join(text.split())[:6000]
     sys_prompt = (
-        "Summarize the following article in ONE short sentence. Capture the "
-        "core claim or topic and nothing else. Use the same language as the "
-        "article. No preamble, no bullet points, no quotes around the output."
+        "你是书签整理助手。阅读下面的文章内容，用简体中文输出：\n"
+        "1. title_zh：简洁的中文标题（不超过20字，概括文章主题，不加书名号）\n"
+        "2. summary：简短的中文摘要（不超过120字，说明文章讲什么、核心观点是什么）\n"
+        '只输出 JSON：{"title_zh": "...", "summary": "..."}，不要输出任何其它内容。'
     )
     messages = [
         {"role": "system", "content": sys_prompt},
@@ -530,18 +555,14 @@ def summarize_for_bookmark(text: str, max_chars: int = 160) -> str:
         "model": OPENAI_MODEL,
         "messages": messages,
         "stream": False,
-        "max_tokens": 128,
+        "max_tokens": 320,
     }
     try:
         resp = client.chat.completions.create(**kwargs)
         data = resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
-    except Exception:  # noqa: BLE001 - summary is best-effort
-        return ""
-    summary = extract_text(data).strip()
-    summary = " ".join(summary.split())
-    if len(summary) > max_chars:
-        summary = summary[: max_chars - 1].rstrip() + "…"
-    return summary
+    except Exception:  # noqa: BLE001 - bookmark description is best-effort
+        return {"title_zh": "", "summary": ""}
+    return _parse_describe_output(extract_text(data))
 
 
 def backend_description() -> str:

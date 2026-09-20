@@ -20,8 +20,8 @@ def fake_fetcher(output: str, ok: bool = True):
     return _fetch
 
 
-def fake_summarizer(text: str) -> str:
-    return "Summary of: " + text[:40]
+def fake_summarizer(text: str) -> dict:
+    return {"title_zh": "中文标题", "summary": "Summary of: " + text[:40]}
 
 
 class ExtractTitleTests(unittest.TestCase):
@@ -101,6 +101,7 @@ class BookmarkServiceTests(unittest.TestCase):
             self.assertEqual(bm.url, "https://example.com/article")
             self.assertEqual(bm.title, "Great Article")
             self.assertTrue(bm.summary.startswith("Summary of:"))
+            self.assertEqual(bm.metadata["title_zh"], "中文标题")
             self.assertIn("Body here", bm.content)
 
     def test_add_bookmark_rejects_empty_url(self):
@@ -134,6 +135,35 @@ class BookmarkServiceTests(unittest.TestCase):
         self.assertIn("Summary", prompt)
 
 
+    def test_summarizer_error_is_recorded_not_raised(self):
+        def boom(text):
+            raise RuntimeError("llm down")
+        with tempfile.TemporaryDirectory() as d:
+            store = BookmarkStore(db_path=os.path.join(d, "bookmarks.jsonl"))
+            svc = BookmarkService(
+                store=store,
+                fetcher=fake_fetcher("<title>Some Article</title><p>body</p>"),
+                summarizer=boom,
+            )
+            bm = svc.add_bookmark("example.com/x")
+            self.assertEqual(bm.title, "Some Article")  # title still extracted
+            self.assertEqual(bm.summary, "")
+            self.assertIn("llm down", bm.metadata["summary_error"])
+            self.assertNotIn("title_zh", bm.metadata)
+
+    def test_plain_text_summarizer_still_works(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = BookmarkStore(db_path=os.path.join(d, "bookmarks.jsonl"))
+            svc = BookmarkService(
+                store=store,
+                fetcher=fake_fetcher("<title>T</title><p>body</p>"),
+                summarizer=lambda text: "plain summary",
+            )
+            bm = svc.add_bookmark("example.com/x")
+            self.assertEqual(bm.summary, "plain summary")
+            self.assertNotIn("title_zh", bm.metadata)
+
+
 class BookmarkRenameTests(unittest.TestCase):
     def test_rename_locks_title_against_refresh(self):
         with tempfile.TemporaryDirectory() as d:
@@ -154,6 +184,8 @@ class BookmarkRenameTests(unittest.TestCase):
             refreshed = svc.refresh_bookmark(bm.id)
             self.assertEqual(refreshed.title, "我的收藏")
             self.assertTrue(refreshed.summary.startswith("Summary of:"))
+            # The Chinese title still refreshes under a locked manual title.
+            self.assertEqual(refreshed.metadata["title_zh"], "中文标题")
 
             # Empty rename unlocks; the next refresh re-extracts the title.
             svc.rename_bookmark(bm.id, "  ")

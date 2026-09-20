@@ -305,6 +305,17 @@ try {
   .bookmark-item .actions button { background: transparent; border: 0; color: var(--dim); padding: 4px; cursor: pointer; border-radius: 5px; }
   .bookmark-item .actions button:hover:not(:disabled) { color: var(--accent); background: var(--card-hover); }
   .bookmark-item .actions button:disabled { cursor: default; }
+  /* bookmark detail modal */
+  .bm-detail { width: 520px; }
+  .bm-detail-text { font-size: 13px; line-height: 1.55; color: var(--fg); word-break: break-word; }
+  .bm-detail-text a { color: var(--accent); text-decoration: none; }
+  .bm-detail-text a:hover { text-decoration: underline; }
+  .bm-detail-err { color: var(--fail) !important; }
+  .bm-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px;
+            padding-top: 12px; border-top: 1px solid var(--border); }
+  .bm-detail-actions .send-btn { width: auto; padding: 6px 12px; gap: 5px; font-size: 12.5px;
+            display: inline-flex; align-items: center; }
+  .bm-detail-actions .send-btn .lucide { width: 13px; height: 13px; }
   .bookmark-empty { padding: 20px 10px; text-align: center; color: var(--dim-2); font-size: 13px; }
   .bm-error { color: var(--fail); font-size: 12px; margin-top: 4px; }
   .bm-rename { width: 100%; font-size: 12px; margin-bottom: 4px; }
@@ -985,7 +996,7 @@ try {
       <template x-for="b in bookmarks" :key="b.id">
         <div class="bookmark-item" :class="{'enriching': b.metadata && b.metadata.enriching}">
           <template x-if="bmRenamingId !== b.id">
-            <div class="title" @click="openLink(b.url)" title="Open link in new tab" x-text="b.title || b.url"></div>
+            <div class="title" @click="openLink(b.url)" title="Open link in new tab" x-text="bookmarkTitle(b)"></div>
           </template>
           <template x-if="bmRenamingId === b.id">
             <input class="rename-input bm-rename" type="text" x-model="bmRenameText" @click.stop
@@ -996,6 +1007,7 @@ try {
           <div class="summary" x-text="b.summary || (b.metadata && b.metadata.enriching ? '…' : '(no summary)')"></div>
           <div class="url" x-text="b.url"></div>
           <div class="actions" @click.stop>
+            <button @click="openBookmarkDetail(b)" title="查看详情"><i data-lucide="info"></i></button>
             <button @click="regenerateBookmark(b.id)" :disabled="!!(b.metadata && b.metadata.enriching)"
                     title="Regenerate title & summary"><i data-lucide="sparkles" :class="{'rotating': b.metadata && b.metadata.enriching}"></i></button>
             <button @click="openLink(b.url)" title="Open link in new tab"><i data-lucide="external-link"></i></button>
@@ -1008,6 +1020,52 @@ try {
       </template>
     </div>
   </div>
+
+  <!-- bookmark detail modal (centered) -->
+  <template x-if="bmDetail">
+    <div class="modal-backdrop" @click.self="bmDetail = null">
+      <div class="modal bm-detail">
+        <div class="modal-head">
+          <h2><i data-lucide="bookmark"></i><span x-text="bookmarkTitle(bmDetail)"></span></h2>
+          <button class="icon-btn" @click="bmDetail = null" title="Close (Esc)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <template x-if="bmDetail.title && bmDetail.metadata && bmDetail.metadata.title_zh && bmDetail.title !== bmDetail.metadata.title_zh">
+            <div class="fld"><span>原标题</span><div class="bm-detail-text" x-text="bmDetail.title"></div></div>
+          </template>
+          <div class="fld">
+            <span>摘要</span>
+            <div class="bm-detail-text" x-text="bmDetail.summary || '(暂无摘要)'"></div>
+          </div>
+          <div class="fld">
+            <span>链接</span>
+            <div class="bm-detail-text"><a :href="bmDetail.url" target="_blank" rel="noopener" x-text="bmDetail.url"></a></div>
+          </div>
+          <div class="fld">
+            <span>收藏时间</span>
+            <div class="bm-detail-text" x-text="new Date(bmDetail.created_at * 1000).toLocaleString()"></div>
+          </div>
+          <template x-if="bmDetail.metadata && bmDetail.metadata.fetch_error">
+            <p class="hint bm-detail-err" x-text="'抓取失败：' + bmDetail.metadata.fetch_error"></p>
+          </template>
+          <template x-if="bmDetail.metadata && bmDetail.metadata.summary_error">
+            <p class="hint bm-detail-err" x-text="'摘要生成失败：' + bmDetail.metadata.summary_error"></p>
+          </template>
+          <template x-if="!(bmDetail.metadata && bmDetail.metadata.title_zh)">
+            <p class="hint">还没有中文标题 — 点下方「刷新」用 LLM 生成中文标题和摘要。</p>
+          </template>
+          <div class="bm-detail-actions">
+            <button class="send-btn" @click="const b = bmDetail; bmDetail = null; discussBookmark(b)"><i data-lucide="message-square"></i> 在聊天中阅读</button>
+            <button class="send-btn" @click="regenerateBookmark(bmDetail.id)"
+                    :disabled="!!(bmDetail.metadata && bmDetail.metadata.enriching)"><i data-lucide="sparkles"></i> 刷新</button>
+            <button class="send-btn" @click="copyBookmark(bmDetail)"><i data-lucide="copy"></i> 复制</button>
+            <button class="send-btn" @click="const b = bmDetail; bmDetail = null; startBookmarkRename(b)"><i data-lucide="pencil"></i> 重命名</button>
+            <button class="send-btn" @click="deleteBookmark(bmDetail.id)"><i data-lucide="trash-2"></i> 删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
 
   <!-- tree-row "⋯" action menu -->
   <template x-if="nodeMenu.node">
@@ -1342,6 +1400,7 @@ function chatable() {
     newBookmarkUrl: '',
     bookmarkError: '',
     bmRenamingId: null, bmRenameText: '',  // inline bookmark rename state
+    bmDetail: null,                      // bookmark shown in the detail modal
     toggleBookmarks() {
       this.bookmarksOpen = !this.bookmarksOpen;
       if (this.bookmarksOpen) this.drawerOpen = false;  // the two panels are mutually exclusive
@@ -1393,11 +1452,12 @@ function chatable() {
       // so we resume watching instead of losing the reply.
       this.reconnectActive();
 
-      // Escape closes the topmost overlay: mind map > settings > gallery > bookmarks > drawer.
+      // Escape closes the topmost overlay: bookmark modal > mind map > settings > gallery > bookmarks > drawer.
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (this.quotePop.show) { this.quotePop.show = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
+        if (this.bmDetail) { this.bmDetail = null; return; }
         if (this.mindmap.open) {
           if (this.mmSearch) { this.mmSearch = ''; this.mmSearchIdx = 0; }  // clear search before closing
           else this.closeMindmap();
@@ -1726,6 +1786,10 @@ function chatable() {
       try {
         const data = await (await fetch('/api/bookmarks')).json();
         this.bookmarks = data.reverse();  // server returns oldest-first; show newest on top
+        // Keep the detail modal showing fresh data if it's open.
+        if (this.bmDetail) {
+          this.bmDetail = this.bookmarks.find(b => b.id === this.bmDetail.id) || null;
+        }
         this.refreshIcons();  // the list renders async — convert the new <i data-lucide>
       } catch (e) {
         this.bookmarkError = 'Failed to load bookmarks: ' + e;
@@ -1774,6 +1838,7 @@ function chatable() {
       try {
         const resp = await fetch('/api/bookmarks/' + id, {method: 'DELETE'});
         if (!resp.ok) { this.bookmarkError = await this.errDetail(resp); return; }
+        if (this.bmDetail && this.bmDetail.id === id) this.bmDetail = null;
         await this.loadBookmarks();
       } catch (e) {
         this.bookmarkError = 'Delete failed: ' + e;
@@ -1794,6 +1859,7 @@ function chatable() {
           return;
         }
         this.bookmarks = this.bookmarks.map(b => b.id === id ? data : b);
+        if (this.bmDetail && this.bmDetail.id === id) this.bmDetail = data;
         this.refreshIcons();
       } catch (e) {
         this.bookmarkError = String(e);
@@ -1803,6 +1869,21 @@ function chatable() {
 
     openLink(url) {
       window.open(url, '_blank', 'noopener');
+    },
+
+    // Display title: a manually renamed title wins; otherwise the LLM's
+    // Chinese title; otherwise the extracted original title.
+    bookmarkTitle(b) {
+      const md = (b && b.metadata) || {};
+      if (md.title_locked) return b.title || b.url;
+      return md.title_zh || b.title || b.url;
+    },
+
+    // The modal renders on demand — its <i data-lucide> icons need a fresh
+    // createIcons pass after Alpine has inserted them.
+    openBookmarkDetail(b) {
+      this.bmDetail = b;
+      this.$nextTick(() => this.refreshIcons());
     },
 
     async copyBookmark(b) {

@@ -6,6 +6,7 @@ import unittest
 
 import main
 from main import (
+    _parse_describe_output,
     apply_explicit_cache_control,
     build_context,
     explicit_cache_control_indexes,
@@ -15,6 +16,29 @@ from models import Node
 from store import ROOT_ID, TreeStore
 from tools import ToolRegistry, ToolResult, ToolSpec
 from web_tools import WebToolResult
+
+
+class DescribeBookmarkParseTests(unittest.TestCase):
+    """_parse_describe_output tolerates whatever the model actually returns."""
+
+    def test_clean_json(self):
+        out = _parse_describe_output('{"title_zh": "注意力机制", "summary": "讲了注意力。"}')
+        self.assertEqual(out, {"title_zh": "注意力机制", "summary": "讲了注意力。"})
+
+    def test_fenced_json(self):
+        raw = '```json\n{"title_zh": "标题", "summary": "摘要"}\n```'
+        self.assertEqual(_parse_describe_output(raw)["title_zh"], "标题")
+
+    def test_garbage_falls_back_to_plain_summary(self):
+        out = _parse_describe_output("这不是 JSON 的直接回答")
+        self.assertEqual(out["title_zh"], "")
+        self.assertEqual(out["summary"], "这不是 JSON 的直接回答")
+
+    def test_summary_capped(self):
+        raw = '{"title_zh": "", "summary": "' + "长" * 300 + '"}'
+        out = _parse_describe_output(raw)
+        self.assertTrue(out["summary"].endswith("…"))
+        self.assertLessEqual(len(out["summary"]), 200)
 
 
 class StoreContextTests(unittest.TestCase):
