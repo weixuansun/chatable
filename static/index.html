@@ -82,9 +82,16 @@ try {
           <div class="fld">
             <span>Theme</span>
             <div class="theme-row">
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='auto'}" @click="setTheme('auto')"><span class="swatch sw-auto"></span>System</button>
               <button type="button" class="theme-chip" :class="{active: appearance.theme==='midnight'}" @click="setTheme('midnight')"><span class="swatch sw-midnight"></span>Midnight</button>
               <button type="button" class="theme-chip" :class="{active: appearance.theme==='graphite'}" @click="setTheme('graphite')"><span class="swatch sw-graphite"></span>Graphite</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='obsidian'}" @click="setTheme('obsidian')"><span class="swatch sw-obsidian"></span>Obsidian</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='ocean'}" @click="setTheme('ocean')"><span class="swatch sw-ocean"></span>Ocean</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='forest'}" @click="setTheme('forest')"><span class="swatch sw-forest"></span>Forest</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='rose'}" @click="setTheme('rose')"><span class="swatch sw-rose"></span>Rose</button>
               <button type="button" class="theme-chip" :class="{active: appearance.theme==='light'}" @click="setTheme('light')"><span class="swatch sw-light"></span>Light</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='paper'}" @click="setTheme('paper')"><span class="swatch sw-paper"></span>Paper</button>
+              <button type="button" class="theme-chip" :class="{active: appearance.theme==='arctic'}" @click="setTheme('arctic')"><span class="swatch sw-arctic"></span>Arctic</button>
             </div>
           </div>
           <div class="fld">
