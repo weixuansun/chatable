@@ -700,7 +700,8 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .bm-error { color: var(--fail); font-size: 12px; margin-top: 6px; }
 .bm-rename { width: 100%; font-size: 12px; margin-bottom: 4px; }
 /* bookmark detail modal */
-.bm-detail { width: 540px; }
+/* .modal.… — the base .modal width is declared later in this file */
+.modal.bm-detail { width: 540px; }
 .bm-detail-text { font-size: 13.5px; line-height: 1.6; color: var(--fg); word-break: break-word; }
 .bm-detail-text a { color: var(--accent); text-decoration: none; }
 .bm-detail-text a:hover { text-decoration: underline; }
