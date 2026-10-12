@@ -37,4 +37,4 @@ Homepage = "https://github.com/weixuansun/chatable"
 Repository = "https://github.com/weixuansun/chatable"
 
 [tool.setuptools]
-py-modules = ["bookmark_store", "bookmark_service", "jsonl_store", "main", "models", "store", "tools", "web_tools", "service", "server"]
+py-modules = ["bookmark_store", "bookmark_service", "jsonl_store", "main", "models", "report_store", "store", "tools", "web_tools", "service", "server"]

@@ -1384,6 +1384,593 @@ class ToolBlockContiguityTests(unittest.TestCase):
         self.assertIn("not executed", replay[-1]["content"])
 
 
+class StreamDonePayloadTests(unittest.TestCase):
+    """_openai_stream reports why the answer ended and honours a per-call cap."""
+
+    def _run(self, chunks, **kwargs):
+        seen = {}
+
+        class _Stream:
+            def __iter__(self):
+                return iter(chunks)
+
+            def close(self):
+                pass
+
+        class _Completions:
+            def create(self, **kw):
+                seen.update(kw)
+                return _Stream()
+
+        fake = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=_Completions())
+        )
+        old = main._openai_client
+        main._openai_client = fake
+        try:
+            events = list(main._openai_stream([{"role": "user", "content": "hi"}], **kwargs))
+        finally:
+            main._openai_client = old
+        return events, seen
+
+    def test_done_carries_finish_reason(self):
+        events, _ = self._run([
+            {"choices": [{"delta": {"content": "cut"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12}},
+        ])
+        kind, payload = events[-1]
+        self.assertEqual(kind, "done")
+        self.assertEqual(payload["finish_reason"], "length")
+        self.assertEqual(payload["output"], 9)
+
+    def test_max_tokens_defaults_to_chat_cap_and_can_be_overridden(self):
+        chunks = [{"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}]
+        _, seen = self._run(chunks)
+        self.assertEqual(seen["max_tokens"], main.MAX_TOKENS)
+        _, seen = self._run(chunks, max_tokens=1234)
+        self.assertEqual(seen["max_tokens"], 1234)
+
+    def test_finish_reason_is_not_persisted_as_usage(self):
+        # Both generation loops keep numeric usage only: the string would
+        # otherwise land in node.usage and in the client's `done` event.
+        from unittest.mock import patch
+
+        import service as service_mod
+        from service import ChatService
+
+        def fake_stream(messages, tools=None):
+            yield ("delta", "answer")
+            yield ("done", {"input": 2, "output": 3, "total": 5, "finish_reason": "stop"})
+
+        for mode in ("native", "prompt"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
+                svc = ChatService(TreeStore(os.path.join(d, "chat.jsonl")))
+                with patch.object(service_mod, "stream_backend", fake_stream), \
+                        patch.object(service_mod, "TOOL_DECISION_MODE", mode), \
+                        patch.object(service_mod, "AUTO_TOOLS_ENABLED", False):
+                    info = svc.start_turn("q", None)
+                    events = list(svc.subscribe(info["assistant_id"], 0))
+                node = svc.store.get(info["assistant_id"])
+                self.assertEqual(node.content, "answer")
+                self.assertNotIn("finish_reason", node.usage)
+                done = [e for e in events if e["type"] == "done"][0]
+                self.assertNotIn("finish_reason", done["usage"])
+
+
+class TrunkNodesTests(unittest.TestCase):
+    def test_returns_one_conversation_as_independent_copies(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = TreeStore(os.path.join(d, "chat.jsonl"))
+            q1 = Node.new("user", "first", ROOT_ID)
+            q1.created_at = 1.0
+            a1 = Node.new("assistant", "first answer", q1.id)
+            a1.created_at = 2.0
+            a1.metadata = {"reasoning": "r"}
+            q2 = Node.new("user", "second", ROOT_ID)
+            q2.created_at = 3.0
+            for n in (q1, q2, a1):  # the two conversations interleave on disk
+                store.add(n)
+
+            got = store.trunk_nodes(q1.id)
+            self.assertEqual([n.id for n in got], [q1.id, a1.id])  # oldest first
+            self.assertEqual([n.id for n in store.trunk_nodes(q2.id)], [q2.id])
+            self.assertEqual(store.trunk_nodes("nope"), [])
+
+            got[1].content = "mutated"
+            got[1].metadata["reasoning"] = "mutated"
+            self.assertEqual(store.get(a1.id).content, "first answer")
+            self.assertEqual(store.get(a1.id).metadata["reasoning"], "r")
+
+
+class ReportStoreTests(unittest.TestCase):
+    def test_round_trip_overwrite_and_delete(self):
+        import report_store
+
+        with tempfile.TemporaryDirectory() as d:
+            directory = report_store.reports_dir(d)
+            self.assertIsNone(report_store.get(directory, "abc123"))
+            report_store.save(directory, {"trunk_id": "abc123", "content": "综述 v1"})
+            report_store.save(directory, {"trunk_id": "abc123", "content": "综述 v2"})
+            self.assertEqual(report_store.get(directory, "abc123")["content"], "综述 v2")
+            self.assertEqual(os.listdir(directory), ["abc123.json"])  # no temp file left
+            self.assertTrue(report_store.delete(directory, "abc123"))
+            self.assertFalse(report_store.delete(directory, "abc123"))
+            self.assertIsNone(report_store.get(directory, "abc123"))
+
+    def test_unsafe_ids_never_become_paths(self):
+        import report_store
+
+        with tempfile.TemporaryDirectory() as d:
+            directory = report_store.reports_dir(d)
+            with self.assertRaises(ValueError):
+                report_store.save(directory, {"trunk_id": "../evil", "content": "x"})
+            self.assertIsNone(report_store.get(directory, "../evil"))
+            self.assertFalse(report_store.delete(directory, "../evil"))
+            self.assertFalse(os.path.exists(os.path.join(d, "evil.json")))
+
+
+class _ReportTestBase(unittest.TestCase):
+    def _service(self, d):
+        from service import ChatService
+        return ChatService(TreeStore(os.path.join(d, "chat.jsonl")))
+
+    def _add(self, store, role, content, parent_id, created_at, **kw):
+        n = Node.new(role, content, parent_id)
+        n.created_at = created_at
+        for k, v in kw.items():
+            setattr(n, k, v)
+        store.add(n)
+        return n
+
+    def _branched_tree(self, store):
+        # trunk Q → A → two forked follow-ups, each with its own answer
+        q = self._add(store, "user", "root question", ROOT_ID, 1.0)
+        a = self._add(store, "assistant", "root answer", q.id, 2.0)
+        f1 = self._add(store, "user", "fork one", a.id, 3.0)
+        f2 = self._add(store, "user", "fork two", a.id, 4.0)
+        self._add(store, "assistant", "answer one", f1.id, 5.0)
+        self._add(store, "assistant", "answer two", f2.id, 6.0)
+        return q, a, f1, f2
+
+
+class ReportSourceTests(_ReportTestBase):
+    """The model's input for a survey report covers the whole tree and nothing
+    but what the user and assistant wrote."""
+
+    def test_every_branch_is_present_and_labelled(self):
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, a, f1, f2 = self._branched_tree(svc.store)
+            deep = self._add(svc.store, "user", "deeper on one",
+                             svc.store.trunk_nodes(q.id)[4].id, 7.0)
+            self._add(svc.store, "assistant", "deep answer", deep.id, 8.0)
+
+            src = svc._report_source(q.id)
+            text = src["text"]
+
+        for piece in ("root question", "root answer", "fork one", "answer one",
+                      "fork two", "answer two", "deeper on one", "deep answer"):
+            self.assertIn(piece, text)
+        # Depth-first: branch one is followed to its end before branch two.
+        self.assertLess(text.index("=== T2 ｜ 承接 T1 ｜ 分支 1/2 ==="),
+                        text.index("=== T3 ｜ 承接 T2 ==="))
+        self.assertLess(text.index("=== T3 ｜ 承接 T2 ==="),
+                        text.index("=== T4 ｜ 承接 T1 ｜ 分支 2/2 ==="))
+        self.assertLess(text.index("deep answer"), text.index("answer two"))
+        self.assertEqual((src["turns"], src["messages"], src["truncated_nodes"]), (4, 8, 0))
+        self.assertEqual(src["title"], "root question")
+
+    def test_regenerated_answers_are_marked_and_followups_say_which_they_follow(self):
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q = self._add(svc.store, "user", "question", ROOT_ID, 1.0)
+            self._add(svc.store, "assistant", "first version", q.id, 2.0)
+            a2 = self._add(svc.store, "assistant", "second version", q.id, 3.0)
+            f = self._add(svc.store, "user", "follow the second", a2.id, 4.0)
+            self._add(svc.store, "assistant", "ok", f.id, 5.0)
+
+            text = svc._report_source(q.id)["text"]
+
+        self.assertLess(text.index("first version"), text.index("【助手 · 重新生成的第 2 版回答】"))
+        self.assertLess(text.index("【助手 · 重新生成的第 2 版回答】"), text.index("second version"))
+        self.assertIn("=== T2 ｜ 承接 T1 的第 2 版回答 ===", text)
+
+    def test_only_what_was_said_reaches_the_model(self):
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            preamble = ("Attached file(s) — read them with web_fetch using the exact path shown, "
+                        "then answer:\n- [paper.pdf](/api/files/paper.pdf): /srv/uploads/paper.pdf\n\n"
+                        "summarize the paper")
+            q = self._add(svc.store, "user", preamble, ROOT_ID, 1.0, metadata={
+                "attachments": [{"filename": "paper.pdf", "path": "/srv/uploads/paper.pdf",
+                                 "mime": "application/pdf"}]})
+            self._add(svc.store, "assistant", "the paper says X", q.id, 2.0, metadata={
+                "reasoning": "REASONING-SECRET",
+                "tool_results": [
+                    {"name": "web_fetch", "ok": True, "arguments": {"url": "https://a.example/p"},
+                     "output": "TOOL-OUTPUT-SECRET",
+                     "images": [{"url": "https://a.example/i.png",
+                                 "data_url": "data:image/png;base64,AAAA"}]},
+                    {"name": "web_fetch", "ok": True, "arguments": {"url": "/srv/uploads/paper.pdf"},
+                     "output": "local file"},
+                    {"name": "web_fetch", "ok": False, "arguments": {"url": "https://dead.example/"},
+                     "output": ""},
+                    {"name": "web_fetch", "ok": True, "arguments": {"url": "https://a.example/p"},
+                     "output": "again"},
+                    {"name": "web_search", "ok": True, "arguments": {"query": "x"},
+                     "output": "1. **t**\n   URL: https://searched.example/"},
+                ],
+            })
+            # Replies with nothing to report: a failed turn and an empty one.
+            f = self._add(svc.store, "user", "and then?", q.id, 3.0)
+            self._add(svc.store, "assistant", "[error: BadRequestError: boom]", f.id, 4.0)
+            self._add(svc.store, "assistant", "", f.id, 5.0)
+
+            src = svc._report_source(q.id)
+            text = src["text"]
+
+        for leaked in ("REASONING-SECRET", "TOOL-OUTPUT-SECRET", "data:image", "/srv/uploads",
+                       "Attached file(s)", "web_fetch", "[error:", "dead.example", "searched.example"):
+            self.assertNotIn(leaked, text)
+        self.assertIn("[附件: paper.pdf]\nsummarize the paper", text)
+        self.assertEqual(src["sources"], ["https://a.example/p"])
+        self.assertIn("1. https://a.example/p（T1）", text)
+        self.assertIn("（这个提问没有得到有效回答）", text)
+        self.assertEqual(src["title"], "summarize the paper")
+
+    def test_in_progress_reply_is_left_out(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q = self._add(svc.store, "user", "question", ROOT_ID, 1.0)
+            self._add(svc.store, "assistant", "settled answer", q.id, 2.0)
+            live = self._add(svc.store, "assistant", "half-written", q.id, 3.0)
+            with patch.object(svc.live, "active_ids", lambda: [live.id]):
+                text = svc._report_source(q.id)["text"]
+
+        self.assertIn("settled answer", text)
+        self.assertNotIn("half-written", text)
+
+    def test_notes_between_turns_do_not_cut_a_branch_off(self):
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q = self._add(svc.store, "user", "question", ROOT_ID, 1.0)
+            a = self._add(svc.store, "assistant", "answer", q.id, 2.0)
+            note = self._add(svc.store, "summary", "a summary node", a.id, 3.0)
+            f = self._add(svc.store, "user", "below the note", note.id, 4.0)
+            self._add(svc.store, "assistant", "still here", f.id, 5.0)
+
+            text = svc._report_source(q.id)["text"]
+
+        self.assertIn("still here", text)
+        self.assertNotIn("a summary node", text)
+        self.assertIn("=== T2 ｜ 承接 T1 ===", text)
+
+    def test_over_budget_tree_is_clipped_then_refused(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q = self._add(svc.store, "user", "question", ROOT_ID, 1.0)
+            long_answer = "HEAD " + "中" * 20000 + " TAIL"
+            self._add(svc.store, "assistant", long_answer, q.id, 2.0)
+
+            with patch.object(main, "REPORT_MAX_INPUT_TOKENS", 100000):
+                self.assertEqual(svc._report_source(q.id)["truncated_nodes"], 0)
+            with patch.object(main, "REPORT_MAX_INPUT_TOKENS", 5000):
+                src = svc._report_source(q.id)
+            with patch.object(main, "REPORT_MAX_INPUT_TOKENS", 50), \
+                    self.assertRaises(ValueError) as ctx:
+                svc._report_source(q.id)
+
+        self.assertEqual(src["truncated_nodes"], 1)
+        self.assertLessEqual(src["estimated_tokens"], 5000)
+        for kept in ("HEAD", "TAIL", "中间省略"):
+            self.assertIn(kept, src["text"])
+        self.assertIn("对话过大", str(ctx.exception))
+
+    def test_chinese_text_is_not_undercounted(self):
+        from service import _estimate_report_tokens
+
+        self.assertEqual(_estimate_report_tokens("中" * 1000), 1000)
+        self.assertEqual(_estimate_report_tokens("a" * 1000), 250)
+
+    def test_rejects_what_cannot_be_reported(self):
+        from store import NodeNotFoundError
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, a, _, _ = self._branched_tree(svc.store)
+            lonely = self._add(svc.store, "user", "no answer yet", ROOT_ID, 9.0)
+            with self.assertRaises(ValueError):
+                svc._report_source(a.id)  # not a trunk
+            with self.assertRaises(NodeNotFoundError):
+                svc._report_source("missing")
+            with self.assertRaises(ValueError):
+                svc._report_source(lonely.id)  # nothing to report on
+
+    def test_long_linear_chat_does_not_hit_the_recursion_limit(self):
+        import sys
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            parent, t = ROOT_ID, 0.0
+            first = None
+            for i in range(sys.getrecursionlimit() // 2 + 50):
+                t += 1
+                u = self._add(svc.store, "user", f"q{i}", parent, t)
+                first = first or u
+                t += 1
+                parent = self._add(svc.store, "assistant", f"a{i}", u.id, t).id
+
+            src = svc._report_source(first.id)
+
+        self.assertEqual(src["turns"], sys.getrecursionlimit() // 2 + 50)
+
+
+class ReportJobTests(_ReportTestBase):
+    """Generating a survey report: background job, persistence, and what
+    happens when it is stopped, fails, or races with other actions."""
+
+    @staticmethod
+    def _answering(text, usage=None, seen=None):
+        def fake_stream(messages, tools=None, max_tokens=None):
+            if seen is not None:
+                seen.append({"messages": messages, "tools": tools, "max_tokens": max_tokens})
+            yield ("reasoning", "thinking")
+            yield ("delta", text)
+            yield ("done", usage or {"input": 10, "output": 5, "total": 15, "finish_reason": "stop"})
+        return fake_stream
+
+    def _generate(self, svc, trunk_id, fake_stream, focus=""):
+        from unittest.mock import patch
+
+        import service as service_mod
+
+        with patch.object(service_mod, "stream_backend", fake_stream):
+            info = svc.start_report(trunk_id, focus)
+            events = list(svc.subscribe_report(trunk_id, 0))
+        return info, events
+
+    def _blocked(self, text="partial"):
+        """A fake stream that pauses after its first chunk until released."""
+        import threading
+
+        gate = {"reached": threading.Event(), "release": threading.Event(), "calls": 0}
+
+        def fake_stream(messages, tools=None, max_tokens=None):
+            gate["calls"] += 1
+            yield ("delta", text)
+            gate["reached"].set()
+            gate["release"].wait(5)
+            yield ("delta", " and more")
+            yield ("done", {"input": 1, "output": 1, "total": 2, "finish_reason": "stop"})
+
+        return fake_stream, gate
+
+    def test_report_is_generated_saved_and_goes_stale(self):
+        import report_store
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, a, _, _ = self._branched_tree(svc.store)
+            seen = []
+
+            info, events = self._generate(
+                svc, q.id, self._answering("# 综述\n\n正文", seen=seen), focus="  只看分支一  ")
+
+            self.assertTrue(info["started"])
+            self.assertEqual([e["type"] for e in events],
+                             ["report_start", "reasoning", "delta", "done"])
+            self.assertEqual(events[0]["focus"], "只看分支一")
+            self.assertEqual((events[0]["turns"], events[0]["messages"]), (3, 6))
+
+            # One call, no tools, the report's own output cap, the whole tree
+            # and the focus in the prompt.
+            self.assertEqual(len(seen), 1)
+            self.assertIsNone(seen[0]["tools"])
+            self.assertEqual(seen[0]["max_tokens"], main.REPORT_MAX_TOKENS)
+            prompt = seen[0]["messages"][-1]["content"]
+            for piece in ("只看分支一", "root answer", "answer one", "answer two"):
+                self.assertIn(piece, prompt)
+            self.assertEqual(seen[0]["messages"][0],
+                             {"role": "system", "content": main.REPORT_SYSTEM_PROMPT})
+
+            saved = report_store.get(svc._reports_dir(), q.id)
+            self.assertEqual(saved["content"], "# 综述\n\n正文")
+            self.assertEqual(saved["focus"], "只看分支一")
+            self.assertEqual(saved["usage"], {"input": 10, "output": 5, "total": 15})
+            self.assertFalse(saved["output_truncated"])
+            self.assertEqual(events[-1]["report"], saved)
+            self.assertTrue(os.path.dirname(svc._reports_dir()) == d)
+
+            state = svc.get_report(q.id)
+            self.assertEqual((state["running"], state["stale"]), (False, False))
+            self.assertEqual(state["report"], saved)
+            self.assertFalse(svc.has_active_streams())
+
+            fname, md = svc.report_markdown(q.id)
+            self.assertTrue(fname.startswith("chatable-综述-root-question-"))
+            self.assertTrue(md.startswith("# 综述\n\n正文"))
+
+            self._add(svc.store, "user", "one more question", a.id, 9.0)
+            self.assertTrue(svc.get_report(q.id)["stale"])
+
+    def test_no_report_yet(self):
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, a, _, _ = self._branched_tree(svc.store)
+            state = svc.get_report(q.id)
+            self.assertEqual((state["report"], state["running"], state["stale"]),
+                             (None, False, False))
+            self.assertIsNone(svc.report_markdown(q.id))
+            self.assertIsNone(svc.subscribe_report(q.id, 0))
+            self.assertFalse(svc.stop_report(q.id))
+            with self.assertRaises(ValueError):
+                svc.get_report(a.id)
+            with self.assertRaises(ValueError):
+                svc.start_report(a.id)
+
+    def test_output_cut_off_at_the_cap_is_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, *_ = self._branched_tree(svc.store)
+            usage = {"input": 10, "output": 5, "total": 15, "finish_reason": "length"}
+            _, events = self._generate(svc, q.id, self._answering("half a rep", usage=usage))
+            self.assertTrue(events[-1]["report"]["output_truncated"])
+
+    def test_failure_keeps_the_previous_report(self):
+        import report_store
+
+        def failing(messages, tools=None, max_tokens=None):
+            yield ("delta", "partial")
+            raise RuntimeError("upstream exploded")
+
+        def silent(messages, tools=None, max_tokens=None):
+            yield ("reasoning", "only thinking")
+            yield ("done", {"input": 1, "output": 0, "total": 1, "finish_reason": "stop"})
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, *_ = self._branched_tree(svc.store)
+            self._generate(svc, q.id, self._answering("good report"))
+
+            _, events = self._generate(svc, q.id, failing)
+            self.assertEqual(events[-1]["type"], "error")
+            self.assertIn("upstream exploded", events[-1]["message"])
+            self.assertEqual(report_store.get(svc._reports_dir(), q.id)["content"], "good report")
+
+            _, events = self._generate(svc, q.id, silent)
+            self.assertEqual(events[-1]["type"], "error")
+            self.assertEqual(report_store.get(svc._reports_dir(), q.id)["content"], "good report")
+            self.assertFalse(svc.has_active_streams())
+
+    def test_transient_stream_failure_is_retried_once(self):
+        calls = []
+
+        def flaky(messages, tools=None, max_tokens=None):
+            calls.append(1)
+            if len(calls) == 1:
+                yield ("delta", "partial")
+                raise main.StreamTruncatedError("cut")
+            yield ("delta", "full report")
+            yield ("done", {"input": 1, "output": 1, "total": 2, "finish_reason": "stop"})
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, *_ = self._branched_tree(svc.store)
+            _, events = self._generate(svc, q.id, flaky)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([e["type"] for e in events],
+                         ["report_start", "delta", "reset", "delta", "done"])
+        self.assertEqual(events[-1]["report"]["content"], "full report")
+
+    def test_stop_saves_nothing_and_keeps_the_previous_report(self):
+        from unittest.mock import patch
+
+        import report_store
+        import service as service_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, *_ = self._branched_tree(svc.store)
+            self._generate(svc, q.id, self._answering("good report"))
+            fake_stream, gate = self._blocked()
+
+            with patch.object(service_mod, "stream_backend", fake_stream):
+                svc.start_report(q.id)
+                self.assertTrue(gate["reached"].wait(5))
+                # While it runs: visible as running, and blocks storage/model switches.
+                self.assertTrue(svc.get_report(q.id)["running"])
+                self.assertTrue(svc.has_active_streams())
+                self.assertEqual(svc.active_stream_ids(), [])  # chat reconnect list stays chat-only
+                # A second start attaches instead of calling the model again.
+                self.assertFalse(svc.start_report(q.id, "another focus")["started"])
+                self.assertTrue(svc.stop_report(q.id))
+                gate["release"].set()
+                events = list(svc.subscribe_report(q.id, 0))
+
+            self.assertEqual(gate["calls"], 1)
+            self.assertEqual(events[-1]["type"], "stopped")
+            self.assertNotIn("done", [e["type"] for e in events])
+            self.assertEqual(report_store.get(svc._reports_dir(), q.id)["content"], "good report")
+            self.assertFalse(svc.get_report(q.id)["running"])
+            self.assertFalse(svc.has_active_streams())
+
+    def test_finished_job_cleanup_does_not_drop_the_next_job(self):
+        import time
+        from unittest.mock import patch
+
+        import service as service_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, *_ = self._branched_tree(svc.store)
+            fake_stream, gate = self._blocked()
+            with patch.object(service_mod, "RETAIN_FINISHED_TURN_S", 0.05):
+                self._generate(svc, q.id, self._answering("first"))
+                with patch.object(service_mod, "stream_backend", fake_stream):
+                    svc.start_report(q.id)
+                    self.assertTrue(gate["reached"].wait(5))
+                    time.sleep(0.3)  # the first job's cleanup timer fires here
+                    self.assertTrue(svc.has_active_streams())
+                    self.assertIsNotNone(svc.subscribe_report(q.id, 0))
+                    gate["release"].set()
+                    events = list(svc.subscribe_report(q.id, 0))
+                self.assertEqual(events[-1]["report"]["content"], "partial and more")
+                time.sleep(0.3)  # ...and its own cleanup removes it
+                self.assertIsNone(svc.subscribe_report(q.id, 0))
+
+    def test_report_is_not_written_for_a_conversation_gone_by_the_time_it_finishes(self):
+        import report_store
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, *_ = self._branched_tree(svc.store)
+
+            def fake_stream(messages, tools=None, max_tokens=None):
+                yield ("delta", "a full report")
+                # Gone behind the job's back, with no stop request.
+                svc.store.delete_subtree(q.id)
+                yield ("done", {"input": 1, "output": 1, "total": 2, "finish_reason": "stop"})
+
+            _, events = self._generate(svc, q.id, fake_stream)
+
+            self.assertEqual(events[-1]["type"], "stopped")
+            self.assertIsNone(report_store.get(svc._reports_dir(), q.id))
+
+    def test_deleting_the_conversation_drops_its_report_and_running_job(self):
+        from unittest.mock import patch
+
+        import report_store
+        import service as service_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, a, f1, _ = self._branched_tree(svc.store)
+            self._generate(svc, q.id, self._answering("good report"))
+            directory = svc._reports_dir()
+
+            # Deleting a branch leaves the report alone.
+            svc.delete_subtree(f1.id)
+            self.assertIsNotNone(report_store.get(directory, q.id))
+
+            fake_stream, gate = self._blocked()
+            with patch.object(service_mod, "stream_backend", fake_stream):
+                svc.start_report(q.id)
+                self.assertTrue(gate["reached"].wait(5))
+                svc.delete_subtree(q.id)
+                gate["release"].set()
+                events = list(svc.subscribe_report(q.id, 0))
+
+            self.assertEqual(events[-1]["type"], "stopped")
+            self.assertIsNone(report_store.get(directory, q.id))
+            self.assertFalse(svc.store.exists(q.id))
+
+
 class VisionProbeSetup:  # noqa: D101 - marker namespace, not a test
     pass
 

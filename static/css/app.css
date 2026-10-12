@@ -708,6 +708,21 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .bm-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; padding-top: 16px;
         border-top: 1px solid var(--border); }
 .bm-detail-actions button { height: 32px; padding: 0 12px; font-size: 12.5px; }
+/* survey report (综述) modal */
+.modal.survey-modal { width: 920px; height: calc(100vh - 64px); }
+.survey-body { flex: 1; min-height: 0; }
+.survey-meta { font-size: 11.5px; color: var(--dim-2); margin-bottom: 12px; font-variant-numeric: tabular-nums; }
+.survey-note { font-size: 12.5px; line-height: 1.55; color: var(--dim); margin: 0 0 12px; padding: 7px 11px;
+        background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
+.survey-body .modal-err { margin: 0 0 12px; }
+.survey-foot { align-items: center; }
+.survey-foot button { flex: none; height: 32px; padding: 0 12px; font-size: 12.5px; }
+.survey-focus { flex: 1; min-width: 0; height: 32px; background: var(--card); color: var(--fg);
+        border: 1px solid var(--border-2); border-radius: 8px; padding: 0 11px; font: inherit; font-size: 13px;
+        outline: none; transition: border-color .15s, box-shadow .15s; }
+.survey-focus:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.survey-focus::placeholder { color: var(--dim-2); }
+.survey-focus:disabled { opacity: .6; }
 
 /* =========================================================================
    Modals
@@ -805,6 +820,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .node-menu-item:hover { background: var(--card-hover); }
 .node-menu-item.mi-export:hover .lucide { color: var(--ok); }
 .node-menu-item.mi-map:hover .lucide { color: var(--accent); }
+.node-menu-item.mi-report:hover .lucide { color: var(--accent); }
 .node-menu-item.mi-rename:hover .lucide { color: var(--branch); }
 .node-menu-item.mi-del { color: var(--fail); margin-top: 4px; position: relative; }
 .node-menu-item.mi-del::before { content: ""; position: absolute; left: 4px; right: 4px; top: -3px; height: 1px; background: var(--border); }
@@ -941,6 +957,8 @@ body.col-resizing { cursor: col-resize; user-select: none; }
   .mindmap-head { gap: 6px; padding: 0 8px 0 12px; }
   .mindmap-head h3 .mm-title { display: none; }
   .gallery-grid { padding: 16px; }
+  .survey-foot { flex-wrap: wrap; }
+  .survey-focus { flex-basis: 100%; }
 }
 
 /* touch devices: no hover, so row-level actions must stay visible */

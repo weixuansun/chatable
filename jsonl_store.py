@@ -332,27 +332,30 @@ class JsonlTreeStore:
             parent_id=None, created_at=0.0,
         )
 
+    @staticmethod
+    def _copy(node: Node) -> Node:
+        # An independent copy so callers can't accidentally mutate the store
+        # through a reference (matching old SQLite behaviour where every row
+        # fetch produced a new object).
+        return Node(
+            id=node.id,
+            role=node.role,
+            content=node.content,
+            parent_id=node.parent_id,
+            created_at=node.created_at,
+            usage=dict(node.usage) if node.usage else None,
+            pinned=node.pinned,
+            token_count=node.token_count,
+            title=node.title,
+            summary=node.summary,
+            metadata=dict(node.metadata) if node.metadata else None,
+        )
+
     def get(self, nid: str) -> Node:
         if nid == ROOT_ID:
             return self._root()
         try:
-            node = self._nodes[nid]
-            # Return an independent copy so callers can't accidentally mutate
-            # the store through a reference (matching old SQLite behaviour where
-            # every row fetch produced a new object).
-            return Node(
-                id=node.id,
-                role=node.role,
-                content=node.content,
-                parent_id=node.parent_id,
-                created_at=node.created_at,
-                usage=dict(node.usage) if node.usage else None,
-                pinned=node.pinned,
-                token_count=node.token_count,
-                title=node.title,
-                summary=node.summary,
-                metadata=dict(node.metadata) if node.metadata else None,
-            )
+            return self._copy(self._nodes[nid])
         except KeyError as e:
             raise NodeNotFoundError(nid) from e
 
@@ -534,6 +537,19 @@ class JsonlTreeStore:
 
     def all_nodes(self) -> list[Node]:
         return sorted(self._nodes.values(), key=lambda n: n.created_at)
+
+    def trunk_nodes(self, trunk_id: str) -> list[Node]:
+        """Copies of every node in one conversation (trunk + all branches),
+        oldest first. Empty for an unknown trunk.
+
+        Taken under the lock, so a turn finishing on another thread can't
+        change the set mid-read — a consistent snapshot for whole-tree work.
+        """
+        with self._lock:
+            members = self._members.get(trunk_id) or {}
+            nodes = [self._copy(self._nodes[mid]) for mid in members if mid in self._nodes]
+        nodes.sort(key=lambda n: n.created_at)
+        return nodes
 
     def children_map(self) -> dict[str, list[str]]:
         created: dict[str, float] = {nid: n.created_at for nid, n in self._nodes.items()}

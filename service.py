@@ -23,6 +23,7 @@ Event shapes yielded by ``send_stream`` (each is a plain dict):
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,7 @@ import httpx
 from openai import APIConnectionError
 
 import main
+import report_store
 from main import build_context, call_backend, extract_text, extract_tool_calls, extract_usage, stream_backend
 from models import Node
 from store import ROOT_ID, TreeStore, resolve_db_path
@@ -191,10 +193,89 @@ class _LiveTurns:
         with self._lock:
             self._turns.pop(assistant_id, None)
 
+    def discard(self, key: str, turn: _LiveTurn) -> None:
+        """Remove ``key`` only if it still maps to ``turn``.
+
+        For registries whose keys are reused (one report job per conversation):
+        a finished job's delayed cleanup must not drop a newer job.
+        """
+        with self._lock:
+            if self._turns.get(key) is turn:
+                del self._turns[key]
+
     def active_ids(self) -> list[str]:
         with self._lock:
             return [tid for tid, t in self._turns.items() if not t.done]
 
+
+def _heading_text(node: Node) -> str:
+    """A node's one-line heading: its title, else the start of its content."""
+    text = (node.title or "").strip() or " ".join((node.content or "").split())[:60]
+    text = text.lstrip("#").strip()  # never let content inject heading level
+    return text or "(untitled)"
+
+
+def _title_slug(title: str) -> str:
+    return re.sub(r"[^\w一-鿿]+", "-", title).strip("-")[:40]
+
+
+# ---- survey report (综述) helpers -------------------------------------------
+
+# Per-message character caps tried in order when a tree's text is over the
+# input budget (None = untouched); the first that fits wins.
+_REPORT_NODE_CAPS = (None, 8000, 4000, 2000, 1000, 500)
+_REPORT_MAX_SOURCES = 80
+_REPORT_FOCUS_MAX_CHARS = 500
+
+# CJK and full-width characters cost about a token each, everything else about
+# a token per four characters. (models.estimate_tokens is len//4, which
+# under-counts Chinese text several times over.)
+_CJK_RE = re.compile(r"[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
+
+
+def _estimate_report_tokens(text: str) -> int:
+    cjk = len(_CJK_RE.findall(text))
+    return cjk + (len(text) - cjk + 3) // 4
+
+
+def _clip_middle(text: str, cap: Optional[int]) -> str:
+    """Keep the head and tail of ``text`` within ``cap`` characters."""
+    if cap is None or len(text) <= cap:
+        return text
+    head = cap * 2 // 3
+    tail = cap - head
+    return (f"{text[:head].rstrip()}\n\n[……中间省略约 {len(text) - cap} 字……]\n\n"
+            f"{text[-tail:].lstrip()}")
+
+
+def _strip_attachment_preamble(content: str) -> str:
+    """Drop the composer's attachment note from a user message.
+
+    The note tells the model to web_fetch server-side paths (see send() in
+    static/index.html); mirrors ``_stripAttachmentPreamble`` there.
+    """
+    text = content or ""
+    if text.startswith("Attached image(s)"):
+        _, _, text = text.partition("\n")
+        text = text.lstrip()
+    if text.startswith("Attached file(s)"):
+        lines = text.split("\n")
+        i = 1
+        while i < len(lines) and lines[i].startswith("- "):
+            i += 1
+        text = "\n".join(lines[i:])
+    return text.lstrip()
+
+
+def _report_fingerprint(nodes: list[Node]) -> str:
+    """Identity of a conversation's chat content, to tell a saved report is
+    out of date. Covers in-progress replies too (their length changes when
+    they finish), so a report written mid-turn goes stale afterwards."""
+    h = hashlib.sha1()
+    for n in sorted(nodes, key=lambda n: n.id):
+        if n.role in ("user", "assistant"):
+            h.update(f"{n.id}:{len(n.content or '')}\n".encode())
+    return h.hexdigest()
 
 
 def _fmt_stats(u: dict, elapsed: float) -> str:
@@ -423,6 +504,13 @@ class ChatService:
         self._img_data_urls: dict[str, str] = {}
         # In-progress turns, so generation survives a client disconnect/refresh.
         self.live = _LiveTurns()
+        # In-progress survey-report jobs, keyed by trunk id. Kept apart from
+        # `live`: /api/active lists `live` ids and the UI reconnects to each as
+        # a chat turn.
+        self.reports = _LiveTurns()
+        # Serializes starting a job, saving its report, and deleting the
+        # conversation it belongs to.
+        self._report_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     # Uploads (browser drag-and-drop → server-side file the tools can read)
@@ -577,8 +665,9 @@ class ChatService:
         }
 
     def has_active_streams(self) -> bool:
-        """True if any reply is still generating (blocks model/store switches)."""
-        return bool(self.live.active_ids())
+        """True if any reply or survey report is still generating (blocks
+        model/store switches)."""
+        return bool(self.live.active_ids() or self.reports.active_ids())
 
     # ------------------------------------------------------------------ #
     # Bookmarks
@@ -737,10 +826,22 @@ class ChatService:
         return {"ok": True, "id": node_id, "title": title}
 
     def delete_subtree(self, nid: str) -> int:
-        """Delete a node and its descendants (used to discard an interrupted turn)."""
+        """Delete a node and its descendants (used to discard an interrupted turn).
+
+        Deleting a whole conversation also drops its survey report and stops a
+        report job still running for it.
+        """
         if not self.store.exists(nid):
             return 0
-        return self.store.delete_subtree(nid)
+        if self.store.get(nid).parent_id != ROOT_ID:
+            return self.store.delete_subtree(nid)
+        with self._report_lock:
+            job = self.reports.get(nid)
+            if job is not None:
+                job.request_stop()
+            removed = self.store.delete_subtree(nid)
+            report_store.delete(self._reports_dir(), nid)
+        return removed
 
     def export_tree_markdown(self, trunk_id: str) -> tuple[str, str]:
         """Export one whole conversation tree (a trunk and all its branches)
@@ -765,11 +866,6 @@ class ChatService:
             return sorted(children.get(nid, []),
                           key=lambda i: self.store.get(i).created_at)
 
-        def heading_of(node: Node) -> str:
-            text = (node.title or "").strip() or " ".join((node.content or "").split())[:60]
-            text = text.lstrip("#").strip()  # never let content inject heading level
-            return text or "(untitled)"
-
         lines: list[str] = []
         count = 0
 
@@ -788,7 +884,7 @@ class ChatService:
                 return
             # user node: new section at this depth
             level = min(depth + 2, 6)
-            lines.extend(["#" * level + " " + heading_of(node), "", node.content, ""])
+            lines.extend(["#" * level + " " + _heading_text(node), "", node.content, ""])
             kids = kids_of(nid)
             forks = [k for k in kids if self.store.get(k).role != "assistant"]
             replies = [k for k in kids if self.store.get(k).role == "assistant"]
@@ -801,12 +897,399 @@ class ChatService:
 
         emit(trunk_id, 0)
 
-        title = heading_of(trunk)
+        title = _heading_text(trunk)
         ts = time.strftime("%Y-%m-%d %H:%M")
         doc = [f"# {title}", "", f"> Exported {ts} · {count} messages", ""] + lines
-        slug = re.sub(r"[^\w一-鿿]+", "-", title).strip("-")[:40]
-        fname = f"chatable-{slug or trunk_id}-{time.strftime('%Y%m%d-%H%M%S')}.md"
+        fname = f"chatable-{_title_slug(title) or trunk_id}-{time.strftime('%Y%m%d-%H%M%S')}.md"
         return fname, "\n".join(doc).rstrip() + "\n"
+
+    # ------------------------------------------------------------------ #
+    # Survey report (综述): one LLM pass over a whole conversation tree
+    # ------------------------------------------------------------------ #
+    #
+    # The report is a standalone document (report_store), not a tree node: it
+    # never enters any chat context. Generation runs as a background job with
+    # the same event-buffer machinery as a chat turn, in its own registry keyed
+    # by trunk id — /api/active must keep listing chat turns only.
+
+    def _reports_dir(self) -> str:
+        return report_store.reports_dir(os.path.dirname(os.path.abspath(self.store.db_path)))
+
+    def _require_trunk(self, trunk_id: str) -> Node:
+        trunk = self.store.get(trunk_id)  # raises NodeNotFoundError if missing
+        if trunk.parent_id != ROOT_ID:
+            raise ValueError(f"not a trunk node: {trunk_id}")
+        return trunk
+
+    @staticmethod
+    def _report_title(trunk: Node) -> str:
+        if (trunk.title or "").strip():
+            return _heading_text(trunk)
+        text = " ".join(_strip_attachment_preamble(trunk.content).split())[:60]
+        return text.lstrip("#").strip() or "(untitled)"
+
+    def _report_turns(self, trunk_id: str, nodes: list[Node]) -> list[dict]:
+        """Group one conversation's nodes into question/answer turns.
+
+        A turn is a user message plus its assistant replies (a second reply is
+        a regenerated answer). Turns come back depth-first — each branch is
+        followed to its end before the next sibling — labelled T1…Tn, each
+        knowing which turn it follows and which of that turn's branches it is.
+        Iterative, so a very long chat can't hit the recursion limit.
+        """
+        by_id = {n.id: n for n in nodes}
+        kids: dict[str, list[Node]] = {}
+        for n in nodes:  # oldest first, so every child list is chronological
+            if n.parent_id in by_id:
+                kids.setdefault(n.parent_id, []).append(n)
+
+        def chat_kids(nid: str) -> list[Node]:
+            # summary/system_note nodes are transparent: their children count
+            # as children of the nearest chat node above.
+            out: list[Node] = []
+            pending = list(reversed(kids.get(nid, [])))
+            while pending:
+                n = pending.pop()
+                if n.role in ("user", "assistant"):
+                    out.append(n)
+                else:
+                    pending.extend(reversed(kids.get(n.id, [])))
+            return out
+
+        generating = set(self.live.active_ids())
+
+        def usable(reply: Node) -> bool:
+            # Skip replies with nothing to report: still generating, empty, or
+            # only a failure marker written by the turn loop.
+            text = (reply.content or "").strip()
+            return bool(text) and reply.id not in generating \
+                and not text.startswith(("[error:", "[empty reply:"))
+
+        turns: list[dict] = []
+        stack: list[dict] = [{"head": by_id[trunk_id], "parent": "", "parent_replies": 0,
+                              "after": 0, "branch": 0, "branches": 0, "indent": 0}]
+        while stack:
+            item = stack.pop()
+            head: Node = item["head"]
+            # A turn normally opens with a user message. An assistant head (an
+            # orphan repaired onto ROOT, or a reply under a reply) is a turn
+            # with no question.
+            user = head if head.role == "user" else None
+            candidates = [k for k in chat_kids(head.id) if k.role == "assistant"] if user else [head]
+            replies: list[Node] = []
+            follow_ups: list[tuple[Node, int]] = []  # (head of next turn, reply no. it follows)
+            for reply in candidates:
+                no = 0
+                if usable(reply):
+                    replies.append(reply)
+                    no = len(replies)
+                follow_ups.extend((k, no) for k in chat_kids(reply.id))
+            if user:
+                follow_ups.extend((k, 0) for k in chat_kids(head.id) if k.role == "user")
+            follow_ups.sort(key=lambda f: f[0].created_at)
+
+            label = f"T{len(turns) + 1}"
+            turns.append({
+                "label": label, "user": user, "replies": replies,
+                "parent": item["parent"], "parent_replies": item["parent_replies"],
+                "after": item["after"], "branch": item["branch"],
+                "branches": item["branches"], "indent": item["indent"],
+            })
+            indent = item["indent"] + (1 if len(follow_ups) > 1 else 0)
+            for i in range(len(follow_ups), 0, -1):  # reversed: pop() takes the oldest first
+                kid, after = follow_ups[i - 1]
+                stack.append({"head": kid, "parent": label, "parent_replies": len(replies),
+                              "after": after, "branch": i, "branches": len(follow_ups),
+                              "indent": indent})
+        return turns
+
+    @staticmethod
+    def _report_sources(turns: list[dict]) -> list[dict]:
+        """Web pages the assistant actually fetched, in first-seen order.
+
+        Only http(s) URLs: web_fetch also reads uploaded files by local path.
+        """
+        seen: dict[str, str] = {}
+        for turn in turns:
+            for reply in turn["replies"]:
+                meta = reply.metadata if isinstance(reply.metadata, dict) else {}
+                for rec in meta.get("tool_results") or []:
+                    if not isinstance(rec, dict) or rec.get("name") != "web_fetch" or not rec.get("ok"):
+                        continue
+                    url = str((rec.get("arguments") or {}).get("url") or "").strip()
+                    if url.startswith(("http://", "https://")) and url not in seen:
+                        seen[url] = turn["label"]
+        return [{"url": u, "turn": t} for u, t in list(seen.items())[:_REPORT_MAX_SOURCES]]
+
+    @staticmethod
+    def _render_report_source(turns: list[dict], sources: list[dict],
+                              cap: Optional[int]) -> tuple[str, int]:
+        """Render the turns as the model's input. Returns (text, clipped count).
+
+        Structure is carried by explicit turn labels rather than heading depth,
+        which flattens after a few levels. Tool output, reasoning and image
+        data are never included — only what the user and assistant wrote.
+        """
+        clipped = 0
+
+        def body(text: str) -> str:
+            nonlocal clipped
+            out = _clip_middle(text.strip(), cap)
+            clipped += out != text.strip()
+            return out
+
+        def relation(turn: dict) -> list[str]:
+            parts: list[str] = []
+            if turn["parent"]:
+                after = f"承接 {turn['parent']}"
+                if turn["parent_replies"] > 1 and turn["after"]:
+                    after += f" 的第 {turn['after']} 版回答"
+                parts.append(after)
+            if turn["branches"] > 1:
+                parts.append(f"分支 {turn['branch']}/{turn['branches']}")
+            return parts
+
+        def question(turn: dict) -> str:
+            user: Optional[Node] = turn["user"]
+            if user is None:
+                return ""
+            text = _strip_attachment_preamble(user.content)
+            meta = user.metadata if isinstance(user.metadata, dict) else {}
+            names = [str(a.get("filename") or "") for a in meta.get("attachments") or []
+                     if isinstance(a, dict)]
+            names = [n for n in names if n]
+            if names:
+                text = f"[附件: {', '.join(names)}]\n{text}"
+            return text.strip()
+
+        def title_of(turn: dict) -> str:
+            user: Optional[Node] = turn["user"]
+            title = (user.title if user else "") or next(
+                (r.title for r in turn["replies"] if r.title), "")
+            title = " ".join((title or question(turn)).split())[:60]
+            return title or "(无提问)"
+
+        forks = sum(1 for t in turns if t["branch"] == 1 and t["branches"] > 1)
+        lines = [
+            f"【对话树结构】共 {len(turns)} 个回合，{forks} 处分叉。"
+            "每进入一处分叉缩进加深一级；回合之间的承接关系以括号里的说明为准。",
+        ]
+        for turn in turns:
+            rel = "，".join(relation(turn))
+            lines.append(f"{'  ' * turn['indent']}- {turn['label']}"
+                         f"{'（' + rel + '）' if rel else ''}：{title_of(turn)}")
+        lines += ["", "【对话内容】"]
+        for turn in turns:
+            lines += ["", "=== " + " ｜ ".join([turn["label"]] + relation(turn)) + " ==="]
+            q = question(turn)
+            if q:
+                lines += ["【用户】", body(q)]
+            if not turn["replies"]:
+                lines += ["【助手】", "（这个提问没有得到有效回答）"]
+            for i, reply in enumerate(turn["replies"], 1):
+                lines.append("【助手】" if i == 1 else f"【助手 · 重新生成的第 {i} 版回答】")
+                lines.append(body(reply.content))
+        if sources:
+            lines += ["", "【对话中读取过的网页】"]
+            lines += [f"{i}. {s['url']}（{s['turn']}）" for i, s in enumerate(sources, 1)]
+        return "\n".join(lines) + "\n", clipped
+
+    def _report_source(self, trunk_id: str) -> dict:
+        """Everything one report run needs, from a consistent snapshot of the
+        tree: the rendered input (fitted to the input budget), counts, sources
+        and the tree's fingerprint.
+
+        Raises ValueError when there is nothing to report on, or the tree is
+        too large even at the tightest per-message cap.
+        """
+        trunk = self._require_trunk(trunk_id)
+        nodes = self.store.trunk_nodes(trunk_id)
+        turns = self._report_turns(trunk_id, nodes)
+        if not any(t["replies"] for t in turns):
+            raise ValueError("这个对话还没有可以综述的回答")
+        sources = self._report_sources(turns)
+        budget = main.REPORT_MAX_INPUT_TOKENS
+        overhead = _estimate_report_tokens(main.REPORT_SYSTEM_PROMPT) + 256
+        estimated = 0
+        for cap in _REPORT_NODE_CAPS:
+            text, clipped = self._render_report_source(turns, sources, cap)
+            estimated = _estimate_report_tokens(text) + overhead
+            if estimated <= budget:
+                return {
+                    "text": text,
+                    "title": self._report_title(trunk),
+                    "turns": len(turns),
+                    "messages": sum((1 if t["user"] else 0) + len(t["replies"]) for t in turns),
+                    "truncated_nodes": clipped,
+                    "sources": [s["url"] for s in sources],
+                    "estimated_tokens": estimated,
+                    "fingerprint": _report_fingerprint(nodes),
+                }
+        raise ValueError(
+            f"对话过大：压缩后仍约 {estimated} tokens，超过综述的输入上限 {budget} tokens"
+            "（可用环境变量 CHATTABLE_REPORT_MAX_INPUT_TOKENS 调整）")
+
+    def get_report(self, trunk_id: str) -> dict:
+        """The saved report for a conversation, plus whether one is being
+        generated and whether the tree has changed since it was written."""
+        trunk = self._require_trunk(trunk_id)
+        saved = report_store.get(self._reports_dir(), trunk_id)
+        job = self.reports.get(trunk_id)
+        stale = bool(saved) and saved.get("fingerprint") != _report_fingerprint(
+            self.store.trunk_nodes(trunk_id))
+        return {
+            "trunk_id": trunk_id,
+            "title": self._report_title(trunk),
+            "running": job is not None and not job.done,
+            "stale": stale,
+            "report": saved,
+        }
+
+    def start_report(self, trunk_id: str, focus: str = "") -> dict:
+        """Start generating a report in the background.
+
+        If one is already being generated for this conversation, attaches to it
+        instead (``started`` False; the new ``focus`` is ignored). Raises
+        NodeNotFoundError / ValueError before anything starts.
+        """
+        self._require_trunk(trunk_id)
+        focus = (focus or "").strip()[:_REPORT_FOCUS_MAX_CHARS]
+        with self._report_lock:
+            running = self.reports.get(trunk_id)
+            if running is not None and not running.done:
+                return {"trunk_id": trunk_id, "started": False}
+            source = self._report_source(trunk_id)
+            job = self.reports.create(trunk_id)
+        thread = threading.Thread(
+            target=self._run_report, args=(job, trunk_id, source, focus), daemon=True)
+        thread.start()
+        return {"trunk_id": trunk_id, "started": True}
+
+    def subscribe_report(self, trunk_id: str, from_index: int = 0) -> Optional[Iterator[dict]]:
+        """Events of a report job, or None if none is known for this conversation."""
+        job = self.reports.get(trunk_id)
+        if job is None:
+            return None
+        return job.read_from(from_index)
+
+    def stop_report(self, trunk_id: str) -> bool:
+        job = self.reports.get(trunk_id)
+        if job is None or job.done:
+            return False
+        job.request_stop()
+        return True
+
+    def report_markdown(self, trunk_id: str) -> Optional[tuple[str, str]]:
+        """(filename, content) of the saved report as a Markdown download, or
+        None when there is no report yet."""
+        self._require_trunk(trunk_id)
+        saved = report_store.get(self._reports_dir(), trunk_id)
+        if not saved or not saved.get("content"):
+            return None
+        when = time.localtime(saved.get("created_at") or time.time())
+        slug = _title_slug(str(saved.get("title") or ""))
+        fname = f"chatable-综述-{slug or trunk_id}-{time.strftime('%Y%m%d-%H%M%S', when)}.md"
+        footer = (f"\n\n---\n\n> 综述由 {saved.get('model') or 'LLM'} 根据对话树生成 · "
+                  f"{time.strftime('%Y-%m-%d %H:%M', when)}\n")
+        return fname, saved["content"].rstrip() + footer
+
+    def _run_report(self, job: "_LiveTurn", trunk_id: str, source: dict, focus: str) -> None:
+        """Background body of one report job: stream the report, save it, and
+        push events into ``job`` until done."""
+        emit = job.append
+        # A storage switch is refused while a job runs (has_active_streams),
+        # so these stay valid for the job's lifetime.
+        store, directory = self.store, self._reports_dir()
+        t0 = time.monotonic()
+        try:
+            emit({
+                "type": "report_start",
+                "trunk_id": trunk_id,
+                "title": source["title"],
+                "focus": focus,
+                "model": main.OPENAI_MODEL,
+                "turns": source["turns"],
+                "messages": source["messages"],
+                "estimated_tokens": source["estimated_tokens"],
+                "truncated_nodes": source["truncated_nodes"],
+                "sources": len(source["sources"]),
+            })
+            messages = main.build_report_messages(source["text"], source["title"], focus)
+            usage: dict = {}
+            finish_reason = ""
+            text_parts: list[str] = []
+            # One retry on a transient upstream failure, as in a chat turn:
+            # clients drop the partial text on `reset`.
+            for attempt in (1, 2):
+                text_parts = []
+                if attempt > 1:
+                    emit({"type": "reset", "reason": "upstream stream truncated; regenerating"})
+                try:
+                    for kind, payload in stream_backend(messages, max_tokens=main.REPORT_MAX_TOKENS):
+                        if job.stop_requested:
+                            break
+                        if kind == "done":
+                            payload = payload or {}
+                            usage = {k: v for k, v in payload.items() if isinstance(v, (int, float))}
+                            finish_reason = str(payload.get("finish_reason") or "")
+                            break
+                        if kind == "reasoning":
+                            emit({"type": "reasoning", "text": payload})
+                        elif kind == "delta":
+                            text_parts.append(payload)
+                            emit({"type": "delta", "text": payload})
+                    break
+                except Exception as e:  # noqa: BLE001 - surface stream failures to the client
+                    if _is_transient_stream_error(e) and attempt == 1 and not job.stop_requested:
+                        continue
+                    emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
+                    return
+
+            if job.stop_requested:
+                emit({"type": "stopped"})
+                return
+            content = "".join(text_parts).strip()
+            if not content:
+                emit({"type": "error", "message": "模型没有返回综述内容，请重试"})
+                return
+            elapsed = time.monotonic() - t0
+            report = {
+                "trunk_id": trunk_id,
+                "title": source["title"],
+                "content": content,
+                "focus": focus,
+                "created_at": time.time(),
+                "model": main.OPENAI_MODEL,
+                "usage": usage,
+                "stats": _fmt_stats(usage, elapsed),
+                "elapsed": round(elapsed, 2),
+                "turns": source["turns"],
+                "messages": source["messages"],
+                "truncated_nodes": source["truncated_nodes"],
+                "sources": source["sources"],
+                "estimated_tokens": source["estimated_tokens"],
+                # "length" = cut off at the output cap: the report is incomplete.
+                "output_truncated": finish_reason == "length",
+                "fingerprint": source["fingerprint"],
+            }
+            # Under the lock that delete_subtree takes, so a conversation
+            # deleted mid-run can't get its report written back afterwards.
+            with self._report_lock:
+                if job.stop_requested or not store.exists(trunk_id):
+                    emit({"type": "stopped"})
+                    return
+                report_store.save(directory, report)
+            stale = report["fingerprint"] != _report_fingerprint(store.trunk_nodes(trunk_id))
+            emit({"type": "done", "report": report, "stale": stale})
+        except Exception as e:  # noqa: BLE001 - last-resort guard for the thread
+            emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        finally:
+            job.finish()
+            # Retained briefly for a late reconnect, like a chat turn. Removed
+            # by identity: a new job for this conversation may have started.
+            timer = threading.Timer(RETAIN_FINISHED_TURN_S, self.reports.discard, args=(trunk_id, job))
+            timer.daemon = True
+            timer.start()
 
     # ------------------------------------------------------------------ #
     # Tool decision + execution
@@ -1524,7 +2007,10 @@ class ChatService:
                     if turn.stop_requested:
                         break
                     if kind == "done":
-                        usage = payload or {}
+                        # Numeric fields only: the payload also carries the
+                        # upstream finish_reason string.
+                        usage = {k: v for k, v in (payload or {}).items()
+                                 if isinstance(v, (int, float))}
                         break
                     if kind == "reasoning":
                         reasoning_parts.append(payload)

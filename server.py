@@ -62,6 +62,11 @@ class EffortBody(BaseModel):
     level: str
 
 
+class ReportBody(BaseModel):
+    # Optional angle for the survey report ("侧重点").
+    focus: str = ""
+
+
 class BookmarkBody(BaseModel):
     url: str
 
@@ -94,14 +99,15 @@ def api_settings(body: SettingsBody) -> dict:
 
     The model config (base_url/api_key/model) is persisted to
     ``main.SETTINGS_PATH`` and reloaded on the next launch; the storage
-    folder switch remains session-only. Refuses (409) while any reply is
-    generating, so a switch never orphans a background turn. Applies storage
+    folder switch remains session-only. Refuses (409) while any reply or
+    survey report is generating, so a switch never orphans a background job. Applies storage
     first, then the model config; either is optional. Returns the fresh
     config on success.
     """
     if service.has_active_streams():
-        raise HTTPException(status_code=409,
-                            detail="a reply is generating; stop it before changing settings")
+        raise HTTPException(
+            status_code=409,
+            detail="a reply or survey report is generating; stop it before changing settings")
 
     # Storage folder
     if body.data_dir is not None and body.data_dir.strip():
@@ -158,6 +164,69 @@ def api_export_tree(trunk_id: str) -> Response:
         raise HTTPException(status_code=404, detail=f"node not found: {trunk_id}")
     except ValueError:
         raise HTTPException(status_code=400, detail=f"not a trunk node: {trunk_id}")
+    disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": disposition},
+    )
+
+
+def _report_call(fn, trunk_id: str, *args):
+    """Run a report service call, mapping its errors to HTTP statuses."""
+    try:
+        return fn(trunk_id, *args)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {trunk_id}")
+    except ValueError as e:
+        # Not a trunk, nothing to report on, or over the input budget — the
+        # message is written for the user.
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/report/{trunk_id}")
+def api_report(trunk_id: str) -> dict:
+    """The saved survey report of a conversation, plus whether one is being
+    generated (``running``) and whether the tree changed since (``stale``)."""
+    return _report_call(service.get_report, trunk_id)
+
+
+@app.post("/api/report/{trunk_id}")
+def api_report_start(trunk_id: str, body: ReportBody) -> StreamingResponse:
+    """Generate a survey report over the whole conversation tree and stream it.
+
+    Runs in the background like a chat turn, so closing the connection does not
+    abort it; if a report is already being generated for this conversation the
+    stream attaches to that job instead of starting another.
+    """
+    _report_call(service.start_report, trunk_id, body.focus)
+    sub = service.subscribe_report(trunk_id, 0)
+    return _sse(sub if sub is not None else iter(()))
+
+
+@app.get("/api/report/{trunk_id}/stream")
+def api_report_stream(trunk_id: str, from_index: int = 0) -> StreamingResponse:
+    """Reattach to a report job, replaying events from ``from_index``. Sends a
+    single ``gone`` event when no job is known (read the saved report instead)."""
+    sub = service.subscribe_report(trunk_id, from_index)
+    if sub is None:
+        return _sse(iter(({"type": "gone", "id": trunk_id},)))
+    return _sse(sub)
+
+
+@app.post("/api/report/{trunk_id}/stop")
+def api_report_stop(trunk_id: str) -> dict:
+    """Stop a report job. Nothing is saved; an earlier report is kept."""
+    return {"ok": service.stop_report(trunk_id)}
+
+
+@app.get("/api/report/{trunk_id}/download")
+def api_report_download(trunk_id: str) -> Response:
+    """Download the saved survey report as Markdown."""
+    result = _report_call(service.report_markdown, trunk_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="no survey report for this conversation yet")
+    filename, content = result
     disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
     return Response(
         content,

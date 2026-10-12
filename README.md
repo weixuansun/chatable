@@ -31,6 +31,10 @@ switched from the settings panel without restarting, and the UI appearance
 - **Bookmarks / read-it-later.** Save URLs (blogs, papers, articles) in the
 bookmark sidebar; the server fetches a title and summary, and you can start
 a chat from any bookmark to discuss it with the model.
+- **Survey report.** From a conversation's "⋯" menu, have the model read the
+whole tree — every branch — and write one report on the topic, organized by
+theme rather than by turn. An optional focus steers it; the report is saved
+alongside your data and can be copied or downloaded as Markdown.
 
 
 

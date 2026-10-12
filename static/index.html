@@ -561,12 +561,84 @@ try {
     </div>
   </template>
 
+  <!-- survey report (综述) modal: one LLM-written report over the whole
+       conversation tree. Closing it does not stop a report being generated. -->
+  <template x-if="report.open">
+    <div class="modal-backdrop" @click.self="closeReport()">
+      <div class="modal survey-modal" @keydown="trapModalTab($event)">
+        <div class="modal-head">
+          <h2><i data-lucide="file-text"></i><span x-text="'综述 · ' + report.title"></span></h2>
+          <button class="icon-btn" @click="closeReport()" title="Close (Esc)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body survey-body">
+          <div class="survey-meta" x-show="reportMeta()" x-text="reportMeta()"></div>
+          <template x-if="report.error">
+            <div class="modal-err" x-text="report.error"></div>
+          </template>
+          <template x-if="report.status === 'idle' && report.saved && report.stale">
+            <p class="survey-note">对话在这份综述生成之后有更新，可以重新生成。</p>
+          </template>
+          <template x-if="report.status === 'idle' && report.saved && report.saved.output_truncated">
+            <p class="survey-note">输出达到了长度上限，这份综述可能不完整。</p>
+          </template>
+          <template x-if="reportClipped()">
+            <p class="survey-note" x-text="'对话较长，有 ' + reportClipped() + ' 条消息在送入模型前被截短。'"></p>
+          </template>
+          <template x-if="report.status === 'loading'">
+            <div class="planning"><span class="spin"></span><span>加载中…</span></div>
+          </template>
+          <template x-if="report.status === 'streaming'">
+            <div>
+              <div class="planning" x-show="!report.text"><span class="spin"></span>
+                <span x-text="report.reasoning ? '正在构思综述…' : '正在通读整棵对话树…'"></span></div>
+              <template x-if="report.reasoning">
+                <details class="reasoning" :open="!report.text">
+                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
+                  <div x-text="report.reasoning"></div>
+                </details>
+              </template>
+              <div class="bubble streaming-bubble" x-show="report.text" x-md="report.text"></div>
+            </div>
+          </template>
+          <template x-if="report.status === 'idle' && report.saved">
+            <div class="bubble" x-md="report.saved ? report.saved.content : ''"></div>
+          </template>
+          <template x-if="report.status === 'idle' && !report.saved && !report.error">
+            <p class="survey-note">这个对话还没有综述。</p>
+          </template>
+        </div>
+        <div class="modal-foot survey-foot">
+          <input class="survey-focus" type="text" maxlength="500" x-model="report.focus"
+                 placeholder="侧重点（可选），例如：只比较各方案的优缺点"
+                 :disabled="report.status !== 'idle'"
+                 @keydown.enter="if (!$event.isComposing) generateReport()">
+          <template x-if="report.status === 'streaming'">
+            <button class="btn-ghost danger" @click="stopReport()"><i data-lucide="square"></i> 停止</button>
+          </template>
+          <template x-if="report.status !== 'streaming'">
+            <button class="btn-primary" @click="generateReport()" :disabled="report.status !== 'idle'">
+              <i data-lucide="sparkles"></i> <span x-text="report.saved ? '重新生成' : '生成综述'"></span>
+            </button>
+          </template>
+          <button class="btn-ghost" @click="copyReport()" :disabled="!reportText()"
+                  :title="report.copied ? '已复制' : '复制 Markdown'">
+            <i :data-lucide="report.copied ? 'check' : 'copy'"></i> 复制
+          </button>
+          <button class="btn-ghost" @click="downloadReport()" :disabled="!report.saved"
+                  title="下载为 Markdown 文件"><i data-lucide="download"></i> 下载</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
   <!-- tree-row "⋯" action menu -->
   <template x-if="nodeMenu.node">
     <div class="node-menu-backdrop" @click="nodeMenu.node=null" @contextmenu.prevent="nodeMenu.node=null">
       <div class="node-menu" :style="`left:${nodeMenu.x}px; top:${nodeMenu.y}px`" @click.stop>
         <button class="node-menu-item mi-export" x-show="nodeMenu.node.depth === 0"
                 @click="nodeMenuAction('export')"><i data-lucide="download"></i>导出 Markdown</button>
+        <button class="node-menu-item mi-report" x-show="nodeMenu.node.depth === 0"
+                @click="nodeMenuAction('report')"><i data-lucide="file-text"></i>生成综述</button>
         <button class="node-menu-item mi-map"
                 @click="nodeMenuAction('map')"><i data-lucide="network"></i>思维图</button>
         <button class="node-menu-item mi-rename"
@@ -643,6 +715,10 @@ try {
                 <button class="map-del-btn" x-show="mn.isTrunk" @click.stop="exportTree(mn.id)"
                         title="导出整棵对话树为 Markdown">
                   <i data-lucide="download"></i>
+                </button>
+                <button class="map-del-btn" x-show="mn.isTrunk" @click.stop="openReport(mn.id)"
+                        title="生成 / 查看整棵对话树的综述">
+                  <i data-lucide="file-text"></i>
                 </button>
                 <button class="map-del-btn" @click.stop="mapDeleteNode(mn)" title="删除该节点及其所有子节点">
                   <i data-lucide="trash-2"></i>
@@ -917,6 +993,11 @@ function chatable() {
     bookmarkError: '',
     bmRenamingId: null, bmRenameText: '',  // inline bookmark rename state
     bmDetail: null,                      // bookmark shown in the detail modal
+    // Survey report (综述) modal. status: 'loading' | 'streaming' | 'idle'.
+    // `saved` is the report on disk; `text`/`reasoning` are the live stream.
+    report: {open: false, trunkId: null, title: '', status: 'idle', text: '', reasoning: '',
+             error: '', saved: null, stale: false, focus: '', info: null, copied: false},
+    _reportGen: 0,                       // bumped to drop events from a superseded stream reader
     toggleBookmarks() {
       this.bookmarksOpen = !this.bookmarksOpen;
       if (this.bookmarksOpen) this.drawerOpen = false;  // the two panels are mutually exclusive
@@ -968,12 +1049,13 @@ function chatable() {
       // so we resume watching instead of losing the reply.
       this.reconnectActive();
 
-      // Escape closes the topmost overlay: bookmark modal > mind map > settings > gallery > bookmarks > drawer.
+      // Escape closes the topmost overlay: report > bookmark modal > mind map > settings > gallery > bookmarks > drawer.
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (this.quotePop.show) { this.quotePop.show = false; return; }
         if (this.effortOpen) { this.effortOpen = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
+        if (this.report.open) { this.closeReport(); return; }
         if (this.bmDetail) { this.bmDetail = null; return; }
         if (this.mindmap.open) {
           if (this.mmSearch) { this.mmSearch = ''; this.mmSearchIdx = 0; }  // clear search before closing
@@ -1617,7 +1699,7 @@ function chatable() {
       this.nodeMenu = {
         node: n,
         x: Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)),
-        y: Math.min(r.bottom + 4, window.innerHeight - 150),
+        y: Math.min(r.bottom + 4, window.innerHeight - 190),
       };
       this.refreshIcons();
     },
@@ -1627,6 +1709,7 @@ function chatable() {
       this.nodeMenu.node = null;
       if (!n) return;
       if (kind === 'export') this.exportTree(n.id);
+      else if (kind === 'report') this.openReport(n.id);
       else if (kind === 'map') this.openMindmap(n.id);
       else if (kind === 'rename') this.startRename(n);
       else if (kind === 'delete') this.deleteNode(n);
@@ -1949,6 +2032,205 @@ function chatable() {
       // The server sets the filename via Content-Disposition.
       const a = document.createElement('a');
       a.href = '/api/export/' + encodeURIComponent(id);
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    },
+
+    // ---- survey report (综述) ---------------------------------------------
+    // One report per conversation, generated server-side in the background.
+    // Opening shows the saved one, follows a job already running, or — when
+    // there is neither — starts generating.
+
+    _reportUrl(suffix = '') {
+      return '/api/report/' + encodeURIComponent(this.report.trunkId) + suffix;
+    },
+
+    async openReport(trunkId) {
+      const gen = ++this._reportGen;
+      this.report = {open: true, trunkId, title: '', status: 'loading', text: '', reasoning: '',
+                     error: '', saved: null, stale: false, focus: '', info: null, copied: false};
+      this.refreshIcons();
+      const state = await this._loadReport(gen);
+      if (!state) return;
+      if (state.running) this._followReport(gen);
+      else if (!state.report) this.generateReport();
+    },
+
+    closeReport() {
+      const r = this.report;
+      if (!r.open) return;
+      this._reportGen++;   // stop reading; the job itself keeps running server-side
+      if (r.status === 'streaming') toast('综述仍在后台生成，重新打开即可查看', 'info');
+      r.open = false;
+    },
+
+    // Fetch the saved report + job state. Returns null when the modal moved on
+    // (closed or reopened) or the request failed.
+    async _loadReport(gen) {
+      let resp, detail = '';
+      try {
+        resp = await fetch(this._reportUrl());
+        if (!resp.ok) detail = await this.errDetail(resp);
+      } catch (e) { detail = 'request failed: ' + e.message; }
+      if (gen !== this._reportGen) return null;
+      const r = this.report;
+      if (detail) { r.status = 'idle'; r.error = detail; this.refreshIcons(); return null; }
+      const state = await resp.json();
+      if (gen !== this._reportGen) return null;
+      r.title = state.title || '';
+      r.saved = state.report || null;
+      r.stale = !!state.stale;
+      if (r.saved && !r.focus) r.focus = r.saved.focus || '';
+      r.status = state.running ? 'streaming' : 'idle';
+      this.refreshIcons();
+      return state;
+    },
+
+    async generateReport() {
+      const r = this.report;
+      if (!r.open || r.status !== 'idle') return;
+      const gen = ++this._reportGen;
+      r.status = 'streaming'; r.text = ''; r.reasoning = ''; r.error = ''; r.info = null;
+      this.refreshIcons();
+      let resp, detail = '';
+      try {
+        resp = await fetch(this._reportUrl(), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({focus: r.focus || ''}),
+        });
+        if (!resp.ok) detail = await this.errDetail(resp);
+      } catch (e) { detail = 'request failed: ' + e.message; }
+      if (gen !== this._reportGen) return;
+      if (detail) { r.status = 'idle'; r.error = detail; this.refreshIcons(); return; }
+      await this._readReportStream(resp, gen, 0);
+    },
+
+    // Attach to a job that is already running, replaying it from the start.
+    async _followReport(gen, attempt = 0) {
+      const r = this.report;
+      r.status = 'streaming'; r.text = ''; r.reasoning = '';
+      this.refreshIcons();
+      let resp = null;
+      try { resp = await fetch(this._reportUrl('/stream?from_index=0')); } catch (e) { /* re-sync below */ }
+      if (gen !== this._reportGen) return;
+      if (!resp || !resp.ok) return this._resyncReport(gen, attempt);
+      await this._readReportStream(resp, gen, attempt);
+    },
+
+    async _readReportStream(resp, gen, attempt) {
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '', settled = false;
+      try {
+        while (true) {
+          const {value, done} = await reader.read();
+          if (gen !== this._reportGen) { reader.cancel().catch(() => {}); return; }
+          if (done) break;
+          buf += dec.decode(value, {stream: true});
+          const parts = buf.split('\n\n'); buf = parts.pop();
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith('data:')) continue;   // ": ping" keepalive comments
+            let evt;
+            try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+            if (this._onReportEvent(evt)) settled = true;
+          }
+        }
+      } catch (e) { /* connection dropped: re-sync below */ }
+      if (gen !== this._reportGen || settled) return;
+      await this._resyncReport(gen, attempt);
+    },
+
+    // Returns true once the job has reached a final state.
+    _onReportEvent(evt) {
+      const r = this.report;
+      if (evt.type === 'report_start') { r.info = evt; if (evt.title) r.title = evt.title; }
+      else if (evt.type === 'reasoning') r.reasoning += evt.text;
+      else if (evt.type === 'delta') r.text += evt.text;
+      else if (evt.type === 'reset') { r.text = ''; r.reasoning = ''; }
+      else if (evt.type === 'done') {
+        r.saved = evt.report; r.stale = !!evt.stale;
+        r.status = 'idle'; r.text = ''; r.reasoning = '';
+        this.refreshIcons();
+        return true;
+      } else if (evt.type === 'stopped' || evt.type === 'error') {
+        // Nothing was saved: fall back to the previous report, if any.
+        r.status = 'idle'; r.text = ''; r.reasoning = '';
+        if (evt.type === 'error') r.error = evt.message || 'report generation failed';
+        else toast('已停止，本次生成没有保存', 'info');
+        this.refreshIcons();
+        return true;
+      }
+      return false;
+    },
+
+    // The stream ended without a final event (connection dropped, or the job
+    // was already gone): re-read the state and re-attach if it is still running.
+    async _resyncReport(gen, attempt) {
+      const state = await this._loadReport(gen);
+      if (!state || !state.running) return;
+      const r = this.report;
+      if (attempt >= 3) {
+        r.status = 'idle';
+        r.error = '与服务器的连接中断。综述仍在后台生成，稍后重新打开即可查看。';
+        this.refreshIcons();
+        return;
+      }
+      await new Promise(res => setTimeout(res, 1000));
+      if (gen !== this._reportGen) return;
+      await this._followReport(gen, attempt + 1);
+    },
+
+    async stopReport() {
+      try { await fetch(this._reportUrl('/stop'), {method: 'POST'}); }
+      catch (e) { toast('Stop failed: ' + e.message, 'error'); }
+    },
+
+    reportText() {
+      const r = this.report;
+      return r.status === 'streaming' ? r.text : ((r.saved && r.saved.content) || '');
+    },
+
+    // Messages clipped to fit the input budget, for the run on screen.
+    reportClipped() {
+      const r = this.report;
+      const src = r.status === 'streaming' ? r.info : (r.status === 'idle' ? r.saved : null);
+      return (src && src.truncated_nodes) || 0;
+    },
+
+    reportMeta() {
+      const r = this.report;
+      if (r.status === 'streaming' && r.info) {
+        return [r.info.model, r.info.turns + ' 个回合',
+                '输入约 ' + r.info.estimated_tokens + ' tokens'].filter(Boolean).join(' · ');
+      }
+      const s = r.status === 'idle' ? r.saved : null;
+      if (!s) return '';
+      return [s.model, new Date(s.created_at * 1000).toLocaleString(), s.turns + ' 个回合',
+              this.fmtUsage(s.usage), s.elapsed ? Math.round(s.elapsed) + 's' : '']
+        .filter(Boolean).join(' · ');
+    },
+
+    async copyReport() {
+      const text = this.reportText();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        this.report.copied = true;
+        this.refreshIcons();
+        setTimeout(() => { this.report.copied = false; this.refreshIcons(); }, 1500);
+      } catch (e) {
+        console.warn('copy failed:', e);
+      }
+    },
+
+    downloadReport() {
+      // The server sets the filename via Content-Disposition.
+      const a = document.createElement('a');
+      a.href = this._reportUrl('/download');
       a.download = '';
       document.body.appendChild(a);
       a.click();
