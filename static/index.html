@@ -276,7 +276,8 @@ try {
               <template x-if="m.role === 'system_note'"><i data-lucide="wrench"></i></template>
             </span>
             <span class="who-name" x-text="m.role === 'user' ? 'You' : (m.role === 'assistant' ? 'Assistant' : 'Tool')"></span>
-            <span class="who-id" x-text="'#' + m.id.slice(0,6)"></span>
+            <!-- tool notes have no footer row, so their id stays up here -->
+            <template x-if="m.role === 'system_note'"><span class="who-id" x-text="'#' + m.id.slice(0,6)"></span></template>
             <template x-if="m.tool"><span x-text="'· ' + m.tool"></span></template>
             <template x-if="streams[m.id] && streams[m.id].ctx"><span x-text="streams[m.id].ctx"></span></template>
             <!-- per-reply stop button: on the assistant row while streaming,
@@ -361,16 +362,16 @@ try {
                   <div class="bubble" x-md="m.content"></div>
                 </template>
               </div>
-              <!-- stats: live while streaming, else persisted usage -->
-              <template x-if="streams[m.id] && streams[m.id].stats">
-                <div class="stats" x-text="streams[m.id].stats"></div>
-              </template>
+              <!-- footer: node id, then token stats (live while streaming, else
+                   persisted usage) -->
+              <div class="stats">
+                <span class="msg-id" x-text="'#' + m.id.slice(0,6)"></span>
+                <template x-if="streams[m.id] && streams[m.id].stats"><span x-text="'· ' + streams[m.id].stats"></span></template>
+                <template x-if="!streams[m.id] && m.usage && (m.usage.input || m.usage.output)"><span x-text="'· ' + fmtUsage(m.usage)"></span></template>
+              </div>
               <!-- auto-resume gave up: offer a manual retry -->
               <template x-if="streams[m.id] && streams[m.id].resumeFailed">
                 <div class="stats"><span style="color:var(--fail)">connection lost.</span><button class="retry-btn" @click="retryResume(m.id)">retry</button></div>
-              </template>
-              <template x-if="!streams[m.id] && m.usage && (m.usage.input || m.usage.output)">
-                <div class="stats" x-text="fmtUsage(m.usage)"></div>
               </template>
               <!-- per-message actions below the bubble, after generation
                    completes: fork/map for assistant; copy for every message -->

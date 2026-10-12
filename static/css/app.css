@@ -517,6 +517,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
         font-family: var(--font-mono); font-size: 12px; line-height: 1.6; color: var(--dim); }
 
 .stats { font-size: 11.5px; color: var(--dim-2); margin-top: 10px; font-variant-numeric: tabular-nums; }
+.stats .msg-id { font: 11px var(--font-mono); }
 .fork-actions { display: flex; align-items: center; gap: 2px; margin-top: 6px; margin-left: -8px; }
 .msg.role-user .fork-actions { margin-left: 0; margin-right: -8px; }
 .fork-btn { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px;
