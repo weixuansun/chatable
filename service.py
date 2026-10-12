@@ -102,6 +102,13 @@ def _canon_tool_result_msg(call_id: str, output: str) -> dict:
     return {"content": output, "role": "tool", "tool_call_id": call_id}
 
 
+# Stand-in result for a call that was issued in an assistant tool_calls message
+# but never executed (stop pressed mid-round). Every id must be answered or the
+# exchange is invalid — both for the follow-up request and for the replay
+# persisted on the node.
+_UNEXECUTED_TOOL_OUTPUT = "[tool call not executed: generation was stopped]"
+
+
 class _LiveTurn:
     """Server-side buffer for one in-progress assistant turn.
 
@@ -1278,7 +1285,11 @@ class ChatService:
                 if turn.stop_requested or joined.strip() or nudged:
                     break
                 nudged = True
-                loop_messages.append({"role": "assistant", "content": iter_text})
+                # Strict backends (Kimi) reject an empty assistant message with
+                # a 400, and an empty iteration (reasoning only, or a deduped
+                # repeat call) is exactly what lands here — so skip it.
+                if iter_text.strip():
+                    loop_messages.append({"role": "assistant", "content": iter_text})
                 loop_messages.append({"role": "user", "content": _NO_TOOL_NUDGE})
                 continue
 
@@ -1294,6 +1305,13 @@ class ChatService:
             assistant_msg = _canon_assistant_tool_msg(iter_text, raw_calls, "".join(iter_reasoning))
             loop_messages.append(assistant_msg)
             replay.append(assistant_msg)
+            # A tool_calls block must be answered by an unbroken run of
+            # role=tool messages: anything interposed (e.g. the synthetic
+            # image-carrying user message below) makes the API treat the
+            # remaining ids as unanswered and reject the request. So images are
+            # parked here and flushed once the block is closed.
+            image_msgs: list[dict] = []
+            answered: set[str] = set()
             for call in fresh:
                 if turn.stop_requested:
                     break
@@ -1314,9 +1332,11 @@ class ChatService:
                 tool_msg = _canon_tool_result_msg(call["_cid"], record["output"])
                 loop_messages.append(tool_msg)
                 replay.append(tool_msg)
+                answered.add(call["_cid"])
                 # Vision: hand captured images to the model as a synthetic user
-                # message right after the tool result (tool messages can't carry
-                # image parts). NOT added to `replay` — history stays text-only.
+                # message (tool messages can't carry image parts). Deferred to
+                # after the loop — see `image_msgs` above. NOT added to
+                # `replay`: history stays text-only.
                 images = record.get("images") or []
                 if images and VISION_ENABLED and main.VISION_SUPPORTED:
                     parts: list[dict] = [{
@@ -1326,7 +1346,22 @@ class ChatService:
                     for im in images:
                         parts.append({"type": "image_url",
                                       "image_url": {"url": im["data_url"]}})
-                    loop_messages.append({"content": parts, "role": "user"})
+                    image_msgs.append({"content": parts, "role": "user"})
+
+            # A stop breaks the loop above with calls still unexecuted. Their
+            # ids were already issued in assistant_msg, so answer them with a
+            # stub: an unanswered id is rejected on the next request, and the
+            # gap would be baked into the node's persisted replay, poisoning
+            # every later turn on this branch.
+            for call in fresh:
+                if call["_cid"] in answered:
+                    continue
+                stub = _canon_tool_result_msg(call["_cid"], _UNEXECUTED_TOOL_OUTPUT)
+                loop_messages.append(stub)
+                replay.append(stub)
+
+            # Safe now that the tool block is closed.
+            loop_messages.extend(image_msgs)
             round_no += 1
 
         full_text = _scrub_answer_text("\n\n".join(segments))

@@ -689,6 +689,30 @@ class GenerateRetryTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("不要再输出任何工具调用", calls[1][-1]["content"])
 
+    def test_empty_iteration_nudge_sends_no_empty_assistant(self):
+        # Regression: an iteration with no text (reasoning only) was echoed back
+        # as {"role": "assistant", "content": ""}, which Kimi rejects with
+        # "the message at position N with role 'assistant' must not be empty".
+        calls = []
+
+        def fake_stream(messages, tools=None):
+            calls.append(list(messages))
+            if len(calls) == 1:
+                yield ("reasoning", "thinking...")
+                yield ("done", {"input": 1, "output": 1})
+            else:
+                yield ("delta", "real answer")
+                yield ("done", {"input": 1, "output": 2})
+
+        res = self._run_turn(fake_stream)
+
+        self.assertEqual(res["content"], "real answer")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("不要再输出任何工具调用", calls[1][-1]["content"])
+        for m in calls[1]:
+            if m["role"] == "assistant" and not m.get("tool_calls"):
+                self.assertTrue(str(m.get("content") or "").strip(), m)
+
     def test_truncated_stream_regenerates(self):
         calls = []
 
@@ -1237,6 +1261,127 @@ class ToolImageInjectionTests(unittest.TestCase):
         img_msgs = [m for m in second
                     if m.get("role") == "user" and isinstance(m.get("content"), list)]
         self.assertFalse(img_msgs)
+
+
+def assert_tool_blocks_closed(testcase, messages):
+    """Every assistant tool_calls message is followed by an unbroken run of
+    role=tool messages answering each of its ids.
+
+    The API rejects the request otherwise ("tool_call_ids did not have response
+    messages"), so this is the invariant every request and every persisted
+    replay must satisfy.
+    """
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        want = [c["id"] for c in m["tool_calls"]]
+        got = []
+        for nxt in messages[i + 1:]:
+            if nxt.get("role") != "tool":
+                break  # block closed — anything after cannot answer these ids
+            got.append(nxt.get("tool_call_id"))
+        testcase.assertEqual(
+            got[:len(want)], want,
+            f"tool_calls {want} not answered contiguously (got {got})")
+
+
+class ToolBlockContiguityTests(unittest.TestCase):
+    """A round with several tool calls keeps its tool messages contiguous.
+
+    Regression: images captured by the first tool were appended as a synthetic
+    user message *between* sibling tool results, which closed the block early
+    and made the backend reject the remaining tool_call_ids.
+    """
+
+    def _two_call_turn(self, *, images_on_first=True, stop_after_first=False):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        import threading
+
+        import service as service_mod
+        from service import ChatService
+
+        requests = []
+
+        def fake_stream(messages, tools=None):
+            requests.append(list(messages))
+            if len(requests) == 1:
+                yield ("tool_calls", [
+                    {"id": "web_fetch:0", "name": "web_fetch",
+                     "arguments": {"url": "https://a"}},
+                    {"id": "web_fetch:1", "name": "web_fetch",
+                     "arguments": {"url": "https://b"}},
+                ])
+                yield ("done", {"input": 1, "output": 1})
+            else:
+                yield ("delta", "总结")
+                yield ("done", {"input": 1, "output": 1})
+
+        d = tempfile.TemporaryDirectory()
+        svc = ChatService(TreeStore(os.path.join(d.name, "chat.jsonl")))
+        state = {"assistant_id": None, "n": 0, "stopped": False}
+        # Generation runs on a background thread that can reach the first tool
+        # before start_turn() has returned the id; gate on it so the stop is
+        # deterministic rather than racing.
+        have_id = threading.Event()
+
+        def fake_run(name, arguments):
+            state["n"] += 1
+            first = state["n"] == 1
+            if first and stop_after_first:
+                self.assertTrue(have_id.wait(5), "assistant id never published")
+                state["stopped"] = svc.request_stop(state["assistant_id"])
+            meta = {}
+            if first and images_on_first:
+                meta = {"images": [{"url": "https://a/i.png",
+                                    "data_url": "data:image/png;base64,AAA"}]}
+            return ToolResult(call_id=f"t{state['n']}", name=name, arguments=arguments,
+                              ok=True, output=f"content of {arguments['url']}",
+                              metadata=meta)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(service_mod, "stream_backend", fake_stream))
+            stack.enter_context(patch.object(service_mod.TOOL_REGISTRY, "run", fake_run))
+            stack.enter_context(patch.object(service_mod, "VISION_ENABLED", True))
+            stack.enter_context(patch.object(service_mod.main, "VISION_SUPPORTED", True))
+            info = svc.start_turn("q", None)
+            state["assistant_id"] = info["assistant_id"]
+            have_id.set()
+            list(svc.subscribe(info["assistant_id"], 0))
+        node = svc.store.get(info["assistant_id"])
+        replay = (node.metadata or {}).get("tool_messages") or []
+        d.cleanup()
+        return requests, replay, state
+
+    def test_images_do_not_split_the_tool_block(self):
+        requests, _replay, _state = self._two_call_turn()
+        second = requests[1]
+        assert_tool_blocks_closed(self, second)
+        # Both results present, and the image message lands after the block.
+        answered = [m["tool_call_id"] for m in second if m.get("role") == "tool"]
+        self.assertEqual(answered, ["web_fetch:0", "web_fetch:1"])
+        img_at = [i for i, m in enumerate(second)
+                  if m.get("role") == "user" and isinstance(m.get("content"), list)]
+        last_tool = max(i for i, m in enumerate(second) if m.get("role") == "tool")
+        self.assertTrue(img_at and img_at[0] > last_tool,
+                        "image message must follow the whole tool block")
+
+    def test_persisted_replay_is_balanced(self):
+        _requests, replay, _state = self._two_call_turn()
+        assert_tool_blocks_closed(self, replay)
+
+    def test_stop_mid_round_still_answers_every_id(self):
+        """Stopping after the first tool must not persist a half-answered
+        exchange — it would replay as an invalid request on every later turn."""
+        _requests, replay, state = self._two_call_turn(
+            images_on_first=False, stop_after_first=True)
+        self.assertTrue(state["stopped"], "stop never reached the live turn")
+        self.assertEqual(state["n"], 1, "second tool should not have run")
+        assert_tool_blocks_closed(self, replay)
+        answered = [m["tool_call_id"] for m in replay if m.get("role") == "tool"]
+        self.assertEqual(answered, ["web_fetch:0", "web_fetch:1"])
+        # The unexecuted one is answered by a stub, not a fabricated result.
+        self.assertIn("not executed", replay[-1]["content"])
 
 
 class VisionProbeSetup:  # noqa: D101 - marker namespace, not a test
