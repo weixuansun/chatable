@@ -58,6 +58,10 @@ class SettingsBody(BaseModel):
     data_dir: Optional[str] = None
 
 
+class EffortBody(BaseModel):
+    level: str
+
+
 class BookmarkBody(BaseModel):
     url: str
 
@@ -68,6 +72,19 @@ class BookmarkOpenBody(BaseModel):
 
 @app.get("/api/config")
 def api_config() -> dict:
+    return service.config()
+
+
+@app.post("/api/effort")
+def api_effort(body: EffortBody) -> dict:
+    """Set the reasoning effort (off/low/medium/high) from the composer.
+
+    Allowed while a reply is generating: it applies to the next model request.
+    """
+    try:
+        llm.set_reasoning_effort(body.level)
+    except llm.ConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return service.config()
 
 

@@ -196,6 +196,61 @@ def persist_config(data_dir: str = "") -> None:
         pass
 
 
+def _save_persisted_config(data: dict) -> None:
+    """Write ``data`` to SETTINGS_PATH (0600 — it holds the API key). Best-effort."""
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        fd = os.open(SETTINGS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+# ---- reasoning effort (composer control) -------------------------------------
+# One user-facing knob over the two request fields: "off" disables thinking,
+# the other levels enable it and set ``reasoning_effort``.
+EFFORT_LEVELS = ("off", "low", "medium", "high")
+
+
+def current_effort() -> str:
+    """The live effort level, as one of EFFORT_LEVELS."""
+    if OPENAI_THINKING_TYPE == "disabled":
+        return "off"
+    return OPENAI_REASONING_EFFORT if OPENAI_REASONING_EFFORT in EFFORT_LEVELS else "high"
+
+
+def _apply_effort(level: str) -> None:
+    global OPENAI_REASONING_EFFORT, OPENAI_THINKING_TYPE
+    if level == "off":
+        OPENAI_THINKING_TYPE = "disabled"
+    else:
+        OPENAI_THINKING_TYPE = "enabled"
+        OPENAI_REASONING_EFFORT = level
+
+
+def set_reasoning_effort(level: str) -> str:
+    """Switch the effort level for all following requests and persist it."""
+    level = (level or "").strip().lower()
+    if level not in EFFORT_LEVELS:
+        raise ConfigError(f"effort must be one of {', '.join(EFFORT_LEVELS)}")
+    _apply_effort(level)
+    data = _load_persisted_config()
+    data["reasoning_effort"] = level
+    _save_persisted_config(data)
+    return level
+
+
+def _thinking_kwargs() -> dict[str, Any]:
+    """Request fields for the live effort level (no effort when thinking is off)."""
+    kwargs: dict[str, Any] = {}
+    if OPENAI_REASONING_EFFORT and OPENAI_THINKING_TYPE != "disabled":
+        kwargs["reasoning_effort"] = OPENAI_REASONING_EFFORT
+    if OPENAI_THINKING_TYPE:
+        kwargs["extra_body"] = {"thinking": {"type": OPENAI_THINKING_TYPE}}
+    return kwargs
+
+
 def load_persisted_data_dir() -> str:
     """The storage folder persisted by the web settings UI, or "" if none."""
     return str(_load_persisted_config().get("data_dir") or "")
@@ -287,6 +342,8 @@ if _saved.get("model"):
     OPENAI_API_KEY = str(_saved.get("api_key") or OPENAI_API_KEY)
     OPENAI_BASE_URL = str(_saved.get("base_url") or OPENAI_BASE_URL).rstrip("/")
     OPENAI_MODEL = str(_saved["model"])
+if _saved.get("reasoning_effort") in EFFORT_LEVELS:
+    _apply_effort(_saved["reasoning_effort"])
 
 # ---- shared ----------------------------------------------------------------
 MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "16384"))
@@ -354,6 +411,8 @@ def current_config() -> dict:
         "model": OPENAI_MODEL,
         "has_api_key": bool(OPENAI_API_KEY),
         "api_key_masked": mask(OPENAI_API_KEY),
+        "reasoning_effort": current_effort(),
+        "effort_levels": list(EFFORT_LEVELS),
     }
 
 
@@ -567,7 +626,7 @@ def describe_bookmark(text: str) -> dict:
 
 def backend_description() -> str:
     extra = []
-    if OPENAI_REASONING_EFFORT:
+    if OPENAI_REASONING_EFFORT and OPENAI_THINKING_TYPE != "disabled":
         extra.append(f"effort={OPENAI_REASONING_EFFORT}")
     if OPENAI_THINKING_TYPE:
         extra.append(f"thinking={OPENAI_THINKING_TYPE}")
@@ -780,10 +839,7 @@ def _openai_call(
         # Non-streaming decision calls skip reasoning to cut latency.
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     else:
-        if OPENAI_REASONING_EFFORT:
-            kwargs["reasoning_effort"] = OPENAI_REASONING_EFFORT
-        if OPENAI_THINKING_TYPE:
-            kwargs["extra_body"] = {"thinking": {"type": OPENAI_THINKING_TYPE}}
+        kwargs.update(_thinking_kwargs())
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = tool_choice or "auto"
@@ -836,10 +892,7 @@ def _openai_stream(messages: list[dict], tools: list[dict] | None = None):
         "max_tokens": MAX_TOKENS,
         "stream_options": {"include_usage": True},
     }
-    if OPENAI_REASONING_EFFORT:
-        kwargs["reasoning_effort"] = OPENAI_REASONING_EFFORT
-    if OPENAI_THINKING_TYPE:
-        kwargs["extra_body"] = {"thinking": {"type": OPENAI_THINKING_TYPE}}
+    kwargs.update(_thinking_kwargs())
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"

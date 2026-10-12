@@ -442,6 +442,24 @@ try {
         <button class="send-btn send-main" @click="send()" :disabled="!canSend()" title="Send (Enter)"><i data-lucide="arrow-up"></i></button>
       </div>
       <div class="foot">
+        <!-- reasoning effort: applies to the next request, persisted server-side -->
+        <div class="effort" @click.outside="effortOpen=false">
+          <button class="effort-btn" :class="{open: effortOpen, off: effortLevel==='off'}"
+                  @click="effortOpen=!effortOpen; refreshIcons()" title="思考强度（对之后的回复生效）"
+                  aria-haspopup="menu" :aria-expanded="effortOpen">
+            <i data-lucide="brain"></i><span x-text="'思考 · ' + effortLabel(effortLevel)"></span><i data-lucide="chevron-up" class="chev"></i>
+          </button>
+          <div class="effort-menu" x-show="effortOpen" x-cloak role="menu">
+            <template x-for="lv in EFFORTS" :key="lv.id">
+              <button class="effort-item" role="menuitemradio" :class="{active: effortLevel===lv.id}"
+                      :aria-checked="effortLevel===lv.id" @click="setEffort(lv.id)">
+                <span class="bars" :data-n="lv.n"><i></i><i></i><i></i></span>
+                <span class="txt"><b x-text="lv.label"></b><small x-text="lv.hint"></small></span>
+                <span class="tick" x-show="effortLevel===lv.id">✓</span>
+              </button>
+            </template>
+          </div>
+        </div>
         <span class="kbd"><kbd>Enter</kbd> send</span>
         <span class="kbd"><kbd>⇧ Enter</kbd> newline</span>
         <span class="kbd"><kbd>⌘K</kbd> search</span>
@@ -807,6 +825,26 @@ function chatable() {
     search: '',   // tree filter query; matches node title + summary + preview
     renamingId: null, renameText: '',  // inline tree-row rename state
     nodeMenu: {node: null, x: 0, y: 0},  // tree-row "⋯" dropdown state
+    // Composer reasoning-effort picker (server-side setting, see /api/effort).
+    effortOpen: false,
+    EFFORTS: [
+      {id: 'off',    n: 0, label: '关闭', hint: '不思考，最快'},
+      {id: 'low',    n: 1, label: '低',   hint: '简单问题'},
+      {id: 'medium', n: 2, label: '中',   hint: '速度与质量均衡'},
+      {id: 'high',   n: 3, label: '高',   hint: '最深入，较慢'},
+    ],
+    get effortLevel() { return (this.config.llm && this.config.llm.reasoning_effort) || 'high'; },
+    effortLabel(id) { const e = this.EFFORTS.find(x => x.id === id); return e ? e.label : id; },
+    async setEffort(level) {
+      this.effortOpen = false;
+      if (level === this.effortLevel) return;
+      try {
+        const r = await fetch('/api/effort', {method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({level})});
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        this.config = await r.json();
+      } catch (e) { toast('切换思考强度失败：' + e.message, 'error'); }
+    },
     // quote-fork popup: selected text + its message id + fixed-position coords
     quotePop: {show: false, x: 0, y: 0, text: '', msgId: null},
     selectedId: null, messages: [],
@@ -933,6 +971,7 @@ function chatable() {
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (this.quotePop.show) { this.quotePop.show = false; return; }
+        if (this.effortOpen) { this.effortOpen = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
         if (this.bmDetail) { this.bmDetail = null; return; }
         if (this.mindmap.open) {
