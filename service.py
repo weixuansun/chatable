@@ -54,6 +54,9 @@ RETAIN_FINISHED_TURN_S = float(os.environ.get("CHATTABLE_RETAIN_FINISHED_TURN_S"
 # Auto title+summary per turn is on by default (main model, thinking off);
 # CHATTABLE_AUTO_TITLE=0 opts out, CHATTABLE_SUMMARY_MODEL picks a cheaper model.
 AUTO_TITLE_ENABLED = os.environ.get("CHATTABLE_AUTO_TITLE", "1").lower() not in ("0", "false", "no")
+# Follow-up suggestions (candidate next questions under each reply) are on by
+# default, on the same model profile; CHATTABLE_AUTO_SUGGEST=0 opts out.
+AUTO_SUGGEST_ENABLED = os.environ.get("CHATTABLE_AUTO_SUGGEST", "1").lower() not in ("0", "false", "no")
 # Vision: attach images as inline data URLs to the current turn's user message.
 # Disable if the backend rejects image inputs.
 VISION_ENABLED = os.environ.get("CHATTABLE_VISION", "1").lower() not in ("0", "false", "no")
@@ -577,9 +580,15 @@ class ChatService:
         }
 
     def tree(self) -> dict:
-        """Return the whole tree as nested JSON rooted at the synthetic ROOT."""
+        """Return the whole tree as nested JSON rooted at the synthetic ROOT.
+
+        Top-level conversations also carry ``report``: "running" while a survey
+        report is being generated, "ready" once one is saved, else None.
+        """
         children = self.store.children_map()
         nodes = {n.id: n for n in self.store.all_nodes()}
+        reported = report_store.list_ids(self._reports_dir())
+        generating = set(self.reports.active_ids())
 
         def build(nid: str) -> dict | None:
             # children_map() and all_nodes() are separate snapshots; a node can
@@ -592,6 +601,9 @@ class ChatService:
             if node is None:
                 return None
             data = self._node_summary_dict(node)
+            if node.parent_id == ROOT_ID:
+                data["report"] = ("running" if nid in generating
+                                  else "ready" if nid in reported else None)
             data["children"] = kids
             return data
 
@@ -642,6 +654,7 @@ class ChatService:
                 "tool_results": tool_results,
                 "reasoning": meta.get("reasoning", ""),
                 "attachments": meta.get("attachments") or [],
+                "suggestions": meta.get("suggestions") or [],
                 "usage": n.usage,
             })
         return out
@@ -657,6 +670,7 @@ class ChatService:
             "tool_decision_mode": TOOL_DECISION_MODE,
             "tools": sorted(TOOL_REGISTRY.names()),
             "auto_title": AUTO_TITLE_ENABLED,
+            "auto_suggest": AUTO_SUGGEST_ENABLED,
             "vision_supported": main.VISION_SUPPORTED,
             "summary_model": main.SUMMARY_MODEL,
             "llm": main.current_config(),
@@ -806,10 +820,74 @@ class ChatService:
         return {"ok": True, "id": node_id, "title": fresh.title, "summary": fresh.summary}
 
     def _set_node_summary(self, node_id: str, summary: str) -> None:
-        """Write node.summary (a plain dataclass field) and flush."""
-        node = self.store.get(node_id)
-        node.summary = summary
-        self.store.add(node)
+        """Write node.summary and flush — in one locked store write, so it
+        can't undo a metadata write (follow-up suggestions) landing meanwhile."""
+        self.store.set_summary(node_id, summary)
+
+    # Context budget for follow-up suggestions: the latest turn nearly whole,
+    # earlier turns as short excerpts.
+    _SUGGEST_EARLIER_NODES = 8
+    _SUGGEST_EARLIER_CHARS = {"user": 300, "assistant": 500}
+    _SUGGEST_LAST_CHARS = {"user": 2000, "assistant": 6000}
+
+    def _suggest_context(self, node_id: str) -> str:
+        """The conversation up to an assistant reply, rendered for the
+        follow-up-suggestion call."""
+        path = [n for n in self.store.path_to_root(node_id) if n.role in ("user", "assistant")]
+        reply = path.pop()
+        question = path.pop() if path and path[-1].role == "user" else None
+
+        def said(n: Node) -> str:
+            text = _strip_attachment_preamble(n.content) if n.role == "user" else n.content
+            return (text or "").strip()
+
+        def who(n: Node) -> str:
+            return "用户" if n.role == "user" else "助手"
+
+        lines: list[str] = []
+        earlier = path[-self._SUGGEST_EARLIER_NODES:]
+        if earlier:
+            lines.append("【较早的对话】（只保留每条的开头）")
+            for n in earlier:
+                text = " ".join(said(n).split())
+                cap = self._SUGGEST_EARLIER_CHARS[n.role]
+                lines.append(f"{who(n)}：{text[:cap]}{'…' if len(text) > cap else ''}")
+            lines.append("")
+        lines.append("【最后一轮】")
+        if question is not None:
+            lines.append(f"用户：{_clip_middle(said(question), self._SUGGEST_LAST_CHARS['user'])}")
+        lines.append(f"助手：{_clip_middle(said(reply), self._SUGGEST_LAST_CHARS['assistant'])}")
+        return "\n".join(lines)
+
+    def generate_suggestions(self, node_id: str, force: bool = False) -> dict:
+        """Candidate next questions for an assistant reply, saved on the node
+        (``metadata["suggestions"]``) and shown as buttons under it.
+
+        Called by the UI after a turn completes, like auto-title. Keeps
+        existing suggestions unless ``force=True``. Never raises over an LLM
+        failure: returns ``{"ok": False, "error"}`` instead.
+        """
+        node = self.store.get(node_id)  # raises NodeNotFoundError if missing
+        if node.role != "assistant":
+            return {"ok": False, "id": node_id, "skipped": "not an assistant node"}
+        text = (node.content or "").strip()
+        if not text or text.startswith(("[error:", "[empty reply:")) \
+                or node_id in self.live.active_ids():
+            return {"ok": False, "id": node_id, "skipped": "no finished answer to follow up on"}
+        meta = node.metadata if isinstance(node.metadata, dict) else {}
+        if meta.get("suggestions") and not force:
+            return {"ok": True, "id": node_id, "suggestions": meta["suggestions"],
+                    "skipped": "already suggested"}
+        try:
+            questions = main.suggest_followups(self._suggest_context(node_id))
+        except main.SummaryUnavailable as e:
+            return {"ok": False, "id": node_id, "error": str(e)}
+        except Exception as e:  # noqa: BLE001 - suggestions are best-effort
+            return {"ok": False, "id": node_id, "error": f"{type(e).__name__}: {e}"}
+        if not self.store.exists(node_id):  # deleted while the model was thinking
+            return {"ok": False, "id": node_id, "skipped": "node deleted"}
+        self.store.update_metadata(node_id, {"suggestions": questions})
+        return {"ok": True, "id": node_id, "suggestions": questions}
 
     def rename_node(self, node_id: str, title: str) -> dict:
         """Manually name a user/assistant node; locks it against auto-titling.

@@ -217,6 +217,12 @@ try {
                        @keydown.esc.prevent="renamingId=null" @blur="renamingId=null"
                        spellcheck="false" />
               </template>
+              <template x-if="n.depth === 0 && n.report">
+                <button class="report-mark" :class="{running: n.report === 'running'}"
+                        :title="n.report === 'running' ? '正在生成综述' : '已生成综述，点击查看'"
+                        @click.stop="openReport(n.id)" @keydown.enter.stop @keydown.space.stop>
+                  <i data-lucide="file-text"></i></button>
+              </template>
               <template x-if="n.kidCount > 1"><span class="branch-badge" x-text="n.kidCount + ' 分支'"></span></template>
               <span class="nid" x-text="'#' + n.id.slice(0,6)"></span>
               <template x-if="n.collapsed"><span class="collapsed-badge" x-text="'⋯'"></span></template>
@@ -391,6 +397,30 @@ try {
                           :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
                     <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>复制
                   </button>
+                </div>
+              </template>
+              <!-- follow-up suggestions: candidate next questions, generated
+                   after the turn; clicking one asks it from this reply -->
+              <template x-if="!streams[m.id] && canSuggest(m) && m.suggestions && m.suggestions.length">
+                <div class="suggest-row">
+                  <template x-for="(q, qi) in m.suggestions" :key="m.id + ':' + qi">
+                    <button class="suggest-chip" @click="askSuggestion(m, q)" title="点击发送这个问题">
+                      <i data-lucide="corner-down-right"></i><span x-text="q"></span>
+                    </button>
+                  </template>
+                  <button class="suggest-refresh" :class="{busy: !!suggesting[m.id]}"
+                          :disabled="!!suggesting[m.id]" @click="suggestFor(m.id, {force: true, manual: true})"
+                          title="换一批问题"><i data-lucide="refresh-cw"></i></button>
+                </div>
+              </template>
+              <template x-if="!streams[m.id] && canSuggest(m) && !(m.suggestions && m.suggestions.length) && suggesting[m.id]">
+                <div class="suggest-row suggest-loading"><span class="spin"></span><span>正在想可以继续问的问题…</span></div>
+              </template>
+              <!-- older replies have none: offer them on demand for the reply at the end of the view -->
+              <template x-if="!streams[m.id] && canSuggest(m) && !(m.suggestions && m.suggestions.length) && !suggesting[m.id] && m === messages[messages.length - 1]">
+                <div class="suggest-row">
+                  <button class="suggest-more" @click="suggestFor(m.id, {manual: true})">
+                    <i data-lucide="sparkles"></i>推荐追问</button>
                 </div>
               </template>
             </div>
@@ -717,10 +747,11 @@ try {
                   <i data-lucide="download"></i>
                 </button>
                 <button class="map-del-btn" x-show="mn.isTrunk" @click.stop="openReport(mn.id)"
-                        title="生成 / 查看整棵对话树的综述">
+                        :class="{'has-report': !!trunkReport(mn.id)}"
+                        :title="trunkReport(mn.id) ? '查看整棵对话树的综述' : '生成整棵对话树的综述'">
                   <i data-lucide="file-text"></i>
                 </button>
-                <button class="map-del-btn" @click.stop="mapDeleteNode(mn)" title="删除该节点及其所有子节点">
+                <button class="map-del-btn map-del" @click.stop="mapDeleteNode(mn)" title="删除该节点及其所有子节点">
                   <i data-lucide="trash-2"></i>
                 </button>
                 <template x-if="mn.kidCount > 1"><span class="branch-badge" x-text="mn.kidCount + ' 分支'"></span></template>
@@ -925,7 +956,8 @@ function chatable() {
     // quote-fork popup: selected text + its message id + fixed-position coords
     quotePop: {show: false, x: 0, y: 0, text: '', msgId: null},
     selectedId: null, messages: [],
-    copiedMsgId: null,  // message id whose copy button just succeeded (icon feedback)
+    copiedMsgId: null,
+    suggesting: {},                      // assistant ids whose follow-up suggestions are being generated  // message id whose copy button just succeeded (icon feedback)
     draft: '', status: '',
     // IME (e.g. Chinese pinyin) composition tracking. event.isComposing alone
     // is not reliable: on some browser/IME combos compositionend fires BEFORE
@@ -998,6 +1030,7 @@ function chatable() {
     report: {open: false, trunkId: null, title: '', status: 'idle', text: '', reasoning: '',
              error: '', saved: null, stale: false, focus: '', info: null, copied: false},
     _reportGen: 0,                       // bumped to drop events from a superseded stream reader
+    _reportPoll: null,                   // tree re-poll timer while a report generates
     toggleBookmarks() {
       this.bookmarksOpen = !this.bookmarksOpen;
       if (this.bookmarksOpen) this.drawerOpen = false;  // the two panels are mutually exclusive
@@ -1647,6 +1680,22 @@ function chatable() {
       this.tree = await (await fetch('/api/tree')).json();
       this.rebuildFlat();
       this.refreshIcons();
+      this._watchReports();
+    },
+
+    // While a survey report is generating, keep re-reading the tree so the
+    // conversation's sidebar mark settles even when nobody is watching the
+    // job's stream (modal closed, or another report opened).
+    _watchReports() {
+      if (this._reportPoll) return;
+      if (!(this.tree.children || []).some(c => c.report === 'running')) return;
+      this._reportPoll = setTimeout(() => { this._reportPoll = null; this.refreshTree(); }, 4000);
+    },
+
+    // "running" / "ready" / null for a top-level conversation.
+    trunkReport(id) {
+      const t = (this.tree.children || []).find(c => c.id === id);
+      return (t && t.report) || null;
     },
 
     // Coalesce bursts of tree refreshes (user_node / assistant_node /
@@ -2147,7 +2196,10 @@ function chatable() {
     // Returns true once the job has reached a final state.
     _onReportEvent(evt) {
       const r = this.report;
-      if (evt.type === 'report_start') { r.info = evt; if (evt.title) r.title = evt.title; }
+      if (evt.type === 'report_start') {
+        r.info = evt; if (evt.title) r.title = evt.title;
+        this.scheduleTreeRefresh();   // show the conversation as generating
+      }
       else if (evt.type === 'reasoning') r.reasoning += evt.text;
       else if (evt.type === 'delta') r.text += evt.text;
       else if (evt.type === 'reset') { r.text = ''; r.reasoning = ''; }
@@ -2155,6 +2207,7 @@ function chatable() {
         r.saved = evt.report; r.stale = !!evt.stale;
         r.status = 'idle'; r.text = ''; r.reasoning = '';
         this.refreshIcons();
+        this.scheduleTreeRefresh();
         return true;
       } else if (evt.type === 'stopped' || evt.type === 'error') {
         // Nothing was saved: fall back to the previous report, if any.
@@ -2162,6 +2215,7 @@ function chatable() {
         if (evt.type === 'error') r.error = evt.message || 'report generation failed';
         else toast('已停止，本次生成没有保存', 'info');
         this.refreshIcons();
+        this.scheduleTreeRefresh();
         return true;
       }
       return false;
@@ -2772,7 +2826,12 @@ function chatable() {
       }
       this.draft = '';
       this.attachments = [];
+      await this._sendTurn(content, parentId, typed, ready);
+    },
 
+    // Start one turn: `content` is the message as sent, `typed` and `ready`
+    // (attachments) are what a failed or stopped send puts back in the composer.
+    async _sendTurn(content, parentId, typed, ready) {
       // Per-stream state. Keyed by a temp id until the real assistant id arrives.
       const tempKey = 'temp-' + (++this._tmpSeq);
       let st = {
@@ -2981,6 +3040,11 @@ function chatable() {
       delete s2[key];
       this.streams = s2;
 
+      // Candidate next questions for this reply, in the background.
+      if (assistantId && this.config.auto_suggest && !gone && !errored) {
+        this.suggestFor(assistantId);
+      }
+
       if (errored) this.status = 'error: ' + errored;
       await this.refreshTree();
 
@@ -2989,6 +3053,52 @@ function chatable() {
       if (assistantId && this.config.auto_title && !gone) {
         this.autoTitle(assistantId);
       }
+    },
+
+    // A reply worth suggesting follow-ups for: a finished, non-failed answer.
+    canSuggest(m) {
+      if (!m || m.role !== 'assistant') return false;
+      const t = (m.content || '').trim();
+      return !!t && !t.startsWith('[error:') && !t.startsWith('[empty reply:');
+    },
+
+    // Generate (or, with force, regenerate) the follow-up suggestions of an
+    // assistant reply. Automatic runs fail silently; manual ones say why.
+    async suggestFor(nodeId, {force = false, manual = false} = {}) {
+      if (this.suggesting[nodeId]) return;
+      this.suggesting = {...this.suggesting, [nodeId]: true};
+      this.refreshIcons();
+      let error = '';
+      try {
+        const resp = await fetch('/api/suggest/' + encodeURIComponent(nodeId) + (force ? '?force=true' : ''),
+                                 {method: 'POST'});
+        const data = resp.ok ? await resp.json() : {error: await this.errDetail(resp)};
+        if (data.ok && data.suggestions && data.suggestions.length) {
+          // The row may have been re-fetched meanwhile; update whichever is shown.
+          const row = this.messages.find(m => m.id === nodeId);
+          if (row) row.suggestions = data.suggestions;
+        } else {
+          error = data.error || data.skipped || '';
+        }
+      } catch (e) {
+        error = e.message || String(e);
+      } finally {
+        const s = {...this.suggesting};
+        delete s[nodeId];
+        this.suggesting = s;
+        this.refreshIcons();
+      }
+      if (error && manual) toast('生成追问失败：' + error, 'error');
+    },
+
+    // Ask a suggested question as the user, from the reply it was suggested
+    // for. If that reply is not the end of the viewed path, switch the view to
+    // it first so the new turn shows up right under it.
+    async askSuggestion(m, q) {
+      const last = this.messages[this.messages.length - 1];
+      if (!last || last.id !== m.id) await this.select(m.id);
+      this.selectedId = m.id;
+      await this._sendTurn(q, m.id, q, []);
     },
 
     async autoTitle(nodeId) {

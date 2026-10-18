@@ -257,6 +257,20 @@ def api_rename(node_id: str, body: RenameBody) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/api/suggest/{node_id}")
+def api_suggest(node_id: str, force: bool = False) -> dict:
+    """Generate candidate follow-up questions for an assistant reply.
+
+    Called by the UI after a turn completes (and on demand). Keeps existing
+    suggestions unless ``force=true``; LLM failures come back as
+    ``{"ok": false, "error"}`` rather than an HTTP error.
+    """
+    try:
+        return service.generate_suggestions(node_id, force=force)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+
+
 @app.post("/api/title/{node_id}")
 def api_title(node_id: str, force: bool = False) -> dict:
     """Generate a short title for an assistant node from its Q/A turn.

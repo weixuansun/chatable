@@ -1498,6 +1498,17 @@ class ReportStoreTests(unittest.TestCase):
             self.assertFalse(report_store.delete(directory, "abc123"))
             self.assertIsNone(report_store.get(directory, "abc123"))
 
+    def test_list_ids_ignores_temp_and_foreign_files(self):
+        import report_store
+
+        with tempfile.TemporaryDirectory() as d:
+            directory = report_store.reports_dir(d)
+            self.assertEqual(report_store.list_ids(directory), set())  # no folder yet
+            report_store.save(directory, {"trunk_id": "abc123", "content": "x"})
+            for name in ("def456.json.123.tmp", "notes.txt", "bad id.json"):
+                open(os.path.join(directory, name), "w").close()
+            self.assertEqual(report_store.list_ids(directory), {"abc123"})
+
     def test_unsafe_ids_never_become_paths(self):
         import report_store
 
@@ -1924,6 +1935,36 @@ class ReportJobTests(_ReportTestBase):
                 time.sleep(0.3)  # ...and its own cleanup removes it
                 self.assertIsNone(svc.subscribe_report(q.id, 0))
 
+    def test_tree_marks_conversations_with_a_report(self):
+        from unittest.mock import patch
+
+        import service as service_mod
+
+        def marks(svc):
+            return {c["id"]: c.get("report", "MISSING") for c in svc.tree()["children"]}
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q, a, _, _ = self._branched_tree(svc.store)
+            other = self._add(svc.store, "user", "another conversation", ROOT_ID, 9.0)
+            self.assertEqual(marks(svc), {q.id: None, other.id: None})
+
+            fake_stream, gate = self._blocked()
+            with patch.object(service_mod, "stream_backend", fake_stream):
+                svc.start_report(q.id)
+                self.assertTrue(gate["reached"].wait(5))
+                self.assertEqual(marks(svc), {q.id: "running", other.id: None})
+                gate["release"].set()
+                list(svc.subscribe_report(q.id, 0))
+            self.assertEqual(marks(svc), {q.id: "ready", other.id: None})
+
+            # Only top-level conversations carry the mark.
+            trunk = next(c for c in svc.tree()["children"] if c["id"] == q.id)
+            self.assertNotIn("report", trunk["children"][0])
+
+            svc.delete_subtree(q.id)
+            self.assertEqual(marks(svc), {other.id: None})
+
     def test_report_is_not_written_for_a_conversation_gone_by_the_time_it_finishes(self):
         import report_store
 
@@ -1969,6 +2010,182 @@ class ReportJobTests(_ReportTestBase):
             self.assertEqual(events[-1]["type"], "stopped")
             self.assertIsNone(report_store.get(directory, q.id))
             self.assertFalse(svc.store.exists(q.id))
+
+
+class SuggestionParseTests(unittest.TestCase):
+    def test_json_array(self):
+        qs = ["为什么每4层共享 indexer？", "和 DSA 比有什么区别？", "能用在推理上吗？"]
+        self.assertEqual(main._parse_suggestions(json.dumps(qs, ensure_ascii=False), 3), qs)
+
+    def test_fenced_json_capped_and_deduped(self):
+        raw = '```json\n["A?", "a?", " B? ", "C?", "D?"]\n```'
+        self.assertEqual(main._parse_suggestions(raw, 3), ["A?", "B?", "C?"])
+
+    def test_numbered_lines_when_not_json(self):
+        raw = "1. 第一个问题？\n2) 第二个问题？\n- “第三个问题？”\n（4）第四个问题？"
+        self.assertEqual(main._parse_suggestions(raw, 4),
+                         ["第一个问题？", "第二个问题？", "第三个问题？", "第四个问题？"])
+
+    def test_drops_empty_and_overlong(self):
+        raw = '["", "ok?", "' + "长" * 300 + '"]'
+        self.assertEqual(main._parse_suggestions(raw, 3), ["ok?"])
+
+    def test_nothing_usable(self):
+        self.assertEqual(main._parse_suggestions("", 3), [])
+
+
+class SuggestFollowupsCallTests(unittest.TestCase):
+    def _call(self, reply_text, **kwargs):
+        seen = {}
+
+        class _Completions:
+            def create(self, **kw):
+                seen.update(kw)
+                if isinstance(reply_text, Exception):
+                    raise reply_text
+                return {"choices": [{"message": {"content": reply_text}}]}
+
+        old = main._openai_client
+        main._openai_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=_Completions()))
+        try:
+            return main.suggest_followups("对话内容", **kwargs), seen
+        finally:
+            main._openai_client = old
+
+    def test_one_cheap_call_without_thinking(self):
+        out, seen = self._call('["一？", "二？", "三？"]', count=3)
+        self.assertEqual(out, ["一？", "二？", "三？"])
+        self.assertFalse(seen["stream"])
+        self.assertEqual(seen["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(seen["model"], main.SUMMARY_MODEL or main.OPENAI_MODEL)
+        self.assertIn("3 个", seen["messages"][0]["content"])
+        self.assertEqual(seen["messages"][1], {"role": "user", "content": "对话内容"})
+
+    def test_failures_raise_summary_unavailable(self):
+        with self.assertRaises(main.SummaryUnavailable):
+            self._call(RuntimeError("boom"))
+        with self.assertRaises(main.SummaryUnavailable):
+            self._call("I cannot help with that.")  # prose, not questions
+
+    def test_plain_question_lines_are_accepted(self):
+        out, _ = self._call("Here you go:\n为什么会这样？\nHow does it scale?")
+        self.assertEqual(out, ["为什么会这样？", "How does it scale?"])
+
+
+class GenerateSuggestionsTests(_ReportTestBase):
+    """Follow-up suggestions are generated from the path to a reply and
+    saved on it."""
+
+    def _chain(self, store):
+        q1 = self._add(store, "user", "什么是 RoPE？", ROOT_ID, 1.0)
+        a1 = self._add(store, "assistant", "RoPE 是旋转位置编码……", q1.id, 2.0)
+        q2 = self._add(store, "user",
+                       "Attached file(s) — read them with web_fetch using the exact path shown, "
+                       "then answer:\n- [p.pdf](/api/files/p.pdf): /srv/uploads/p.pdf\n\n它和 ALiBi 比呢？",
+                       a1.id, 3.0)
+        a2 = self._add(store, "assistant", "HEAD " + "细节" * 4000 + " 如需深入我可以继续展开。", q2.id, 4.0)
+        return q1, a1, q2, a2
+
+    def test_generates_from_the_path_and_saves_on_the_node(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q1, a1, q2, a2 = self._chain(svc.store)
+            # A sibling branch must not leak into this reply's context.
+            other = self._add(svc.store, "user", "SIBLING-BRANCH", a1.id, 5.0)
+            self._add(svc.store, "assistant", "sibling answer", other.id, 6.0)
+            seen = []
+
+            def fake(conversation, count=0):
+                seen.append(conversation)
+                return ["问题一？", "问题二？"]
+
+            with patch.object(main, "suggest_followups", fake):
+                res = svc.generate_suggestions(a2.id)
+
+            self.assertEqual(res, {"ok": True, "id": a2.id, "suggestions": ["问题一？", "问题二？"]})
+            self.assertEqual(svc.store.get(a2.id).metadata["suggestions"], ["问题一？", "问题二？"])
+            shown = [m for m in svc.path_messages(a2.id) if m["id"] == a2.id][0]
+            self.assertEqual(shown["suggestions"], ["问题一？", "问题二？"])
+            self.assertEqual([m for m in svc.path_messages(a2.id) if m["id"] == a1.id][0]["suggestions"], [])
+
+        ctx = seen[0]
+        self.assertIn("用户：什么是 RoPE？", ctx)                 # earlier turn, as an excerpt
+        self.assertIn("用户：它和 ALiBi 比呢？", ctx)            # the question, preamble stripped
+        for leaked in ("Attached file(s)", "/srv/uploads", "SIBLING-BRANCH"):
+            self.assertNotIn(leaked, ctx)
+        self.assertIn("HEAD", ctx)                               # long answer: head …
+        self.assertIn("如需深入我可以继续展开。", ctx)            # … and tail kept
+        self.assertLess(len(ctx), 9000)
+        self.assertLess(ctx.index("【较早的对话】"), ctx.index("【最后一轮】"))
+
+    def test_existing_suggestions_are_kept_unless_forced(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            *_, a2 = self._chain(svc.store)
+            batches = iter([["旧？"], ["新？"]])
+            with patch.object(main, "suggest_followups", lambda c, count=0: next(batches)):
+                svc.generate_suggestions(a2.id)
+                kept = svc.generate_suggestions(a2.id)
+                forced = svc.generate_suggestions(a2.id, force=True)
+            self.assertEqual(kept["suggestions"], ["旧？"])
+            self.assertEqual(kept["skipped"], "already suggested")
+            self.assertEqual(forced["suggestions"], ["新？"])
+            self.assertEqual(svc.store.get(a2.id).metadata["suggestions"], ["新？"])
+
+    def test_skips_what_has_no_answer_and_reports_failures(self):
+        from unittest.mock import patch
+
+        from store import NodeNotFoundError
+
+        def must_not_run(*a, **k):
+            raise AssertionError("model called")
+
+        def failing(*a, **k):
+            raise main.SummaryUnavailable("suggestion request failed: boom")
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            q1, a1, q2, a2 = self._chain(svc.store)
+            bad = self._add(svc.store, "assistant", "[error: BadRequestError: x]", q2.id, 7.0)
+            live = self._add(svc.store, "assistant", "half", q2.id, 8.0)
+            with patch.object(main, "suggest_followups", must_not_run), \
+                    patch.object(svc.live, "active_ids", lambda: [live.id]):
+                self.assertFalse(svc.generate_suggestions(q1.id)["ok"])     # a user node
+                self.assertFalse(svc.generate_suggestions(bad.id)["ok"])    # a failed turn
+                self.assertFalse(svc.generate_suggestions(live.id)["ok"])   # still generating
+            with patch.object(main, "suggest_followups", failing):
+                res = svc.generate_suggestions(a1.id)
+            self.assertEqual((res["ok"], res["error"]), (False, "suggestion request failed: boom"))
+            self.assertNotIn("suggestions", svc.store.get(a1.id).metadata or {})
+            with self.assertRaises(NodeNotFoundError):
+                svc.generate_suggestions("missing")
+
+    def test_title_written_meanwhile_does_not_drop_suggestions(self):
+        # Auto-title and suggestions both finish right after a turn; the
+        # summary write used to copy the node and write it back whole.
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._service(d)
+            *_, a2 = self._chain(svc.store)
+            real_set_summary = svc.store.set_summary
+
+            def suggestions_land_first(nid, summary):
+                svc.store.update_metadata(nid, {"suggestions": ["q?"]})
+                return real_set_summary(nid, summary)
+
+            gist = {"title": "标题", "summary": "一句话"}
+            with patch.object(main, "summarize_turn", lambda u, a: gist), \
+                    patch.object(svc.store, "set_summary", suggestions_land_first):
+                svc.generate_title(a2.id)
+            node = svc.store.get(a2.id)
+            self.assertEqual((node.title, node.summary), ("标题", "一句话"))
+            self.assertEqual(node.metadata["suggestions"], ["q?"])
 
 
 class VisionProbeSetup:  # noqa: D101 - marker namespace, not a test

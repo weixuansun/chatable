@@ -433,6 +433,15 @@ class JsonlTreeStore:
             self._append(node)
         return self.get(nid)
 
+    def set_summary(self, nid: str, summary: str) -> Node:
+        if nid == ROOT_ID:
+            raise ValueError("root cannot be summarized")
+        with self._lock:
+            node = self._lookup(nid)
+            node.summary = summary
+            self._append(node)
+        return self.get(nid)
+
     def update_metadata(self, nid: str, updates: dict) -> Node:
         if nid == ROOT_ID:
             raise ValueError("root cannot store metadata")

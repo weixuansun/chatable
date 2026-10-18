@@ -56,6 +56,15 @@ def save(directory: str, report: dict) -> None:
                 pass
 
 
+def list_ids(directory: str) -> set[str]:
+    """Trunk ids that have a saved report (a directory listing, no reads)."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return set()
+    return {n[:-5] for n in names if n.endswith(".json") and _SAFE_ID.match(n[:-5])}
+
+
 def delete(directory: str, trunk_id: str) -> bool:
     """Remove a conversation's report. Returns whether a file was removed."""
     try:
