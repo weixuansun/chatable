@@ -126,6 +126,12 @@ TAVILY_API_KEY=tvly-... EXA_API_KEY=... chatable-web
 Both are read from the environment at request time, so exporting them in your
 shell rc file (e.g. `~/.zshrc`) also works.
 
+`web_fetch` refuses non-public addresses (SSRF guard). If you run a TUN-mode
+proxy (Clash/Mihomo "fake-IP"), hostnames resolve into 198.18.0.0/15 — that
+range is allowed by default so fetches keep working. Override with
+`CHATTABLE_FETCH_ALLOW_NETS` (comma-separated CIDRs, e.g. to allow an
+intranet range; set it empty to disable the default).
+
 
 
 ## License

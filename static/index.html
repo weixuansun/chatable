@@ -909,16 +909,10 @@ function formatAttachmentBlock(text) {
 // Sanitize every HTML string that reaches the DOM (chat bubbles, streaming
 // replies, survey reports, attachment blocks). DOMPurify strips scripts,
 // event handlers and javascript:/data: URLs while keeping the markup marked
-// and KaTeX/hljs need (code classes, spans). Links that open in a new tab
-// get rel="noopener noreferrer" so the target page can't window.opener us.
-if (typeof DOMPurify !== 'undefined') {
-  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (node.tagName === 'A' && node.getAttribute('target') === '_blank') {
-      node.setAttribute('rel', 'noopener noreferrer');
-    }
-  });
-}
-
+// and KaTeX/hljs need (code classes, spans). Markdown links never carry
+// target=_blank (DOMPurify's default profile drops target anyway); the one
+// new-tab link in the UI (bookmark detail) is a template element with a
+// hardcoded rel="noopener noreferrer", outside the sanitizer.
 function sanitizeHtml(html) {
   if (typeof DOMPurify !== 'undefined') {
     return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
