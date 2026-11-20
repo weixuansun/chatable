@@ -448,13 +448,53 @@ def _ip_is_public(ip_str: str) -> bool:
     return ip.is_global
 
 
+# CHATTABLE_FETCH_ALLOW_NETS: comma-separated CIDRs web_fetch may reach even
+# though they are not globally routable. Default covers 198.18.0.0/15, the
+# "fake-IP" range TUN-mode proxies (Clash/Mihomo/Surge) assign to EVERY
+# hostname — the TUN device forwards them to the real host, so refusing them
+# breaks all fetches behind such a proxy (it is a benchmarking range, never
+# a real LAN/loopback/metadata network). Set the var to "" to disable the
+# default, or list your own intranet ranges. Loopback/link-local/private/etc.
+# stay blocked unless EXPLICITLY listed here.
+def _fetch_allow_networks() -> list:
+    raw = os.environ.get("CHATTABLE_FETCH_ALLOW_NETS", "198.18.0.0/15").strip()
+    nets: list = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part))
+        except ValueError:
+            print(f"  [web_fetch] ignoring invalid CHATTABLE_FETCH_ALLOW_NETS entry: {part!r}")
+    return nets
+
+
+def _ip_explicitly_allowed(ip_str: str, nets: list) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip in net for net in nets)
+
+
+def _proxy_configured_for(scheme: str) -> bool:
+    """True when a proxy env var would carry this scheme (HTTP(S)_PROXY /
+    ALL_PROXY, either case)."""
+    names = (f"{scheme}_proxy", f"{scheme.upper()}_PROXY", "all_proxy", "ALL_PROXY")
+    return any(os.environ.get(n, "").strip() for n in names)
+
+
 def _validate_fetch_url(url: str) -> Optional[str]:
     """SSRF check for one hop. Returns a refusal message, or None if allowed.
 
     Only http/https schemes pass. The host is resolved and EVERY returned
-    address must be public — this also catches numeric oddities
-    (http://2130706433/, http://0x7f000001/) because getaddrinfo applies
-    inet_aton semantics to them. Callers must re-validate every redirect hop.
+    address must be public or in CHATTABLE_FETCH_ALLOW_NETS — this also
+    catches numeric oddities (http://2130706433/, http://0x7f000001/) because
+    getaddrinfo applies inet_aton semantics to them. Callers must re-validate
+    every redirect hop.
     """
     try:
         parts = urllib.parse.urlsplit(url)
@@ -468,28 +508,36 @@ def _validate_fetch_url(url: str) -> Optional[str]:
                 f"(got scheme {scheme!r} or none)")
     if not host:
         return f"Refused: URL has no host: {url!r}"
+    nets = _fetch_allow_networks()
     # Literal IP host (hostname strips the brackets of [::1] forms).
     try:
         ipaddress.ip_address(host)
     except ValueError:
         pass
     else:
-        if not _ip_is_public(host):
+        if not _ip_is_public(host) and not _ip_explicitly_allowed(host, nets):
             return f"Refused: {host} is not a public IP address"
         return None
-    # Hostname: resolve and require every candidate address to be public.
+    # Hostname: resolve and require every candidate address to be public
+    # (or explicitly allowed).
     try:
         infos = socket.getaddrinfo(
             host, port or (443 if scheme == "https" else 80),
             type=socket.SOCK_STREAM,
         )
     except socket.gaierror as exc:
+        # Behind an HTTP proxy, the PROXY resolves the host, not us — local
+        # resolution failing is expected (e.g. fake-IP DNS with no TUN route
+        # for this process). Let httpx send the request through the proxy;
+        # the literal-IP checks above already ran.
+        if _proxy_configured_for(scheme):
+            return None
         return f"Cannot resolve host {host!r}: {exc}"
     addrs = {info[4][0] for info in infos}
     if not addrs:
         return f"Cannot resolve host {host!r}: no addresses"
     for addr in addrs:
-        if not _ip_is_public(addr):
+        if not _ip_is_public(addr) and not _ip_explicitly_allowed(addr, nets):
             return (f"Refused: host {host!r} resolves to non-public address "
                     f"{addr} (SSRF protection)")
     return None
@@ -824,6 +872,24 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
         )
 
     if not (url.startswith("http://") or url.startswith("https://")):
+        # An explicit non-http(s) scheme is a clear refusal, not something to
+        # silently upgrade to https: "scheme://" for the usual forms, plus a
+        # "word:" prefix for opaque schemes like data:/javascript: — while
+        # "host:port/path" (digits after the colon) stays a bare host.
+        scheme = ""
+        if "://" in url:
+            scheme = url.split("://", 1)[0].lower()
+        else:
+            m = re.match(r"^([a-zA-Z][a-zA-Z0-9+.-]*):([^/]*)", url)
+            if m and not m.group(2).isdigit():
+                scheme = m.group(1).lower()
+        if scheme and scheme not in ("http", "https"):
+            return WebToolResult.error(
+                f"Refused: only http:// and https:// URLs can be fetched "
+                f"(got scheme {scheme!r})",
+                url=url,
+            )
+        # Bare "example.com/x" — assume https as before.
         url = "https://" + url
 
     # arXiv PDFs are binary — redirect to the abstract page (or HTML if available)

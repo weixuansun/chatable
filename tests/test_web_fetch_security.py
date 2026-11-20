@@ -27,6 +27,8 @@ _DNS = {
     "localhost": "127.0.0.1",
     "evil.example": "192.168.1.1",
     "2130706433": "127.0.0.1",  # inet_aton form of 127.0.0.1
+    "fake.example": "198.18.0.1",   # TUN/fake-IP proxy range (Clash/Mihomo)
+    "intranet.example": "10.1.2.3",
 }
 
 
@@ -92,6 +94,93 @@ class UrlValidationTests(unittest.TestCase):
 
     def test_unresolvable_host(self):
         self.assertIsNotNone(_validate_fetch_url("https://no-such-host.invalid/"))
+
+
+class FakeIpAndProxyTests(unittest.TestCase):
+    """TUN/fake-IP proxies (Clash/Mihomo) resolve every hostname into
+    198.18.0.0/15; CHATTABLE_FETCH_ALLOW_NETS controls the exception."""
+
+    ENV = "CHATTABLE_FETCH_ALLOW_NETS"
+    PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                  "ALL_PROXY", "all_proxy")
+
+    def setUp(self):
+        self._orig_dns = socket.getaddrinfo
+        socket.getaddrinfo = _fake_getaddrinfo
+        self._old_env = {k: os.environ.get(k) for k in (self.ENV,) + self.PROXY_VARS}
+        for k in self.PROXY_VARS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        socket.getaddrinfo = self._orig_dns
+        for k, v in self._old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_fake_ip_allowed_by_default(self):
+        os.environ.pop(self.ENV, None)
+        self.assertIsNone(_validate_fetch_url("https://fake.example/"))
+        # Literal fake-IP addresses are allowed by default too (documented:
+        # 198.18/15 is a benchmarking range, never a real LAN).
+        self.assertIsNone(_validate_fetch_url("https://198.18.0.1/"))
+
+    def test_fake_ip_disabled_when_env_empty(self):
+        os.environ[self.ENV] = ""
+        self.assertIsNotNone(_validate_fetch_url("https://fake.example/"))
+
+    def test_custom_cidr_honored(self):
+        os.environ[self.ENV] = "10.0.0.0/8"
+        self.assertIsNone(_validate_fetch_url("https://intranet.example/"))
+        # The custom list REPLACES the default: fake-IP is refused again.
+        self.assertIsNotNone(_validate_fetch_url("https://fake.example/"))
+
+    def test_loopback_and_metadata_stay_refused(self):
+        os.environ.pop(self.ENV, None)  # default 198.18/15 allowed
+        for url in ("http://127.0.0.1/", "http://169.254.169.254/",
+                    "http://10.0.0.5/", "http://[::1]/"):
+            self.assertIsNotNone(_validate_fetch_url(url), url)
+
+    def test_proxy_fallback_when_resolution_fails(self):
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
+        # Unresolvable locally, but the proxy resolves server-side.
+        self.assertIsNone(_validate_fetch_url("https://no-such-host.invalid/"))
+
+    def test_no_proxy_still_refuses_unresolvable(self):
+        self.assertIsNotNone(_validate_fetch_url("https://no-such-host.invalid/"))
+
+    def test_proxy_fallback_does_not_skip_literal_ip_checks(self):
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890"
+        self.assertIsNotNone(_validate_fetch_url("http://127.0.0.1/"))
+
+
+class SchemeRefusalTests(unittest.TestCase):
+    """Explicit non-http(s) schemes get a clear refusal; bare hosts still
+    get https:// prepended."""
+
+    def test_explicit_schemes_refused(self):
+        for url in ("gopher://example.com/", "ftp://example.com/x",
+                    "data:text/html,hi", "javascript:alert(1)"):
+            r = web_fetch(url)
+            self.assertFalse(r.ok, url)
+            self.assertIn("only http", r.output, url)
+
+    def test_bare_host_still_works(self):
+        # "example.com/x" and "example.com:8080/x" are bare hosts, not
+        # schemes — they reach DNS resolution rather than a scheme refusal.
+        orig = socket.getaddrinfo
+        socket.getaddrinfo = _fake_getaddrinfo
+        saved = {k: os.environ.pop(k, None) for k in
+                 ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                  "ALL_PROXY", "all_proxy")}
+        try:
+            r = web_fetch("no-such-host.invalid:8080/x")
+        finally:
+            socket.getaddrinfo = orig
+            os.environ.update({k: v for k, v in saved.items() if v is not None})
+        self.assertFalse(r.ok)
+        self.assertIn("Cannot resolve host", r.output)
 
 
 class WebFetchRefusalTests(unittest.TestCase):
