@@ -82,6 +82,7 @@ try {
           <div class="fld">
             <span>Theme</span>
             <div class="theme-group">
+              <div class="theme-group-label">System</div>
               <div class="theme-row">
                 <button type="button" class="theme-card" :class="{active: appearance.theme==='auto'}"
                         @click="setTheme('auto')" title="Follow the system appearance">
@@ -391,9 +392,10 @@ try {
                 <div class="stats"><span style="color:var(--fail)">connection lost.</span><button class="retry-btn" @click="retryResume(m.id)">retry</button></div>
               </template>
               <!-- per-message actions below the bubble, after generation
-                   completes: fork/map for assistant; copy for every message -->
+                   completes: fork/map for assistant; copy for every message.
+                   Quiet until hovered, except on the latest assistant reply -->
               <template x-if="!streams[m.id]">
-                <div class="fork-actions">
+                <div class="fork-actions" :class="{'last-reply': m.role === 'assistant' && m === messages[messages.length - 1]}">
                   <template x-if="m.role === 'assistant'">
                     <button class="fork-btn" @click="forkFromHere(m.id)" title="从此回复分叉追问">
                       <i data-lucide="git-branch"></i>追问
