@@ -1088,6 +1088,75 @@ class InjectImagesTests(unittest.TestCase):
             self.assertEqual(meta["attachments"][0]["mime"], "image/png")
 
 
+class RestoreImageMessageTests(unittest.TestCase):
+    """_restore_image_message must not replay non-image mimes from history."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    def _svc(self, d):
+        from service import ChatService
+        from store import TreeStore
+
+        return ChatService(TreeStore(os.path.join(d, "chat.jsonl")))
+
+    def _sidecar(self, svc):
+        os.makedirs(svc._images_dir(), exist_ok=True)
+        with open(os.path.join(svc._images_dir(), "cap.jpg"), "wb") as f:
+            f.write(self.PNG)
+
+    def test_non_image_mime_part_is_dropped(self):
+        from unittest.mock import patch
+
+        import service as service_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._svc(d)
+            self._sidecar(svc)
+            msg = {"role": "user", "content": [
+                {"type": "text", "text": "（以下是 1 张图片）"},
+                {"type": "image_file", "path": "cap.jpg",
+                 "mime": "text/plain; charset=utf-8"},
+            ]}
+            with patch.object(service_mod.main, "VISION_SUPPORTED", True):
+                out = svc._restore_image_message(msg)
+            urls = [p["image_url"]["url"] for p in out["content"]
+                    if p["type"] == "image_url"]
+            self.assertEqual(urls, [])
+            self.assertEqual(out["content"][0]["type"], "text")
+
+    def test_image_mime_with_params_is_normalized(self):
+        from unittest.mock import patch
+
+        import service as service_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._svc(d)
+            self._sidecar(svc)
+            msg = {"role": "user", "content": [
+                {"type": "image_file", "path": "cap.jpg",
+                 "mime": "Image/JPEG; charset=binary"},
+            ]}
+            with patch.object(service_mod.main, "VISION_SUPPORTED", True):
+                out = svc._restore_image_message(msg)
+            self.assertTrue(out["content"][0]["image_url"]["url"]
+                            .startswith("data:image/jpeg;base64,"))
+
+    def test_all_parts_bad_returns_none(self):
+        from unittest.mock import patch
+
+        import service as service_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            svc = self._svc(d)
+            self._sidecar(svc)
+            msg = {"role": "user", "content": [
+                {"type": "image_file", "path": "cap.jpg", "mime": "text/html"},
+            ]}
+            with patch.object(service_mod.main, "VISION_SUPPORTED", True):
+                self.assertIsNone(svc._restore_image_message(msg))
+
+
+
 class PersistedDataDirTests(unittest.TestCase):
     def test_data_dir_merge_and_load(self):
         with tempfile.TemporaryDirectory() as d:

@@ -1543,6 +1543,13 @@ class ChatService:
             if p.get("type") != "image_file":
                 parts.append(p)
                 continue
+            # Sanitize the persisted mime: it was stored verbatim from the
+            # source's Content-Type, which for a misconfigured host can be
+            # non-image (e.g. "text/plain; charset=utf-8"). Replaying such a
+            # part would 400 the whole request, so non-image parts are dropped.
+            mime = (p.get("mime") or "image/jpeg").split(";")[0].strip().lower()
+            if not mime.startswith("image/"):
+                continue
             try:
                 with open(os.path.join(img_dir, os.path.basename(p["path"])), "rb") as f:
                     raw = f.read()
@@ -1550,7 +1557,9 @@ class ChatService:
                 return None
             b64 = base64.b64encode(raw).decode()
             parts.append({"type": "image_url",
-                          "image_url": {"url": f"data:{p.get('mime', 'image/jpeg')};base64,{b64}"}})
+                          "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        if not parts:
+            return None  # nothing left to show the model
         return {**m, "content": parts}
 
     def _expand_path(self, path: list[Node]) -> list[Node]:
