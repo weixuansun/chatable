@@ -81,18 +81,29 @@ try {
 
           <div class="fld">
             <span>Theme</span>
-            <div class="theme-row">
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='auto'}" @click="setTheme('auto')"><span class="swatch sw-auto"></span>System</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='midnight'}" @click="setTheme('midnight')"><span class="swatch sw-midnight"></span>Midnight</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='graphite'}" @click="setTheme('graphite')"><span class="swatch sw-graphite"></span>Graphite</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='obsidian'}" @click="setTheme('obsidian')"><span class="swatch sw-obsidian"></span>Obsidian</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='ocean'}" @click="setTheme('ocean')"><span class="swatch sw-ocean"></span>Ocean</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='forest'}" @click="setTheme('forest')"><span class="swatch sw-forest"></span>Forest</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='rose'}" @click="setTheme('rose')"><span class="swatch sw-rose"></span>Rose</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='light'}" @click="setTheme('light')"><span class="swatch sw-light"></span>Light</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='paper'}" @click="setTheme('paper')"><span class="swatch sw-paper"></span>Paper</button>
-              <button type="button" class="theme-chip" :class="{active: appearance.theme==='arctic'}" @click="setTheme('arctic')"><span class="swatch sw-arctic"></span>Arctic</button>
+            <div class="theme-group">
+              <div class="theme-row">
+                <button type="button" class="theme-card" :class="{active: appearance.theme==='auto'}"
+                        @click="setTheme('auto')" title="Follow the system appearance">
+                  <span class="swatch sw-auto"><i class="d1"></i><i class="d2"></i><i class="d3"></i></span>
+                  <span class="tname">System</span>
+                </button>
+              </div>
             </div>
+            <template x-for="g in themeGroups" :key="g.id">
+              <div class="theme-group">
+                <div class="theme-group-label" x-text="g.label"></div>
+                <div class="theme-row">
+                  <template x-for="t in g.themes" :key="t.id">
+                    <button type="button" class="theme-card" :class="{active: appearance.theme===t.id}"
+                            @click="setTheme(t.id)">
+                      <span class="swatch" :class="'sw-' + t.id"><i class="d1"></i><i class="d2"></i><i class="d3"></i></span>
+                      <span class="tname" x-text="t.name"></span>
+                    </button>
+                  </template>
+                </div>
+              </div>
+            </template>
           </div>
           <div class="fld">
             <span>Chat font size</span>
@@ -1006,11 +1017,35 @@ function chatable() {
     // Appearance (theme + chat font size), persisted to localStorage.
     appearance: { theme: 'midnight', fontSize: 14 },
     FONT_SIZES: [12, 13, 14, 15, 16, 17, 18],
+    // Theme catalog for the settings picker ('auto' is rendered separately).
+    // ids are the html[data-theme] values; each needs a matching :root block
+    // and a .sw-<id> swatch in app.css.
+    THEMES: [
+      {id: 'midnight',       name: 'Midnight',        group: 'dark'},
+      {id: 'graphite',       name: 'Graphite',        group: 'dark'},
+      {id: 'obsidian',       name: 'Obsidian',        group: 'dark'},
+      {id: 'ocean',          name: 'Ocean',           group: 'dark'},
+      {id: 'forest',         name: 'Forest',          group: 'dark'},
+      {id: 'rose',           name: 'Rose',            group: 'dark'},
+      {id: 'dracula',        name: 'Dracula',         group: 'dark'},
+      {id: 'nord',           name: 'Nord',            group: 'dark'},
+      {id: 'solarized-dark', name: 'Solarized Dark',  group: 'dark'},
+      {id: 'tokyo-night',    name: 'Tokyo Night',     group: 'dark'},
+      {id: 'mocha',          name: 'Mocha',           group: 'dark'},
+      {id: 'light',          name: 'Light',           group: 'light'},
+      {id: 'paper',          name: 'Paper',           group: 'light'},
+      {id: 'arctic',         name: 'Arctic',          group: 'light'},
+      {id: 'solarized-light',name: 'Solarized Light', group: 'light'},
+      {id: 'sakura',         name: 'Sakura',          group: 'light'},
+      {id: 'mint',           name: 'Mint',            group: 'light'},
+      {id: 'latte',          name: 'Latte',           group: 'light'},
+    ],
 
     loadAppearance() {
       const t = localStorage.getItem('chatable.theme');
       const fs = parseInt(localStorage.getItem('chatable.fontSize') || '', 10);
-      if (t) this.appearance.theme = t;
+      // Ignore stale ids from older versions (falls back to the midnight default).
+      if (t && (t === 'auto' || this.THEMES.some(x => x.id === t))) this.appearance.theme = t;
       if (!isNaN(fs) && this.FONT_SIZES.includes(fs)) this.appearance.fontSize = fs;
       this.applyAppearance();
     },
@@ -1024,6 +1059,13 @@ function chatable() {
       localStorage.setItem('chatable.fontSize', String(this.appearance.fontSize));
     },
     setTheme(t) { this.appearance.theme = t; this.applyAppearance(); },
+    // Theme picker groups (System/auto is rendered above them).
+    get themeGroups() {
+      return [
+        {id: 'dark', label: 'Dark', themes: this.THEMES.filter(t => t.group === 'dark')},
+        {id: 'light', label: 'Light', themes: this.THEMES.filter(t => t.group === 'light')},
+      ];
+    },
     adjustFontSize(dir) {
       const steps = this.FONT_SIZES;
       let i = steps.indexOf(this.appearance.fontSize);
