@@ -1114,7 +1114,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .map-del-btn .lucide { width: 12px; height: 12px; }
 .map-detail-btn { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; height: 22px;
         background: transparent; border: 1px solid var(--border-2); color: var(--dim); border-radius: 6px;
-        padding: 0 8px; font-size: 11px; font-weight: 500; transition: all .12s; }
+        padding: 0 8px; font-size: 11px; font-weight: 500; transition: all .12s; white-space: nowrap; }
 .map-detail-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .map-detail-btn .lucide { width: 11px; height: 11px; }
 
@@ -1266,18 +1266,25 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .step-modal-out { margin: 0; border: 1px solid var(--border); border-radius: 8px; max-height: 320px; }
 
 /* ---- mind-map step cards --------------------------------------------------- */
-.map-node.map-step-node { background: var(--panel-2); border-style: dashed; }
-.map-step { display: flex; align-items: center; gap: 7px; padding: 8px 10px; min-height: 40px; }
-.map-step .lucide { width: 13px; height: 13px; color: var(--dim-2); flex: none; }
-.map-step-name { font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+.map-node.map-step-node { background: var(--panel-2); border-style: dashed; padding: 5px 8px 4px; }
+.map-step { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+.map-step .lucide { width: 12px; height: 12px; color: var(--dim-2); flex: none; }
+.map-step-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dim-2); }
+.map-step-dot.ok, .map-step-dot.approved { background: var(--ok); }
+.map-step-dot.error, .map-step-dot.denied { background: var(--fail); }
+.map-step-dot.running { background: var(--accent); }
+.map-step-dot.pending_approval { background: var(--branch); }
+.map-step-name { font-family: var(--font-mono); font-size: 11.5px; font-weight: 600;
                  color: var(--fg); flex: none; }
-.map-step-args { font-family: var(--font-mono); font-size: 11px; color: var(--dim-2);
+.map-step-args { font-family: var(--font-mono); font-size: 10.5px; color: var(--dim-2);
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-.map-step .step-badge { margin-left: 0; }
-.map-step.st-pending_approval { border-left: 3px solid var(--branch); }
-.map-step.st-ok, .map-step.st-approved { border-left: 3px solid var(--ok); }
-.map-step.st-error, .map-step.st-denied { border-left: 3px solid var(--fail); }
-.map-step.st-running { border-left: 3px solid var(--accent); }
+.map-step-actions { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
+.map-step.st-pending_approval { border-left: 3px solid var(--branch); padding-left: 3px; }
+.map-step.st-error, .map-step.st-denied { border-left: 3px solid var(--fail); padding-left: 3px; }
 
-/* sidebar tree: agent step rows get their own dot color */
+/* sidebar tree: agent step rows get their own dot color; the "N steps" hint
+   replaces the hidden chain on the reply row */
 .role-step .role-dot, .role-dot.role-step { background: var(--accent-2); }
+.step-hint { font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 999px;
+             color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent);
+             white-space: nowrap; }

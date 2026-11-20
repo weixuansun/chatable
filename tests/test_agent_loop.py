@@ -118,6 +118,39 @@ def test_step_nodes_visible_in_tree_and_path(svc):
     assert detail["metadata"]["tool"] == "write_file"
 
 
+def test_path_messages_expands_steps_below_the_assistant_node(svc):
+    """Reopening a conversation at the assistant reply must show its steps."""
+    info, _events, _calls = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        tool_call("read_file", path="a.txt"),
+        ANSWER,
+    ])
+    steps = step_nodes(svc)
+    msgs = svc.path_messages(info["assistant_id"])
+    assert [m["role"] for m in msgs] == ["user", "assistant", "step", "step"]
+    assert [m["id"] for m in msgs[2:]] == [s.id for s in steps]
+    # The step payload mirrors the live view (status, diff, duration, commit).
+    md = msgs[2]["step"]
+    assert md["tool"] == "write_file" and md["status"] == "ok"
+    assert md["diff"] and md["ws_commit"]
+    assert "duration_ms" in md
+    # Selecting a step itself: steps come from the path, with no duplicates.
+    msgs2 = svc.path_messages(steps[1].id)
+    assert [m["role"] for m in msgs2] == ["user", "assistant", "step", "step"]
+    assert [m["id"] for m in msgs2] == [msgs[0]["id"], msgs[1]["id"],
+                                        steps[0].id, steps[1].id]
+
+
+def test_first_agent_send_marks_the_conversation(svc):
+    """agent:true on a brand-new trunk persists agent_mode on its metadata."""
+    info, _events, _calls = run_turn(svc, [ANSWER])
+    trunk = svc.store.get(info["user_id"])
+    assert trunk.parent_id == ROOT_ID
+    assert trunk.metadata["agent_mode"] is True
+    # A later plain send in this conversation still runs as agent.
+    assert svc._conversation_agent_mode(info["assistant_id"]) is True
+
+
 def test_context_excludes_step_nodes_but_stays_valid(svc):
     """Forking from a step: the next request must be a valid OpenAI sequence —
     no role=step messages, and assistant tool_calls answered by tool messages."""

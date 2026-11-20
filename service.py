@@ -880,11 +880,37 @@ class ChatService:
 
         Assistant nodes expose their folded-in ``tool_results`` so the UI can
         render tool calls inline instead of as separate, navigable nodes.
+        Agent turns: each assistant node on the path is followed by its step
+        chain (the turn's trajectory) unless the path already continues into
+        it — so reopening a conversation shows the same steps as the live
+        view, even when the selected node IS the assistant reply.
         """
         if nid == ROOT_ID:
             return []
+        path = self.store.path_to_root(nid)
+        path_ids = {n.id for n in path}
+        cmap = self.store.children_map()
+        nodes: list[Node] = []
+        for i, n in enumerate(path):
+            nodes.append(n)
+            if n.role != "assistant":
+                continue
+            nxt = path[i + 1] if i + 1 < len(path) else None
+            if nxt is not None and nxt.role == "step":
+                continue  # the trajectory is already on the path
+            cur = n
+            while True:
+                step_kids = [cid for cid in cmap.get(cur.id, [])
+                             if self.store.get(cid).role == "step"]
+                if not step_kids:
+                    break
+                # children_map is newest-first; prefer the branch toward nid.
+                chosen = next((cid for cid in step_kids if cid in path_ids),
+                              step_kids[0])
+                cur = self.store.get(chosen)
+                nodes.append(cur)
         out = []
-        for n in self.store.path_to_root(nid):
+        for n in nodes:
             meta = n.metadata if isinstance(n.metadata, dict) else {}
             tool_results = [
                 {k: r.get(k) for k in ("name", "arguments", "ok", "error", "duration_ms", "output")}
@@ -908,7 +934,8 @@ class ChatService:
                 "ws_commit": meta.get("ws_commit"),
                 "step": (
                     {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
-                                              "result", "error", "diff", "ws_commit")}
+                                              "result", "error", "diff", "ws_commit",
+                                              "duration_ms")}
                     if n.role == "step" else None
                 ),
             })
@@ -1947,6 +1974,10 @@ class ChatService:
             user_node = Node.new(role="user", content=content, parent_id=parent.id)
             if agent_mode:
                 user_node.metadata = {**(user_node.metadata or {}), "agent": True}
+                # A brand-new conversation started in agent mode stays in agent
+                # mode: the toggle persists on the trunk from the first send.
+                if parent.id == ROOT_ID:
+                    user_node.metadata["agent_mode"] = True
             if attachments:
                 # Attachment descriptors come from the client, so their paths
                 # are untrusted: only files the server itself accepted (the
@@ -1959,7 +1990,7 @@ class ChatService:
                         continue
                     kept.append(desc)
                 if kept:
-                    user_node.metadata = {"attachments": kept}
+                    user_node.metadata = {**(user_node.metadata or {}), "attachments": kept}
             self.store.add(user_node)
 
             # Assistant node created up front so the UI has a stable, clickable id.
@@ -2111,7 +2142,8 @@ class ChatService:
         result = registry.run(name, args)
 
         status = "ok" if result.ok else "error"
-        update: dict = {"status": status, "result": result.output[:4000]}
+        update: dict = {"status": status, "result": result.output[:4000],
+                        "duration_ms": result.duration_ms}
         if result.error:
             update["error"] = result.error
         diff = (result.metadata or {}).get("diff")

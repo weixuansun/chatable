@@ -238,6 +238,7 @@ try {
                   <i data-lucide="file-text"></i></button>
               </template>
               <template x-if="n.kidCount > 1"><span class="branch-badge" x-text="n.kidCount + ' 分支'"></span></template>
+              <template x-if="n.stepKids"><span class="step-hint" :title="n.stepKids + ' agent step(s) — expand the reply to see the trajectory'" x-text="'⚙ ' + n.stepKids"></span></template>
               <span class="nid" x-text="'#' + n.id.slice(0,6)"></span>
               <template x-if="n.collapsed"><span class="collapsed-badge" x-text="'⋯'"></span></template>
               <template x-if="n.pinned"><span class="pin"><i data-lucide="pin"></i></span></template>
@@ -353,9 +354,29 @@ try {
                   </details>
                 </template>
               </template>
+              <!-- planning: non-streaming tool-decision in progress -->
+              <template x-if="streams[m.id] && streams[m.id].planning">
+                <div class="planning"><span class="spin"></span>
+                  <span>planning next move…</span></div>
+              </template>
+              <!-- reasoning: live while this row is streaming; auto-collapses
+                   once the answer text starts flowing -->
+              <template x-if="streams[m.id] && streams[m.id].reasoning">
+                <details class="reasoning" :open="!streams[m.id].text">
+                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
+                  <div x-text="streams[m.id].reasoning"></div>
+                </details>
+              </template>
+              <!-- persisted reasoning after the turn settles (collapsed, like tool cards) -->
+              <template x-if="!streams[m.id] && m.reasoning">
+                <details class="reasoning">
+                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
+                  <div x-text="m.reasoning"></div>
+                </details>
+              </template>
               <!-- agent step timeline: one card per tool call, live while this
                    row streams (stream steps), else rebuilt from persisted
-                   step nodes (m.steps) -->
+                   step nodes (m.steps). Below reasoning: it happened first. -->
               <template x-if="agentStepsFor(m).length">
                 <div class="step-timeline">
                   <template x-for="s in agentStepsFor(m)" :key="s.id">
@@ -420,26 +441,6 @@ try {
                     </div>
                   </template>
                 </div>
-              </template>
-              <!-- planning: non-streaming tool-decision in progress -->
-              <template x-if="streams[m.id] && streams[m.id].planning">
-                <div class="planning"><span class="spin"></span>
-                  <span>planning next move…</span></div>
-              </template>
-              <!-- reasoning: live while this row is streaming; auto-collapses
-                   once the answer text starts flowing -->
-              <template x-if="streams[m.id] && streams[m.id].reasoning">
-                <details class="reasoning" :open="!streams[m.id].text">
-                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
-                  <div x-text="streams[m.id].reasoning"></div>
-                </details>
-              </template>
-              <!-- persisted reasoning after the turn settles (collapsed, like tool cards) -->
-              <template x-if="!streams[m.id] && m.reasoning">
-                <details class="reasoning">
-                  <summary><i data-lucide="sparkles"></i> reasoning</summary>
-                  <div x-text="m.reasoning"></div>
-                </details>
               </template>
               <!-- body: live text (with … placeholder) while streaming, else persisted -->
               <div class="bubble-wrap">
@@ -878,15 +879,15 @@ try {
           </svg>
           <template x-for="mn in mindmap.nodes" :key="mn.id">
             <div class="map-node" :class="{center: mn.isCenter, 'map-step-node': mn.isStep, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
-                 :style="`left:${mn.x}px; top:${mn.y}px;`"
+                 :style="`left:${mn.x}px; top:${mn.y}px; width:${mn.w}px; height:${mn.h}px;`"
                  :title="mn.q || mn.a"
                  @click.stop="mapNodeClick(mn)">
-              <!-- agent step card: tool icon + name + short args + status -->
+              <!-- agent step card: status dot + tool icon + name + short args -->
               <div class="map-step" x-show="mn.isStep" :class="'st-' + (mn.stepStatus || 'ok')">
+                <span class="map-step-dot" :class="mn.stepStatus" :title="stepStatusLabel(mn.stepStatus)"></span>
                 <i :data-lucide="stepIcon(mn.tool)"></i>
                 <span class="map-step-name" x-text="mn.tool"></span>
-                <span class="map-step-args" x-text="mn.q"></span>
-                <span class="step-badge" :class="mn.stepStatus" x-text="stepStatusLabel(mn.stepStatus)"></span>
+                <span class="map-step-args" x-text="stepArgsShort(mn)"></span>
               </div>
               <div class="map-q" x-show="mn.isPair">
                 <span class="role-dot role-user" :class="{'streaming': !!(streams[mn.id] || (mn.replyId && streams[mn.replyId]))}"></span>
@@ -909,16 +910,26 @@ try {
                   <i data-lucide="trash-2"></i>
                 </button>
                 <template x-if="mn.kidCount > 1"><span class="branch-badge" x-text="mn.kidCount + ' 分支'"></span></template>
-                <button class="map-detail-btn" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
+                <button class="map-detail-btn" x-show="!mn.isStep" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
                   <i data-lucide="message-square"></i>查看细节
                 </button>
+                <!-- step cards: icon-only actions so the compact card stays tidy -->
                 <template x-if="mn.isStep">
-                  <button class="map-detail-btn" @click.stop="mapForkFrom(mn.id)"
-                          title="从这里分叉（agent 模式发送前会先恢复工作区快照）">
-                    <i data-lucide="git-branch"></i>分叉
-                  </button>
+                  <span class="map-step-actions">
+                    <button class="map-del-btn" @click.stop="mapShowDetail(mn.id)" title="查看细节">
+                      <i data-lucide="message-square"></i>
+                    </button>
+                    <button class="map-del-btn" @click.stop="mapForkFrom(mn.id)"
+                            title="从这里分叉（agent 模式发送前会先恢复工作区快照）">
+                      <i data-lucide="git-branch"></i>
+                    </button>
+                    <button class="map-del-btn" x-show="mn.wsCommit" @click.stop="restoreWorkspace(mn.id)"
+                            title="恢复工作区到此快照">
+                      <i data-lucide="history"></i>
+                    </button>
+                  </span>
                 </template>
-                <template x-if="mn.wsCommit">
+                <template x-if="!mn.isStep && mn.wsCommit">
                   <button class="map-detail-btn" @click.stop="restoreWorkspace(mn.replyId || mn.id)"
                           title="恢复工作区到此快照">
                     <i data-lucide="history"></i>恢复
@@ -1949,11 +1960,32 @@ function chatable() {
       // ancestors: array of booleans, one per ancestor level — true if that
       // ancestor still has a following sibling (draw a vertical line through it).
       // Descendants of a collapsed node are skipped entirely (unless searching).
+      // Agent step nodes stay out of the sidebar (a long trajectory would
+      // bury the conversations). Their non-step descendants — e.g. a user
+      // fork from a step — are lifted to the nearest visible ancestor, and
+      // the reply row shows an "N steps" hint instead.
+      const lift = (kids) => {
+        const out = [];
+        const visit = (c) => {
+          if (c.role === 'step') (c.children || []).forEach(visit);
+          else out.push(c);
+        };
+        (kids || []).forEach(visit);
+        return out;
+      };
+      const stepDescendants = (n) => {
+        let count = 0;
+        const visit = (c) => {
+          if (c.role === 'step') { count++; (c.children || []).forEach(visit); }
+        };
+        (n.children || []).forEach(visit);
+        return count;
+      };
       const walk = (node, ancestors) => {
-        const kids = node.children || [];
+        const kids = lift(node.children || []);
         kids.forEach((c, i) => {
           const isLast = i === kids.length - 1;
-          const kidCount = (c.children && c.children.length) || 0;
+          const kidCount = lift(c.children || []).length;
           const hasKids = kidCount > 0;
           const collapsed = this.collapsed.has(c.id);
           // Show the one-sentence summary as a second line when present.
@@ -1961,6 +1993,7 @@ function chatable() {
           this.flatTree.push({
             ...c, depth: ancestors.length, ancestors: [...ancestors], isLast,
             hasKids, kidCount, collapsed, reply_preview,
+            stepKids: stepDescendants(c),
           });
           if (hasKids && (searching || !collapsed)) walk(c, [...ancestors, !isLast]);
         });
@@ -2258,6 +2291,14 @@ function chatable() {
     stepIcon(tool) { return stepIcon(tool); },
     stepStatusLabel(status) { return stepStatusLabel(status); },
     renderDiff(diff) { return renderUnifiedDiff(diff); },
+
+    // Map cards show the args without the redundant leading tool name
+    // ("write_file hello.py" → "hello.py"); shell commands stay as-is.
+    stepArgsShort(mn) {
+      const q = mn.q || '';
+      const prefix = (mn.tool || '') + ' ';
+      return mn.tool && q.startsWith(prefix) ? q.slice(prefix.length) : q;
+    },
 
     async approveStep(s, decision, always = false) {
       if (s.deciding) return;
@@ -2844,24 +2885,31 @@ function chatable() {
       if (!trunk) return null;
       const pairRoot = this.buildPairTree(trunk);
       const NW = this.MAP_NW, NH = this.MAP_NH, GX = this.MAP_GX, GY = this.MAP_GY;
+      // Agent step cards are compact: half height, a bit narrower, and a
+      // tighter vertical gap so a long trajectory reads as one chain.
+      const STEP_W = 176, STEP_H = 54, STEP_GY = 40;
+      const dims = (n) => n.isStep ? {w: STEP_W, h: STEP_H, gy: STEP_GY}
+                                   : {w: NW, h: NH, gy: GY};
       const nodes = [], edgePairs = [];
       let cursor = 0;
-      const placeSubtree = (node, depth, emit) => {
+      const placeSubtree = (node, y, emit) => {
         const kids = node.children || [];
-        const childPos = kids.map(k => placeSubtree(k, depth + 1, true));
+        const d = dims(node);
+        const childY = y + d.h + d.gy;
+        const childPos = kids.map(k => placeSubtree(k, childY, true));
         let x;
         if (childPos.length) {
           x = (childPos[0].x + childPos[childPos.length - 1].x) / 2;
         } else {
-          x = cursor; cursor += NW + GX;
+          x = cursor; cursor += d.w + GX;
         }
         if (!emit) return { x };
         const pos = { id: node.id, replyId: node.replyId, isPair: node.isPair,
                       isStep: !!node.isStep, tool: node.tool || '',
                       stepStatus: node.stepStatus || '', wsCommit: node.wsCommit || null,
                       q: node.q, a: node.a, kidCount: kids.length,
-                      x, y: depth * (NH + GY),
-                      isTrunk: depth === 0,
+                      x, y, w: d.w, h: d.h,
+                      isTrunk: y === 0,
                       isCenter: node.id === rootId || node.replyId === rootId };
         nodes.push(pos);
         childPos.forEach(cp => edgePairs.push([pos, cp]));
@@ -2875,8 +2923,8 @@ function chatable() {
       const minX = Math.min(...nodes.map(n => n.x)) - PAD;
       const minY = Math.min(...nodes.map(n => n.y)) - PAD;
       nodes.forEach(n => { n.x -= minX; n.y -= minY; });
-      const w = Math.max(...nodes.map(n => n.x + NW)) + PAD;
-      const h = Math.max(...nodes.map(n => n.y + NH)) + PAD;
+      const w = Math.max(...nodes.map(n => n.x + n.w)) + PAD;
+      const h = Math.max(...nodes.map(n => n.y + n.h)) + PAD;
       // Edges are merged into a single path string so the SVG needs no
       // per-edge template loop.
       const edgesD = edgePairs.map(([a, b]) => this._mapEdgeD(a, b)).join(' ');
@@ -2935,10 +2983,10 @@ function chatable() {
     },
 
     // Vertical S-curve between two laid-out cards (works in both directions).
+    // Per-card width/height: compact step cards connect at their own edges.
     _mapEdgeD(a, b) {
-      const NW = this.MAP_NW, NH = this.MAP_NH;
-      const x1 = a.x + NW / 2, y1 = a.y + (a.y <= b.y ? NH : 0);
-      const x2 = b.x + NW / 2, y2 = b.y + (a.y <= b.y ? 0 : NH);
+      const x1 = a.x + a.w / 2, y1 = a.y + (a.y <= b.y ? a.h : 0);
+      const x2 = b.x + b.w / 2, y2 = b.y + (a.y <= b.y ? 0 : b.h);
       const my = (y1 + y2) / 2;
       return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
     },
@@ -2952,8 +3000,8 @@ function chatable() {
       if (!n || !cv) return;
       this.mapAnim = animate;
       const s = this.mapView.scale;
-      this.mapView.tx = cv.clientWidth / 2 - (n.x + this.MAP_NW / 2) * s;
-      this.mapView.ty = cv.clientHeight / 2 - (n.y + this.MAP_NH / 2) * s;
+      this.mapView.tx = cv.clientWidth / 2 - (n.x + (n.w || this.MAP_NW) / 2) * s;
+      this.mapView.ty = cv.clientHeight / 2 - (n.y + (n.h || this.MAP_NH) / 2) * s;
       if (animate) setTimeout(() => { this.mapAnim = false; }, 350);
     },
 
