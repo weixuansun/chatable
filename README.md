@@ -91,16 +91,22 @@ storage folder.
 ### Exposing the server (optional)
 
 By default the server only accepts requests whose `Host` header is localhost,
-`127.0.0.1` or `[::1]` (plus the bind host), and rejects cross-origin
-writes — so other devices and web pages you visit cannot reach your chats.
-If you deliberately serve beyond localhost:
+`127.0.0.1` or `[::1]` (plus the bind host from `--host` /
+`CHATTABLE_WEB_HOST`), and rejects cross-origin writes — so other devices and
+web pages you visit cannot reach your chats. If you deliberately serve beyond
+localhost:
 
-- `CHATABLE_ALLOWED_HOSTS` — comma-separated extra hostnames to accept
-  (e.g. `CHATABLE_ALLOWED_HOSTS=chat.lan,myhost`).
-- `CHATABLE_AUTH_TOKEN` — require this token for every request. Open
+- `CHATTABLE_ALLOWED_HOSTS` — comma-separated extra hostnames to accept
+  (e.g. `CHATTABLE_ALLOWED_HOSTS=chat.lan,myhost`). **Required** when binding
+  to `0.0.0.0` / `::` or a LAN address: requests arriving with this machine's
+  LAN IP or hostname are otherwise rejected with 400.
+- `CHATTABLE_AUTH_TOKEN` — require this token for every request. Open
   `http://<host>:<port>/?token=<token>` once to set the login cookie;
   scripts can use `Authorization: Bearer <token>`.
   Binding to a non-loopback address without a token prints a loud warning.
+
+(The single-T spellings `CHATABLE_ALLOWED_HOSTS` / `CHATABLE_AUTH_TOKEN` are
+accepted as aliases.)
 
 ### Web search (optional)
 

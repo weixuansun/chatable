@@ -11,17 +11,19 @@ Run:
 Honours the same env vars as the CLI (CHATTABLE_DB, DEEPSEEK_API_KEY, …).
 Set CHATTABLE_WEB_HOST / CHATTABLE_WEB_PORT to change the bind address.
 
-Security (see _SecurityMiddleware):
-  CHATABLE_ALLOWED_HOSTS — comma-separated extra Host header values to accept
+Security (see SecurityMiddleware):
+  CHATTABLE_ALLOWED_HOSTS — comma-separated extra Host header values to accept
       (localhost, 127.0.0.1, ::1 and the bind host are always allowed).
       Anything else gets a 400 — this blocks DNS-rebinding access.
-  CHATABLE_AUTH_TOKEN — when set, every request must authenticate with
+  CHATTABLE_AUTH_TOKEN — when set, every request must authenticate with
       "Authorization: Bearer <token>" or a cookie obtained by opening
       "/?token=<token>" once (the browser UI, SSE and uploads then just work).
   Cross-origin writes (and sensitive reads like /api/fs/list, /api/files/*)
   are rejected with 403 based on the Origin/Referer host. Requests with no
   Origin/Referer at all (curl, scripts) are only accepted from a loopback
   client when no token is configured; with a token, the token is the check.
+  (The single-T spellings CHATABLE_ALLOWED_HOSTS / CHATABLE_AUTH_TOKEN are
+  accepted as aliases.)
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ import hmac
 import ipaddress
 import json
 import os
+from http.cookies import SimpleCookie
 from typing import Optional
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
@@ -79,12 +82,27 @@ def _normalize_host(value: str) -> str:
     return v
 
 
+def _env(primary: str, alias: str = "") -> str:
+    """First non-empty of the CHATTABLE_* name and its single-T alias."""
+    value = os.environ.get(primary, "").strip()
+    if not value and alias:
+        value = os.environ.get(alias, "").strip()
+    return value
+
+
+# The actual bind host, set by main() from --host (whose default is
+# CHATTABLE_WEB_HOST). The middleware allowlists it so the server never
+# rejects its own Host header; the import-time env value covers the
+# `uvicorn server:app` path where main() never runs.
+_BIND_HOST = _env("CHATTABLE_WEB_HOST") or "127.0.0.1"
+
+
 def _allowed_hosts() -> frozenset[str]:
     hosts = {"localhost", "127.0.0.1", "::1"}
-    bind = _normalize_host(os.environ.get("CHATTABLE_WEB_HOST", "127.0.0.1"))
+    bind = _normalize_host(_BIND_HOST)
     if bind:
         hosts.add(bind)
-    for entry in os.environ.get("CHATABLE_ALLOWED_HOSTS", "").split(","):
+    for entry in _env("CHATTABLE_ALLOWED_HOSTS", "CHATABLE_ALLOWED_HOSTS").split(","):
         entry = _normalize_host(entry)
         if entry:
             hosts.add(entry)
@@ -92,7 +110,7 @@ def _allowed_hosts() -> frozenset[str]:
 
 
 def _auth_token() -> str:
-    return os.environ.get("CHATABLE_AUTH_TOKEN", "").strip()
+    return _env("CHATTABLE_AUTH_TOKEN", "CHATABLE_AUTH_TOKEN")
 
 
 def _is_loopback_client(scope: dict) -> bool:
@@ -176,15 +194,18 @@ class SecurityMiddleware:
             if auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].strip(), token):
                 authed = True
             else:
-                cookies = dict(
-                    c.split("=", 1) for c in headers.get("cookie", "").split("; ") if "=" in c
-                )
-                if hmac.compare_digest(
-                        unquote(cookies.get(_TOKEN_COOKIE, "")), token):
+                jar: SimpleCookie = SimpleCookie()
+                try:
+                    jar.load(headers.get("cookie", ""))
+                except Exception:  # noqa: BLE001 - a malformed cookie header = no cookie
+                    jar = SimpleCookie()
+                morsel = jar.get(_TOKEN_COOKIE)
+                if morsel is not None and hmac.compare_digest(
+                        unquote(morsel.value), token):
                     authed = True
             if not authed:
                 await _reject(send, 401, "authentication required "
-                                         "(CHATABLE_AUTH_TOKEN is set)")
+                                         "(CHATTABLE_AUTH_TOKEN is set)")
                 return
 
         # 3. Origin/Referer CSRF check.
@@ -675,19 +696,43 @@ def main() -> None:
         global service
         service = ChatService(TreeStore(db_path=resolve_db_path(args.data_dir)))
 
+    # The Host allowlist must know the ACTUAL bind host (CLI --host wins over
+    # the CHATTABLE_WEB_HOST env fallback captured at import time).
+    global _BIND_HOST
+    _BIND_HOST = args.host
+
+    bind = _normalize_host(args.host)
     try:
-        loopback = ipaddress.ip_address(_normalize_host(args.host)).is_loopback
+        bind_ip = ipaddress.ip_address(bind)
+        loopback = bind_ip.is_loopback
+        wildcard = bind_ip.is_unspecified
     except ValueError:
-        loopback = _normalize_host(args.host) == "localhost"
-    if not loopback and not _auth_token():
+        loopback = bind == "localhost"
+        wildcard = False
+    if not loopback:
         print("=" * 72)
-        print(f"WARNING: binding to a non-loopback address ({args.host}) without "
-              "CHATABLE_AUTH_TOKEN set.")
-        print("  Anyone who can reach this port has FULL access to your chat "
-              "history, bookmarks,")
-        print("  uploaded files and filesystem picker (/api/fs/list). Set "
-              "CHATABLE_AUTH_TOKEN")
-        print("  or bind to 127.0.0.1 unless you know exactly what you are doing.")
+        if wildcard:
+            print(f"WARNING: binding to the wildcard address {args.host}.")
+            print("  The Host allowlist only accepts localhost/127.0.0.1/[::1] "
+                  "by default, so requests")
+            print("  arriving with a LAN IP or hostname will be REJECTED (400) "
+                  "until you allow them:")
+            print("    CHATTABLE_ALLOWED_HOSTS=<this-machine-hostname-or-ip>  "
+                  "# comma-separated")
+        else:
+            print(f"WARNING: binding to a non-loopback address ({args.host}).")
+            print(f"  Only Host: {bind} (+ localhost names) is accepted; other "
+                  "names for this machine")
+            print("  need CHATTABLE_ALLOWED_HOSTS=<name1>,<name2>.")
+        if not _auth_token():
+            print("  CHATTABLE_AUTH_TOKEN is NOT set: anyone who can reach this "
+                  "port has FULL access")
+            print("  to your chat history, bookmarks, uploaded files and the "
+                  "filesystem picker.")
+            print("  Set CHATTABLE_AUTH_TOKEN (open "
+                  f"http://<host>:{args.port}/?token=<token> once) unless you "
+                  "know exactly")
+            print("  what you are doing.")
         print("=" * 72)
 
     print(f"chatable web → http://{args.host}:{args.port}")

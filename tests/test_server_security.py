@@ -9,10 +9,14 @@ import unittest
 
 _tmp = tempfile.mkdtemp()
 _saved_env = {k: os.environ.get(k)
-              for k in ("CHATTABLE_DATA_DIR", "CHATTABLE_VISION", "CHATABLE_AUTH_TOKEN")}
+              for k in ("CHATTABLE_DATA_DIR", "CHATTABLE_VISION",
+                        "CHATTABLE_AUTH_TOKEN", "CHATABLE_AUTH_TOKEN",
+                        "CHATTABLE_ALLOWED_HOSTS", "CHATABLE_ALLOWED_HOSTS")}
 os.environ["CHATTABLE_DATA_DIR"] = _tmp
 os.environ["CHATTABLE_VISION"] = "0"  # kill switch: never probe the backend
-os.environ.pop("CHATABLE_AUTH_TOKEN", None)
+for _k in ("CHATTABLE_AUTH_TOKEN", "CHATABLE_AUTH_TOKEN",
+           "CHATTABLE_ALLOWED_HOSTS", "CHATABLE_ALLOWED_HOSTS"):
+    os.environ.pop(_k, None)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -54,8 +58,8 @@ class HostAllowlistTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200, host)
 
     def test_extra_allowed_hosts_env(self):
-        old = os.environ.get("CHATABLE_ALLOWED_HOSTS")
-        os.environ["CHATABLE_ALLOWED_HOSTS"] = "chat.local, example.com:9000"
+        old = os.environ.get("CHATTABLE_ALLOWED_HOSTS")
+        os.environ["CHATTABLE_ALLOWED_HOSTS"] = "chat.local, example.com:9000"
         try:
             for host in ("chat.local", "chat.local:8000", "example.com:9000"):
                 r = _client().get("/api/config", headers={"host": host})
@@ -64,9 +68,34 @@ class HostAllowlistTests(unittest.TestCase):
             self.assertEqual(r.status_code, 400)
         finally:
             if old is None:
+                os.environ.pop("CHATTABLE_ALLOWED_HOSTS", None)
+            else:
+                os.environ["CHATTABLE_ALLOWED_HOSTS"] = old
+
+    def test_single_t_alias_allowed_hosts(self):
+        old = os.environ.get("CHATABLE_ALLOWED_HOSTS")
+        os.environ["CHATABLE_ALLOWED_HOSTS"] = "legacy.host"
+        try:
+            r = _client().get("/api/config", headers={"host": "legacy.host"})
+            self.assertEqual(r.status_code, 200)
+        finally:
+            if old is None:
                 os.environ.pop("CHATABLE_ALLOWED_HOSTS", None)
             else:
                 os.environ["CHATABLE_ALLOWED_HOSTS"] = old
+
+    def test_bind_host_variable_allowed(self):
+        # main() records --host in server._BIND_HOST so the server never
+        # rejects its own Host header.
+        old = server._BIND_HOST
+        server._BIND_HOST = "192.168.1.5"
+        try:
+            r = _client().get("/api/config", headers={"host": "192.168.1.5"})
+            self.assertEqual(r.status_code, 200)
+            r = _client().get("/api/config", headers={"host": "192.168.1.6"})
+            self.assertEqual(r.status_code, 400)
+        finally:
+            server._BIND_HOST = old
 
 
 class OriginCheckTests(unittest.TestCase):
@@ -122,14 +151,17 @@ class AuthTokenTests(unittest.TestCase):
     TOKEN = "s3cret-token"
 
     def setUp(self):
-        self._old = os.environ.get("CHATABLE_AUTH_TOKEN")
-        os.environ["CHATABLE_AUTH_TOKEN"] = self.TOKEN
+        self._old = {k: os.environ.get(k)
+                     for k in ("CHATTABLE_AUTH_TOKEN", "CHATABLE_AUTH_TOKEN")}
+        os.environ["CHATTABLE_AUTH_TOKEN"] = self.TOKEN
+        os.environ.pop("CHATABLE_AUTH_TOKEN", None)
 
     def tearDown(self):
-        if self._old is None:
-            os.environ.pop("CHATABLE_AUTH_TOKEN", None)
-        else:
-            os.environ["CHATABLE_AUTH_TOKEN"] = self._old
+        for k, v in self._old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def test_token_required(self):
         r = _client().get("/api/config")
@@ -159,6 +191,22 @@ class AuthTokenTests(unittest.TestCase):
     def test_bad_login_token_rejected(self):
         r = _client().get("/?token=nope", follow_redirects=False)
         self.assertEqual(r.status_code, 403)
+
+    def test_single_t_alias_token(self):
+        os.environ.pop("CHATTABLE_AUTH_TOKEN", None)
+        os.environ["CHATABLE_AUTH_TOKEN"] = self.TOKEN
+        r = _client().get(
+            "/api/config",
+            headers={"authorization": f"Bearer {self.TOKEN}"},
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_cookie_parsing_robust(self):
+        # Odd spacing / extra cookies / a malformed segment must not break
+        # token lookup.
+        cookie = f"foo=bar; chatable_token={self.TOKEN};  ;baz=qux"
+        r = _client().get("/api/config", headers={"cookie": cookie})
+        self.assertEqual(r.status_code, 200)
 
     def test_token_allows_headerless_post(self):
         # curl with a Bearer token needs no Origin header.
