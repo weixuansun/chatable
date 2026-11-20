@@ -43,6 +43,7 @@ from tools import TOOL_REGISTRY, ToolResult
 
 from bookmark_service import BookmarkService
 from bookmark_store import resolve_bookmarks_path
+from web_tools import local_path_allowed, register_local_read_root
 
 
 # Mirror the CLI configuration so behaviour matches across front-ends.
@@ -503,6 +504,7 @@ class ChatService:
             )
             bookmark_service = BookmarkService(store=BookmarkStore(db_path=bm_path))
         self.bookmark_service = bookmark_service
+        self._register_local_read_roots()
         # Memoized base64 data URLs for image attachments, keyed by file path.
         # Written by concurrent background turn threads — guard with a lock.
         self._img_data_urls: dict[str, str] = {}
@@ -524,6 +526,14 @@ class ChatService:
     # ------------------------------------------------------------------ #
     # Uploads (browser drag-and-drop → server-side file the tools can read)
     # ------------------------------------------------------------------ #
+
+    def _register_local_read_roots(self) -> None:
+        """Let web_fetch / attachment injection read local files from THIS
+        store's uploads/images dirs. Re-run on every rebind so the allowlist
+        follows the ACTIVE data dir (the default-dir fallback in web_tools
+        would otherwise point at ~/.chatable)."""
+        register_local_read_root(self.uploads_dir())
+        register_local_read_root(self._images_dir())
 
     def uploads_dir(self) -> str:
         """Directory holding uploaded files, alongside the SQLite store."""
@@ -789,6 +799,8 @@ class ChatService:
                     fetcher=self.bookmark_service.fetcher,
                     summarizer=self.bookmark_service.summarizer,
                 )
+                # The local-read allowlist must follow the ACTIVE data dir.
+                self._register_local_read_roots()
         return {"ok": True, "db_path": self.store.db_path}
 
     def generate_title(self, node_id: str, force: bool = False) -> dict:
@@ -1624,7 +1636,12 @@ class ChatService:
             return
 
     def _image_data_url(self, path: str, mime: str) -> str:
-        """base64 data URL for an uploaded image, memoized per path."""
+        """base64 data URL for an uploaded image, memoized per path.
+
+        Defence in depth: the path must be inside the uploads/images
+        allowlist — attachment descriptors are client-supplied."""
+        if not local_path_allowed(path):
+            return ""
         with self._img_data_urls_lock:
             if path in self._img_data_urls:
                 return self._img_data_urls[path]
@@ -1665,12 +1682,18 @@ class ChatService:
 
             user_node = Node.new(role="user", content=content, parent_id=parent.id)
             if attachments:
-                user_node.metadata = {
-                    "attachments": [
-                        {k: a[k] for k in ("filename", "path", "mime") if a.get(k)}
-                        for a in attachments
-                    ]
-                }
+                # Attachment descriptors come from the client, so their paths
+                # are untrusted: only files the server itself accepted (the
+                # uploads/images allowlist) may ever be opened. Anything else
+                # (e.g. /etc/passwd) is silently dropped.
+                kept = []
+                for a in attachments:
+                    desc = {k: a[k] for k in ("filename", "path", "mime") if a.get(k)}
+                    if desc.get("path") and not local_path_allowed(desc["path"]):
+                        continue
+                    kept.append(desc)
+                if kept:
+                    user_node.metadata = {"attachments": kept}
             self.store.add(user_node)
 
             # Assistant node created up front so the UI has a stable, clickable id.

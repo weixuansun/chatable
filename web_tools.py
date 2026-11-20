@@ -555,22 +555,52 @@ def _decode_body(headers: "httpx.Headers", body: bytes) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-def _local_path_allowed(file_path: str) -> bool:
-    """True when a local path web_fetch may read: only inside the uploads/ or
-    images/ folders of the active data directory (user attachments). Anything
-    else on the server's filesystem (settings.json with the API key, chat
-    history, /etc/…) is refused. Symlinks are resolved before the check."""
+# Local-read allowlist: directories web_fetch may read local files from
+# (realpath'd). The ACTIVE data dir is not knowable here — it can be set by
+# --data-dir, the settings UI, or ChatService.rebind_store() — so ChatService
+# registers its uploads/images dirs on init and on every rebind. Additive by
+# design: files uploaded under a previous data dir stay readable after a
+# switch (nodes may still reference them).
+_LOCAL_READ_ROOTS: set[str] = set()
+_LOCAL_READ_ROOTS_LOCK = threading.Lock()
+
+
+def register_local_read_root(directory: str) -> None:
+    """Allow web_fetch / attachment injection to read files under ``directory``.
+
+    Called by ChatService with its uploads/ and images/ dirs. Thread-safe;
+    duplicates collapse.
+    """
+    if not directory:
+        return
+    with _LOCAL_READ_ROOTS_LOCK:
+        _LOCAL_READ_ROOTS.add(os.path.realpath(directory))
+
+
+def _local_read_roots() -> list[str]:
+    """Snapshot of the allowlist. When nothing was registered (CLI, direct
+    web_fetch use without a ChatService), fall back to the uploads/images
+    dirs of the DEFAULT data dir — the zero-config case."""
+    with _LOCAL_READ_ROOTS_LOCK:
+        roots = set(_LOCAL_READ_ROOTS)
+    if roots:
+        return sorted(roots)
     try:
         from store import resolve_db_path  # noqa: PLC0415 - avoid import cycle
         data_dir = os.path.dirname(os.path.abspath(resolve_db_path()))
     except Exception:  # noqa: BLE001
-        return False
+        return []
+    return [os.path.realpath(os.path.join(data_dir, sub))
+            for sub in ("uploads", "images")]
+
+
+def local_path_allowed(file_path: str) -> bool:
+    """True when a local path may be read: only inside a registered
+    uploads/images folder (user attachments). Anything else on the server's
+    filesystem (settings.json with the API key, chat history, /etc/…) is
+    refused. Symlinks are resolved before the check."""
     real = os.path.realpath(file_path)
-    for sub in ("uploads", "images"):
-        root = os.path.realpath(os.path.join(data_dir, sub))
-        if real.startswith(root + os.sep):
-            return True
-    return False
+    return any(real.startswith(root + os.sep) for root in _local_read_roots())
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +784,7 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
     # path (/etc/passwd, settings.json with the API key, …) is refused.
     if url.startswith("/") or url.startswith("~/"):
         file_path = os.path.expanduser(url)
-        if not _local_path_allowed(file_path):
+        if not local_path_allowed(file_path):
             return WebToolResult.error(
                 f"Refused: local file access is restricted to files uploaded "
                 f"to this chat (the uploads/images folders of the chatable "

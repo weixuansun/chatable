@@ -125,42 +125,53 @@ class WebFetchRefusalTests(unittest.TestCase):
 
 
 class LocalPathAllowlistTests(unittest.TestCase):
-    """Uploaded attachments stay readable: paths inside <data_dir>/uploads."""
+    """Uploaded attachments stay readable: paths inside a registered
+    uploads/images root (ChatService registers its active data dir)."""
 
     def test_uploads_path_allowed(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            orig = store_mod.resolve_db_path
-            store_mod.resolve_db_path = lambda data_dir=None: os.path.join(d, "chatable.jsonl")
-            try:
-                os.makedirs(os.path.join(d, "uploads"))
-                p = os.path.join(d, "uploads", "note.txt")
-                with open(p, "w", encoding="utf-8") as f:
-                    f.write("hello from an uploaded file")
-                r = web_fetch(p)
-                self.assertTrue(r.ok, r.output)
-                self.assertIn("hello from an uploaded file", r.output)
-            finally:
-                store_mod.resolve_db_path = orig
+            web_tools.register_local_read_root(os.path.join(d, "uploads"))
+            os.makedirs(os.path.join(d, "uploads"))
+            p = os.path.join(d, "uploads", "note.txt")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("hello from an uploaded file")
+            r = web_fetch(p)
+            self.assertTrue(r.ok, r.output)
+            self.assertIn("hello from an uploaded file", r.output)
 
     def test_symlink_escape_refused(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            orig = store_mod.resolve_db_path
+            web_tools.register_local_read_root(os.path.join(d, "uploads"))
+            uploads = os.path.join(d, "uploads")
+            os.makedirs(uploads)
+            secret = os.path.join(d, "secret.txt")
+            with open(secret, "w", encoding="utf-8") as f:
+                f.write("top secret")
+            link = os.path.join(uploads, "link.txt")
+            os.symlink(secret, link)
+            r = web_fetch(link)
+            self.assertFalse(r.ok)
+            self.assertIn("Refused", r.output)
+
+    def test_default_dir_fallback_when_nothing_registered(self):
+        """Without a ChatService (CLI use), the DEFAULT data dir's
+        uploads/images dirs are the allowlist."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            orig_resolve = store_mod.resolve_db_path
+            saved_roots = set(web_tools._LOCAL_READ_ROOTS)
+            web_tools._LOCAL_READ_ROOTS.clear()
             store_mod.resolve_db_path = lambda data_dir=None: os.path.join(d, "chatable.jsonl")
             try:
-                uploads = os.path.join(d, "uploads")
-                os.makedirs(uploads)
-                secret = os.path.join(d, "secret.txt")
-                with open(secret, "w", encoding="utf-8") as f:
-                    f.write("top secret")
-                link = os.path.join(uploads, "link.txt")
-                os.symlink(secret, link)
-                r = web_fetch(link)
-                self.assertFalse(r.ok)
-                self.assertIn("Refused", r.output)
+                self.assertTrue(web_tools.local_path_allowed(
+                    os.path.join(d, "uploads", "a.txt")))
+                self.assertFalse(web_tools.local_path_allowed(
+                    os.path.join(d, "elsewhere", "a.txt")))
             finally:
-                store_mod.resolve_db_path = orig
+                store_mod.resolve_db_path = orig_resolve
+                web_tools._LOCAL_READ_ROOTS.update(saved_roots)
 
 
 class RedirectAndCapTests(unittest.TestCase):

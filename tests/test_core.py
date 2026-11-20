@@ -1034,7 +1034,11 @@ class InjectImagesTests(unittest.TestCase):
         return svc, info
 
     def _write_img(self, d):
-        img = os.path.join(d, "pic.png")
+        # Real attachments live in the uploads dir (save_upload puts them
+        # there); the attachment path allowlist only opens files under it.
+        uploads = os.path.join(d, "uploads")
+        os.makedirs(uploads, exist_ok=True)
+        img = os.path.join(uploads, "pic.png")
         with open(img, "wb") as f:
             f.write(self.PNG)
         return img
