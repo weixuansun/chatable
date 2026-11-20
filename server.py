@@ -10,13 +10,27 @@ Run:
 
 Honours the same env vars as the CLI (CHATTABLE_DB, DEEPSEEK_API_KEY, …).
 Set CHATTABLE_WEB_HOST / CHATTABLE_WEB_PORT to change the bind address.
+
+Security (see _SecurityMiddleware):
+  CHATABLE_ALLOWED_HOSTS — comma-separated extra Host header values to accept
+      (localhost, 127.0.0.1, ::1 and the bind host are always allowed).
+      Anything else gets a 400 — this blocks DNS-rebinding access.
+  CHATABLE_AUTH_TOKEN — when set, every request must authenticate with
+      "Authorization: Bearer <token>" or a cookie obtained by opening
+      "/?token=<token>" once (the browser UI, SSE and uploads then just work).
+  Cross-origin writes (and sensitive reads like /api/fs/list, /api/files/*)
+  are rejected with 403 based on the Origin/Referer host. Requests with no
+  Origin/Referer at all (curl, scripts) are only accepted from a loopback
+  client when no token is configured; with a token, the token is the check.
 """
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import os
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -40,6 +54,159 @@ _env_data_dir = os.environ.get("CHATTABLE_DATA_DIR") or llm.load_persisted_data_
 service = ChatService(TreeStore(db_path=resolve_db_path(_env_data_dir)))
 # Resolve vision support from the settings cache (or background-probe it).
 llm.init_vision_flag()
+
+
+# ---------------------------------------------------------------------------
+# Security middleware: Host allowlist + Origin/Referer CSRF check + opt-in token
+# ---------------------------------------------------------------------------
+
+_TOKEN_COOKIE = "chatable_token"
+# Sensitive GETs (expose local files / filesystem layout) get the same
+# Origin/Referer scrutiny as writes. Everything else is protected against
+# cross-origin reads by the browser's same-origin policy and against DNS
+# rebinding by the Host allowlist.
+_SENSITIVE_GET_PREFIXES = ("/api/fs/list", "/api/files/")
+
+
+def _normalize_host(value: str) -> str:
+    """Lowercase host without port or IPv6 brackets ("[::1]:8000" → "::1")."""
+    v = (value or "").strip().lower()
+    if v.startswith("["):
+        end = v.find("]")
+        return v[1:end] if end != -1 else v.strip("[]")
+    if v.count(":") == 1:  # host:port
+        v = v.rsplit(":", 1)[0]
+    return v
+
+
+def _allowed_hosts() -> frozenset[str]:
+    hosts = {"localhost", "127.0.0.1", "::1"}
+    bind = _normalize_host(os.environ.get("CHATTABLE_WEB_HOST", "127.0.0.1"))
+    if bind:
+        hosts.add(bind)
+    for entry in os.environ.get("CHATABLE_ALLOWED_HOSTS", "").split(","):
+        entry = _normalize_host(entry)
+        if entry:
+            hosts.add(entry)
+    return frozenset(hosts)
+
+
+def _auth_token() -> str:
+    return os.environ.get("CHATABLE_AUTH_TOKEN", "").strip()
+
+
+def _is_loopback_client(scope: dict) -> bool:
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        return ipaddress.ip_address(client[0]).is_loopback
+    except ValueError:
+        return False
+
+
+async def _reject(send, status: int, message: str) -> None:
+    body = json.dumps({"detail": message}).encode()
+    await send({
+        "type": "http.response.start",
+        "status": status,
+        "headers": [(b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode())],
+    })
+    await send({"type": "http.response.body", "body": body})
+
+
+class SecurityMiddleware:
+    """Pure-ASGI guard in front of everything (API, SSE, static):
+
+    1. Host header allowlist (DNS-rebinding defence) → 400.
+    2. Optional bearer/cookie token (CHATABLE_AUTH_TOKEN) → 401. A GET with
+       a valid ``?token=`` sets an HttpOnly SameSite=Strict cookie and
+       redirects to the same URL without the token, so the browser UI,
+       EventSource and uploads authenticate via the cookie.
+    3. Origin/Referer check (CSRF) on non-GET/HEAD/OPTIONS and on sensitive
+       GETs: a present Origin/Referer host must be in the allowlist → 403.
+       Header-less requests (curl, scripts) pass only from a loopback client
+       when no token is configured — with a token, rule 2 already gated them.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+        allowed = _allowed_hosts()
+        token = _auth_token()
+        path = scope.get("path", "")
+        method = scope.get("method", "GET").upper()
+
+        # 1. Host allowlist.
+        host = _normalize_host(headers.get("host", ""))
+        if host not in allowed:
+            await _reject(send, 400, f"host not allowed: {host or '(missing)'}")
+            return
+
+        # 2. Token login / token check.
+        authed = False
+        if token:
+            query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
+            if "token" in query:
+                if hmac.compare_digest(query.pop("token"), token):
+                    location = path + (("?" + urlencode(query)) if query else "")
+                    cookie = (f"{_TOKEN_COOKIE}={quote(token, safe='')}; Path=/; "
+                              f"HttpOnly; SameSite=Strict")
+                    await send({
+                        "type": "http.response.start",
+                        "status": 302,
+                        "headers": [(b"location", location.encode("latin-1")),
+                                    (b"set-cookie", cookie.encode("latin-1")),
+                                    (b"content-length", b"0")],
+                    })
+                    await send({"type": "http.response.body", "body": b""})
+                else:
+                    await _reject(send, 403, "invalid token")
+                return
+            auth = headers.get("authorization", "")
+            if auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].strip(), token):
+                authed = True
+            else:
+                cookies = dict(
+                    c.split("=", 1) for c in headers.get("cookie", "").split("; ") if "=" in c
+                )
+                if hmac.compare_digest(
+                        unquote(cookies.get(_TOKEN_COOKIE, "")), token):
+                    authed = True
+            if not authed:
+                await _reject(send, 401, "authentication required "
+                                         "(CHATABLE_AUTH_TOKEN is set)")
+                return
+
+        # 3. Origin/Referer CSRF check.
+        if method not in ("GET", "HEAD", "OPTIONS") or path.startswith(_SENSITIVE_GET_PREFIXES):
+            source = headers.get("origin") or headers.get("referer")
+            if source:
+                if _normalize_host(urlsplit(source).netloc) not in allowed:
+                    await _reject(send, 403, f"cross-origin request rejected: {source}")
+                    return
+            elif token:
+                # A valid token out-of-band (curl with Bearer) is the defence.
+                if not authed:
+                    await _reject(send, 403, "origin/referer required")
+                    return
+            elif not _is_loopback_client(scope):
+                await _reject(send, 403, "origin/referer required from non-local clients")
+                return
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(SecurityMiddleware)
 
 
 class SendBody(BaseModel):
@@ -332,12 +499,18 @@ async def api_upload(file: UploadFile = File(...)) -> dict:
     existing web_fetch tool reads it (PDF text extraction, plain text, …). No
     new parsing is needed — uploads reuse the local-file path in web_tools.
     """
-    data = await file.read()
+    MAX = 50 * 1024 * 1024  # 50 MB guard
+    # Stream the body with a hard cap instead of buffering it whole first.
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > MAX:
+            raise HTTPException(status_code=413, detail="file too large (max 50 MB)")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
-    MAX = 50 * 1024 * 1024  # 50 MB guard
-    if len(data) > MAX:
-        raise HTTPException(status_code=413, detail="file too large (max 50 MB)")
     return service.save_upload(file.filename or "upload", data)
 
 
@@ -501,6 +674,21 @@ def main() -> None:
         # Rebind the module-global service onto the chosen folder before serving.
         global service
         service = ChatService(TreeStore(db_path=resolve_db_path(args.data_dir)))
+
+    try:
+        loopback = ipaddress.ip_address(_normalize_host(args.host)).is_loopback
+    except ValueError:
+        loopback = _normalize_host(args.host) == "localhost"
+    if not loopback and not _auth_token():
+        print("=" * 72)
+        print(f"WARNING: binding to a non-loopback address ({args.host}) without "
+              "CHATABLE_AUTH_TOKEN set.")
+        print("  Anyone who can reach this port has FULL access to your chat "
+              "history, bookmarks,")
+        print("  uploaded files and filesystem picker (/api/fs/list). Set "
+              "CHATABLE_AUTH_TOKEN")
+        print("  or bind to 127.0.0.1 unless you know exactly what you are doing.")
+        print("=" * 72)
 
     print(f"chatable web → http://{args.host}:{args.port}")
     print(f"  backend: {llm.backend_description()}")

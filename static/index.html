@@ -16,6 +16,7 @@ try {
 } catch (e) { /* localStorage unavailable — defaults apply */ }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
@@ -591,7 +592,7 @@ try {
           </div>
           <div class="fld">
             <span>链接</span>
-            <div class="bm-detail-text"><a :href="bmDetail.url" target="_blank" rel="noopener" x-text="bmDetail.url"></a></div>
+            <div class="bm-detail-text"><a :href="bmDetail.url" target="_blank" rel="noopener noreferrer" x-text="bmDetail.url"></a></div>
           </div>
           <div class="fld">
             <span>收藏时间</span>
@@ -905,6 +906,30 @@ function formatAttachmentBlock(text) {
   return 'Attachments:\n' + items.join('\n') + (rest ? '\n\n' + rest : '');
 }
 
+// Sanitize every HTML string that reaches the DOM (chat bubbles, streaming
+// replies, survey reports, attachment blocks). DOMPurify strips scripts,
+// event handlers and javascript:/data: URLs while keeping the markup marked
+// and KaTeX/hljs need (code classes, spans). Links that open in a new tab
+// get rel="noopener noreferrer" so the target page can't window.opener us.
+if (typeof DOMPurify !== 'undefined') {
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.tagName === 'A' && node.getAttribute('target') === '_blank') {
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+}
+
+function sanitizeHtml(html) {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+  }
+  // CDN unreachable: degrade to plain text rather than inject unsanitized
+  // markup — marked comes from the same CDN, so this is already a degraded UI.
+  const d = document.createElement('div');
+  d.textContent = html;
+  return d.innerHTML;
+}
+
 function renderMarkdownWithMath(text) {
   if (!text) return '';
   text = formatAttachmentBlock(text);
@@ -929,14 +954,17 @@ function renderMarkdownWithMath(text) {
   // Inline $…$ — single-line only; avoid $$ already handled above.
   t = t.replace(/(?<!\$)\$(?!\$)([^\n$]*?)(\$|$)/g,
     (_, c, e) => stash('$' + c + (e === '$' ? '$' : '')));
-  // 2. Markdown render on the safe remainder.
+  // 2. Markdown render on the safe remainder. A marked failure must NOT fall
+  //    back to the raw text — it would be injected as HTML below.
   let html;
-  try { html = marked.parse(t); } catch (e) { html = t; }
+  try { html = marked.parse(t); } catch (e) { html = sanitizeHtml(t); }
   // 3. Restore math placeholders, escaping < > so the browser won't
   //    interpret <i>, <b>, <u> etc. inside formulas as HTML tags.
   html = html.replace(/MATH(\d+)/g, (_, i) =>
     math[+i].replace(/</g, '&lt;').replace(/>/g, '&gt;'));
-  return html;
+  // 4. Sanitize before it becomes DOM (x-md sets innerHTML, then KaTeX and
+  //    hljs run over the already-safe tree).
+  return sanitizeHtml(html);
 }
 
 function renderMathIn(el) {
