@@ -950,6 +950,11 @@ class ChatService:
             data["ws_commit"] = md["ws_commit"]
         if node.role == "step":
             data["step_status"] = md.get("status")
+        if isinstance(md.get("plan"), list):
+            data["plan"] = {
+                "done": sum(1 for i in md["plan"] if i.get("status") == "completed"),
+                "total": len(md["plan"]),
+            }
         return data
 
     def tree(self) -> dict:
@@ -1055,9 +1060,11 @@ class ChatService:
                 "attachments": meta.get("attachments") or [],
                 "suggestions": meta.get("suggestions") or [],
                 "usage": n.usage,
-                # Agent fields: the turn's final snapshot (assistant nodes) and
-                # the full step payload, so the UI can rebuild the timeline.
+                # Agent fields: the turn's final snapshot (assistant nodes), the
+                # latest update_plan checklist, and the full step payload, so
+                # the UI can rebuild the timeline.
                 "ws_commit": meta.get("ws_commit"),
+                "plan": meta.get("plan"),
                 "step": (
                     {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
                                               "result", "error", "diff", "ws_commit",
@@ -2769,6 +2776,9 @@ class ChatService:
             "usage": usage,
             "stats": _fmt_stats(usage, elapsed),
             "elapsed": elapsed,
+            # Agent turns: the turn's final workspace snapshot (lets the UI
+            # offer restore/compare without a reload).
+            "ws_commit": metadata.get("ws_commit"),
             "tool_results": [
                 {k: r[k] for k in ("name", "arguments", "ok", "error", "duration_ms", "output")}
                 for r in tool_results

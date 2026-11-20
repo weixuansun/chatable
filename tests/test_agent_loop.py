@@ -416,6 +416,11 @@ def test_update_plan_streams_and_persists(svc):
     assert step.metadata["status"] == "ok"  # read-only: never needs approval
     plan = svc.store.get(info["assistant_id"]).metadata["plan"]
     assert plan[1] == {"content": "do b", "status": "pending"}
+    # …and it reaches the UI payloads (path messages + tree summary).
+    msgs = svc.path_messages(info["assistant_id"])
+    assert msgs[1]["plan"][0]["content"] == "do a"
+    assert svc._node_summary_dict(svc.store.get(info["assistant_id"]))["plan"] == {
+        "done": 0, "total": 2}
 
 
 def test_shell_output_streams_as_step_events(svc):

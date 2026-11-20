@@ -113,7 +113,10 @@ class ShadowGit:
             info = os.path.join(self.git_dir, "info")
             os.makedirs(info, exist_ok=True)
             with open(os.path.join(info, "exclude"), "a", encoding="utf-8") as fh:
-                fh.write(".git\n")
+                # Plus build/cache noise: never snapshotted, never deleted on
+                # restore (git clean -fd leaves ignored files alone).
+                fh.write(".git\n__pycache__/\n*.pyc\n.pytest_cache/\n"
+                         ".mypy_cache/\nnode_modules/\n.venv/\nvenv/\n")
         self._initialized = True
 
     # ------------------------------------------------------------------ #

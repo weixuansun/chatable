@@ -1288,3 +1288,99 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .step-hint { font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 999px;
              color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent);
              white-space: nowrap; }
+
+/* ---------------------------------------------------------------------------
+ * Agent v3: run grouping, plan card, shell terminal, notices, compare/files
+ * ------------------------------------------------------------------------- */
+
+/* collapsible wrapper around a turn's step timeline */
+.agent-run { border: 1px solid var(--border); border-radius: var(--radius);
+             background: var(--card); margin-bottom: 10px; overflow: hidden; }
+.agent-run > summary { cursor: pointer; list-style: none; user-select: none;
+                       display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+                       font-size: 12.5px; font-weight: 600; color: var(--dim);
+                       transition: background .12s; }
+.agent-run > summary:hover { background: var(--card-hover); color: var(--fg); }
+.agent-run > summary::-webkit-details-marker { display: none; }
+.agent-run > summary .lucide { width: 13px; height: 13px; color: var(--accent); }
+.agent-run-body { padding: 4px 10px 10px; border-top: 1px solid var(--border); }
+
+/* update_plan checklist */
+.plan-card { display: flex; flex-direction: column; gap: 3px; margin: 8px 0;
+             padding: 8px 12px; background: var(--panel-2);
+             border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; }
+.plan-item { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+.plan-item .lucide { width: 13px; height: 13px; flex: none; }
+.plan-item.plan-in_progress { color: var(--fg); font-weight: 500; }
+.plan-item.plan-completed { color: var(--dim-2); text-decoration: line-through; }
+.plan-item.plan-completed .lucide { color: var(--ok); }
+.plan-spin { width: 11px; height: 11px; flex: none; margin: 1px; }
+
+/* loop notices (round-limit fuse etc.) */
+.run-notice { display: flex; align-items: center; gap: 7px; margin: 6px 0;
+              padding: 6px 10px; font-size: 12px; color: var(--branch);
+              background: var(--branch-soft); border: 1px solid var(--branch);
+              border-radius: 8px; }
+.run-notice .lucide { width: 13px; height: 13px; flex: none; }
+
+/* collapsed read-only group row in the step timeline */
+.step-group-row { display: flex; align-items: center; gap: 7px; width: 100%;
+                  padding: 5px 12px; background: transparent; border: 1px dashed var(--border);
+                  border-radius: var(--radius); color: var(--dim-2); font-size: 12px;
+                  cursor: pointer; text-align: left; transition: background .12s, color .12s; }
+.step-group-row:hover { background: var(--card-hover); color: var(--fg); }
+.step-group-row .lucide { width: 12px; height: 12px; }
+.step-group-count { margin-left: auto; font-size: 11px; color: var(--dim-2); }
+
+/* live shell output terminal */
+.step-term { margin: 8px 0 0; padding: 10px 12px; max-height: 220px; overflow-y: auto;
+             background: #0a0c10; color: #c8e6c9; border: 1px solid var(--border);
+             border-radius: 8px; font-family: var(--font-mono); font-size: 11.5px;
+             line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+:root[data-theme="light"] .step-term, :root[data-theme="paper"] .step-term,
+:root[data-theme="arctic"] .step-term, :root[data-theme="solarized-light"] .step-term,
+:root[data-theme="sakura"] .step-term, :root[data-theme="mint"] .step-term,
+:root[data-theme="latte"] .step-term {
+  background: #14171c; color: #b9e3ba;
+}
+
+/* compare modal */
+.compare-modal { width: 720px; }
+.compare-picker { display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+                  font-family: var(--font-mono); font-size: 12.5px; }
+.compare-picker .lucide { width: 14px; height: 14px; color: var(--dim-2); }
+.compare-picker select { flex: 1; min-width: 0; background: var(--panel-2); color: var(--fg);
+                         border: 1px solid var(--border-2); border-radius: 8px;
+                         padding: 5px 8px; font-size: 12.5px; }
+.compare-node { color: var(--accent); font-weight: 600; }
+.compare-files { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.compare-file { display: flex; align-items: center; gap: 8px; padding: 3px 8px;
+                border-radius: 6px; font-size: 12px; }
+.compare-file:hover { background: var(--card-hover); }
+.file-status { flex: none; width: 16px; height: 16px; border-radius: 4px; font-size: 10px;
+               font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.file-status.fs-A { color: var(--ok); background: var(--ok-soft); }
+.file-status.fs-M { color: var(--branch); background: var(--branch-soft); }
+.file-status.fs-D { color: var(--fail); background: var(--fail-soft); }
+.file-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+             white-space: nowrap; font-family: var(--font-mono); }
+.file-stat { flex: none; font-family: var(--font-mono); font-size: 11px; }
+.file-stat.add { color: var(--ok); }
+.file-stat.del { color: var(--fail); }
+
+/* snapshot file browser */
+.files-list { display: flex; flex-direction: column; gap: 1px; max-height: 180px;
+              overflow-y: auto; margin-bottom: 10px; }
+.files-item { text-align: left; background: transparent; border: 0; border-radius: 6px;
+              padding: 3px 8px; font-family: var(--font-mono); font-size: 12px;
+              color: var(--dim); cursor: pointer; }
+.files-item:hover { background: var(--card-hover); color: var(--fg); }
+.files-item.active { color: var(--accent); background: var(--accent-soft); }
+.files-content { margin: 0; max-height: 320px; }
+
+/* mind map: collapsed step-chain group + plan badge on pair cards */
+.map-step-group { color: var(--dim); font-style: normal; }
+.map-step-group .lucide:last-child { margin-left: auto; }
+.plan-badge { flex: none; font-size: 10px; line-height: 15px; padding: 0 6px;
+              border-radius: 999px; color: var(--accent-2);
+              background: color-mix(in srgb, var(--accent-2) 14%, transparent); }

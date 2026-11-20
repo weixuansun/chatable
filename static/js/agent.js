@@ -33,6 +33,23 @@ function stepStatusLabel(status) {
   }
 }
 
+/** Step args without the redundant leading tool name. */
+function shortArgs(tool, summary) {
+  const q = String(summary || '');
+  const prefix = String(tool || '') + ' ';
+  return tool && q.startsWith(prefix) ? q.slice(prefix.length) : q;
+}
+
+/**
+ * Step result text with a trailing embedded diff stripped, so a step that
+ * carries both (write/edit output = note + diff) is never shown twice.
+ */
+function stripDiffFromResult(result, diff) {
+  const r = String(result || '');
+  if (diff && r.endsWith(diff)) return r.slice(0, r.length - diff.length).trim();
+  return r;
+}
+
 /**
  * Render a unified diff as colored, escaped HTML lines.
  * Every line is HTML-escaped first (tool/model output is untrusted), and the
