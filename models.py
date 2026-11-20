@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from uuid import uuid4
 import time
 
-Role = Literal["user", "assistant", "summary", "system_note"]
+Role = Literal["user", "assistant", "summary", "system_note", "step"]
 
 
 @dataclass
