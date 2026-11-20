@@ -175,3 +175,57 @@ class ShadowGit:
                 return self._git("diff", parent, commit).stdout
             proc = self._git("diff-tree", "--root", "-p", commit)
             return proc.stdout
+
+    def diff_numstat(self, a: str, b: str) -> list[dict]:
+        """Per-file change summary between two commits (a → b)."""
+        self._require_git()
+        with self._lock:
+            self._ensure_init()
+            stats = self._git("diff", "--numstat", a, b).stdout
+            status = self._git("diff", "--name-status", a, b).stdout
+        status_map: dict[str, str] = {}
+        for line in status.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                status_map[parts[-1]] = parts[0]
+        files = []
+        for line in stats.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            add, delete, path = parts[0], parts[1], parts[2]
+            files.append({
+                "path": path,
+                "status": status_map.get(path, "M"),
+                "additions": int(add) if add.isdigit() else 0,
+                "deletions": int(delete) if delete.isdigit() else 0,
+            })
+        return files
+
+    def ls_tree(self, commit: str) -> list[str]:
+        """All tracked file paths at *commit*."""
+        self._require_git()
+        with self._lock:
+            self._ensure_init()
+            out = self._git("ls-tree", "-r", "--name-only", commit).stdout
+        return [line for line in out.splitlines() if line.strip()]
+
+    def show_file(self, commit: str, path: str, cap: int = 200 * 1024) -> tuple[str, bool]:
+        """(content, truncated) of one file at *commit*, capped at *cap* bytes."""
+        self._require_git()
+        if path.startswith("/") or ".." in path.split("/") or ":" in path:
+            raise WorkspaceError(f"bad snapshot path: {path!r}")
+        with self._lock:
+            self._ensure_init()
+            proc = subprocess.run(
+                ["git", f"--git-dir={self.git_dir}", f"--work-tree={self.workspace.root}",
+                 "show", f"{commit}:{path}"],
+                capture_output=True, timeout=60,
+            )
+        if proc.returncode != 0:
+            raise WorkspaceError(f"not in snapshot {commit[:8]}: {path}")
+        data = proc.stdout
+        truncated = len(data) > cap
+        if truncated:
+            data = data[:cap]
+        return data.decode("utf-8", errors="replace"), truncated

@@ -30,9 +30,12 @@ it is required for these routes like any other.
 | `GET /api/agent/status` | — | `{available, reason, workspace, auto_approve, git}` — `available=false` (with `reason`) when no token is set; `workspace` is the resolved workspace root (created on demand); `git` reports shadow-snapshot availability. |
 | `POST /api/agent/mode` | `{node_id, enabled}` | Toggle agent mode for the conversation owning `node_id`. Returns `{ok, trunk_id, agent_mode}`. |
 | `POST /api/send` | `{content, parent_id?, attachments?, agent?}` | Unchanged, plus the `agent` flag. Agent turns stream the extra SSE events below. **Sending from a node in agent mode first restores the workspace to that node's nearest snapshot** (restore-on-checkout), so files always match the branch being continued. |
-| `POST /api/agent/approve` | `{step_id, decision, always?}` | `decision`: `"approve"` \| `"deny"`. `always: true` (with approve) auto-approves that tool for the rest of the server session. `404` when no approval is pending for `step_id` (e.g. it timed out). |
+| `POST /api/agent/approve` | `{step_id, decision, always?, scope?}` | `decision`: `"approve"` \| `"deny"`. `always: true` (with approve) remembers the choice **for the current conversation** (in-memory per trunk): `scope: "tool"` (default) auto-approves this tool, `scope: "writes"` auto-approves write_file+edit_file. `404` when no approval is pending for `step_id` (e.g. it timed out or the turn was stopped — a stop resolves pending approvals as denied). |
 | `POST /api/agent/restore` | `{node_id}` | Reset the workspace to the snapshot of the nearest ancestor-or-self node with `ws_commit`. Files absent from the snapshot are deleted; any `.git` directory inside the workspace is left untouched. Returns `{ok, restored, commit}` or `{ok: false, restored: false, reason}` when the path has no snapshot. |
 | `GET /api/agent/step/{step_id}/diff` | — | `{id, tool, status, ws_commit, diff}` — the step's stored edit diff for write/edit, else the shadow-git diff between `ws_parent_commit..ws_commit`. |
+| `GET /api/agent/compare?a=&b=` | — | Branch compare: `{ok, a_commit, b_commit, diff, files: [{path, status, additions, deletions}]}` between the snapshots nearest the two nodes. |
+| `GET /api/agent/files?node=` | — | `{ok, commit, files: [path…]}` — files tracked in the snapshot nearest the node. |
+| `GET /api/agent/file?node=&path=` | — | `{ok, commit, path, content, truncated}` — one file at that snapshot (200KB cap, path confined). |
 
 Existing tree endpoints (`GET /api/tree`, `GET /api/node/{id}`,
 `GET /api/path/{id}`) return step nodes like any other node, so the mind map
@@ -46,11 +49,17 @@ are unchanged. `assistant_start` gains `agent: true` and `workspace`.
 
 ```json
 {"type": "step_start", "id", "parent_id", "tool", "args", "args_summary"}
+{"type": "step_output", "step_id", "chunk"}
 {"type": "approval_required", "step_id", "tool", "args", "preview_diff"}
 {"type": "approval_resolved", "step_id", "decision"}
 {"type": "step_done", "id", "status", "tool", "ok", "duration_ms", "ws_commit"}
+{"type": "plan", "step_id", "items": [{"content", "status"}]}
+{"type": "notice", "text"}
 ```
 
+- `step_output` streams `run_shell` stdout/stderr incrementally while the
+  command runs (the persisted step keeps head+tail 8KB with an omission
+  note). Stop kills the shell's whole process group.
 - `approval_required` is emitted for `write_file`/`edit_file`/`run_shell`
   unless policy auto-approves them; `preview_diff` carries the unified diff
   the write/edit *would* produce (empty for shell). The turn thread then
@@ -58,6 +67,11 @@ are unchanged. `assistant_start` gains `agent: true` and `workspace`.
   treats it as denied.
 - Denied calls are folded back to the model as a tool result saying the user
   denied it; the loop continues.
+- `plan` carries the latest `update_plan` checklist; the final plan is also
+  persisted on the assistant node metadata as `plan`.
+- `notice` signals loop-level events — currently the round-limit fuse: after
+  `CHATTABLE_AGENT_MAX_ROUNDS` tool rounds the model gets one final
+  no-tools round to write its summary.
 
 ## Step node schema
 
@@ -81,6 +95,7 @@ path in the tree (`user → assistant → step → step → …`). The turn's fi
     "result": "…tool output, truncated to 4000 chars…",
     "error": "…only when status == error…",
     "diff": "…unified diff, write/edit only…",
+    "duration_ms": 42,
     "ws_commit": "<shadow git commit>",        // mutating steps that succeeded
     "ws_parent_commit": "<commit before this step>"
   }
@@ -96,21 +111,34 @@ from any step still produces a valid, cache-friendly request.
 
 | Tool | read_only | Approval default | Notes |
 |---|---|---|---|
-| `list_dir(path?, depth?)` | yes | auto | tree listing, skips `.git`, capped at 500 entries |
+| `list_dir(path?, depth?)` | yes | auto | flat workspace-relative paths (dirs end with `/`), default depth 2, skips noise dirs (`.git`, `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `dist`, `build`, …) and root `.gitignore`, capped at 500 entries |
+| `glob(pattern, path?)` | yes | auto | `**/*.py`-style file finding, newest first, capped with a "N more matches" note |
 | `read_file(path, offset?, limit?)` | yes | auto | line numbers, 200KB cap with truncation note, binary refused |
-| `grep(pattern, path?, glob?)` | yes | auto | pure-Python regex, capped at 100 matches, skips `.git`/binary |
+| `grep(pattern, path?, glob?, ignore_case?, context?)` | yes | auto | pure-Python regex; `path:line: text` output (context lines use `-`), capped with a "N more matches" note |
 | `write_file(path, content)` | no | ask | creates parents, ≤1MB, returns unified diff |
-| `edit_file(path, old_string, new_string, replace_all?)` | no | ask | errors unless `old_string` is found and unique (or `replace_all`); returns unified diff |
-| `run_shell(command, timeout?)` | no | ask | cwd=workspace, ≤60s, output capped, `*_API_KEY`/`*_TOKEN`/`*_SECRET` env vars scrubbed |
+| `edit_file(path, old_string, new_string, replace_all?, expected_replacements?)` | no | ask | not-found errors show the most similar region with line numbers; non-unique errors list occurrence line numbers; returns unified diff |
+| `run_shell(command, timeout?)` | no | ask | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, `*_API_KEY`/`*_TOKEN`/`*_SECRET` env vars scrubbed |
+| `update_plan(items)` | yes | auto | TodoWrite-style plan checklist; latest plan emitted as `plan` SSE and persisted on the assistant node |
 
 All paths are confined to the workspace: real paths must stay under the
 workspace realpath (`..`, absolute paths outside, and symlink escapes are
 rejected).
 
+The agent system prompt instructs explore-before-edit, read-before-edit,
+minimal edits, plan tracking, test-after-change and verify-before-claiming.
+If `AGENTS.md`, `CLAUDE.md` or `.chatable/instructions.md` exists at the
+workspace root it is appended to that prompt (20KB cap).
+
 Agent loop limits: up to 25 rounds (`CHATTABLE_AGENT_MAX_ROUNDS`), up to 8
 tool calls per round (`CHATTABLE_AGENT_MAX_CALLS_PER_ROUND`), and **no**
 cross-round dedupe of repeated calls. Normal mode keeps its 3-calls/round,
-10-round, dedupe behaviour untouched.
+10-round, dedupe behaviour untouched. When the round limit is hit the model
+gets one final no-tools round to summarize (plus a `notice` event).
+
+Long turns: past ~60k estimated tokens of loop context
+(`CHATTABLE_AGENT_CTX_BUDGET_TOKENS`), tool results older than the last 6
+are shrunk to head/tail excerpts with a note. Only the live loop context is
+affected; persisted step results stay full.
 
 ## Environment variables
 
@@ -122,17 +150,22 @@ cross-round dedupe of repeated calls. Normal mode keeps its 3-calls/round,
 | `CHATTABLE_AGENT_MAX_ROUNDS` | `25` | Agent loop round cap. |
 | `CHATTABLE_AGENT_MAX_CALLS_PER_ROUND` | `8` | Agent loop per-round tool-call cap. |
 | `CHATTABLE_AGENT_APPROVAL_TIMEOUT_S` | `600` | Approval wait before treating as denied. |
+| `CHATTABLE_AGENT_CTX_BUDGET_TOKENS` | `60000` | Estimated-token budget before old tool results are shrunk. |
 
 ## Shadow git snapshots
 
 Snapshots live in `<data_dir>/agent_shadow.git` and operate with
 `git --git-dir=<shadow> --work-tree=<workspace>` — a `.git` inside the
 workspace is never read, written, or cleaned (it is excluded from tracking,
-and `git clean` skips it). The workspace state is committed after every
-successful write/edit/shell step, plus one base snapshot before the first
-mutation of a turn. A node's file state is the nearest ancestor-or-self
-`ws_commit`. If git is not installed, snapshots degrade to no-ops
-(`ws_commit` absent) and restore/diff calls return a clear error.
+and `git clean` skips it). A **base snapshot** of the pre-turn workspace is
+committed at the start of every agent turn and recorded on the user node,
+then one commit after every successful write/edit/shell step (recorded as
+`ws_commit` on the step; the turn's final commit is mirrored onto the
+assistant node). A node's file state is the nearest ancestor-or-self
+`ws_commit` — where an assistant node's mirror counts only for the
+assistant node itself, not for its own steps (their nearest snapshot is the
+last earlier step, or the base). If git is not installed, snapshots degrade
+to no-ops (`ws_commit` absent) and restore/diff calls return a clear error.
 
 Shell commands can still cause effects outside the workspace (network,
 global installs); those are **not** rolled back by restores.

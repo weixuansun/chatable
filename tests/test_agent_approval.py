@@ -107,6 +107,40 @@ def test_always_approve_skips_later_prompts(svc):
     assert {s.metadata["status"] for s in step_nodes(svc)} == {"ok"}
 
 
+def test_always_scope_writes_covers_both_write_tools(svc):
+    prompts = []
+
+    def approve_writes(svc, ev):
+        prompts.append(ev)
+        svc.resolve_approval(ev["step_id"], "approve", always=True, scope="writes")
+
+    drive(svc, [
+        tool_call("write_file", path="a.txt", content="one\n"),
+        # edit_file is covered by the "writes" scope — no second prompt.
+        tool_call("edit_file", path="a.txt", old_string="one", new_string="1"),
+        ANSWER,
+    ], approve_writes)
+    assert len(prompts) == 1
+    assert {s.metadata["status"] for s in step_nodes(svc)} == {"ok"}
+    with open(os.path.join(svc.workspace().root, "a.txt")) as fh:
+        assert fh.read() == "1\n"
+
+
+def test_stop_denies_a_pending_approval(svc):
+    fake, _calls = make_fake([
+        tool_call("write_file", path="a.txt", content="x\n"),
+        ANSWER,
+    ])
+    with patch.object(service_mod, "stream_backend", fake):
+        info = svc.start_turn("do it", None, agent=True)
+        for ev in svc.subscribe(info["assistant_id"], 0):
+            if ev["type"] == "approval_required":
+                assert svc.request_stop(info["assistant_id"]) is True
+    (step,) = step_nodes(svc)
+    assert step.metadata["status"] == "denied"
+    assert not os.path.exists(os.path.join(svc.workspace().root, "a.txt"))
+
+
 def test_shell_always_asks_by_default(svc):
     def approve(svc, ev):
         assert ev["tool"] == "run_shell"

@@ -14,6 +14,7 @@ import service as service_mod
 from service import ChatService
 from store import ROOT_ID, TreeStore
 from tools import ToolResult
+from workspace import WorkspaceError
 
 git_required = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 
@@ -286,11 +287,36 @@ def test_send_from_step_restores_workspace_first(svc):
     assert svc.store.get(info2["user_id"]).parent_id == s1.id
 
 
-def test_restore_without_snapshot_is_a_noop(svc, tmp_path):
+@git_required
+def test_readonly_turn_records_a_base_snapshot(svc):
+    """Every agent turn snapshots the pre-turn workspace onto the user node,
+    so even a turn with no writes can be restored to."""
     info, _events, _calls = run_turn(svc, [ANSWER])
+    trunk = svc.store.get(info["user_id"])
+    base = trunk.metadata.get("ws_commit")
+    assert base
     res = svc.restore_workspace(info["assistant_id"])
-    assert res == {"ok": False, "restored": False,
-                   "reason": "no workspace snapshot on this node's path"}
+    assert res["restored"] and res["commit"] == base
+
+
+@git_required
+def test_fork_from_readonly_step_restores_pre_turn_state(svc):
+    """A read-only step before the first write restores to the turn's base."""
+    with open(os.path.join(svc.workspace().root, "existing.txt"), "w") as fh:
+        fh.write("orig\n")
+    _info, _events, _calls = run_turn(svc, [
+        tool_call("read_file", path="existing.txt"),
+        tool_call("write_file", path="new.txt", content="n\n"),
+        ANSWER,
+    ])
+    read_step, _write_step = step_nodes(svc)
+    assert read_step.metadata["tool"] == "read_file"
+    assert "ws_commit" not in read_step.metadata  # read-only steps don't snapshot
+    res = svc.restore_workspace(read_step.id)
+    assert res["restored"]
+    assert not os.path.exists(os.path.join(svc.workspace().root, "new.txt"))
+    with open(os.path.join(svc.workspace().root, "existing.txt")) as fh:
+        assert fh.read() == "orig\n"
 
 
 # ------------------------------------------------------------- mode + token
@@ -347,3 +373,87 @@ def test_agent_status_reports_workspace(svc, tmp_path):
     assert status["workspace"] == os.path.realpath(str(tmp_path / "ws"))
     assert status["auto_approve"] == ["all"]
     assert os.path.isdir(status["workspace"])  # created on demand
+
+
+# -------------------------------------------------- v3: limits, plan, streaming
+
+def test_round_limit_forces_a_final_summary(svc, monkeypatch):
+    monkeypatch.setattr(service_mod, "AGENT_MAX_ROUNDS", 2)
+    script = [tool_call("list_dir", path="."), tool_call("list_dir", path="."), ANSWER]
+    info, events, calls = run_turn(svc, script)
+    assert svc.store.get(info["assistant_id"]).content == "all done"
+    notices = [e for e in events if e["type"] == "notice"]
+    assert notices and "round limit" in notices[0]["text"]
+    assert len(calls) == 3  # 2 tool rounds + the wrap-up round…
+    assert calls[-1]["tools"] is None  # …which runs without tools
+
+
+def test_long_turn_shrinks_old_tool_results(svc, monkeypatch):
+    monkeypatch.setattr(service_mod, "AGENT_CTX_BUDGET_TOKENS", 300)
+    with open(os.path.join(svc.workspace().root, "big.txt"), "w") as fh:
+        fh.write("x" * 4000)
+    script = [tool_call("read_file", path="big.txt")] * 8 + [ANSWER]
+    _info, _events, calls = run_turn(svc, script)
+    final = calls[-1]["messages"]
+    tool_msgs = [m for m in final if m["role"] == "tool"]
+    assert len(tool_msgs) == 8
+    # The oldest results are shrunk with a note; the last 6 stay intact.
+    assert all("older tool output shrunk" in m["content"] for m in tool_msgs[:2])
+    assert not any("older tool output shrunk" in m["content"] for m in tool_msgs[2:])
+
+
+def test_update_plan_streams_and_persists(svc):
+    items = [{"content": "do a", "status": "in_progress"},
+             {"content": "do b", "status": "pending"}]
+    info, events, _calls = run_turn(svc, [
+        tool_call("update_plan", items=items),
+        ANSWER,
+    ])
+    plan_events = [e for e in events if e["type"] == "plan"]
+    assert plan_events and plan_events[0]["items"][0]["content"] == "do a"
+    (step,) = step_nodes(svc)
+    assert step.metadata["tool"] == "update_plan"
+    assert step.metadata["status"] == "ok"  # read-only: never needs approval
+    plan = svc.store.get(info["assistant_id"]).metadata["plan"]
+    assert plan[1] == {"content": "do b", "status": "pending"}
+
+
+def test_shell_output_streams_as_step_events(svc):
+    _info, events, _calls = run_turn(svc, [
+        tool_call("run_shell", command="echo streamed-line"),
+        ANSWER,
+    ])
+    outs = [e for e in events if e["type"] == "step_output"]
+    assert outs and outs[0]["step_id"]
+    assert "streamed-line" in "".join(e["chunk"] for e in outs)
+
+
+@git_required
+def test_compare_and_snapshot_file_reads(svc):
+    info1, _e1, _c1 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        ANSWER,
+    ])
+    info2, _e2, _c2 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v2\n"),
+        tool_call("write_file", path="b.txt", content="new\n"),
+        ANSWER,
+    ], content="second turn", parent_id=info1["assistant_id"])
+
+    cmp = svc.agent_compare(info1["assistant_id"], info2["assistant_id"])
+    assert cmp["ok"]
+    files = {f["path"]: f for f in cmp["files"]}
+    assert files["a.txt"]["status"] == "M"
+    assert files["a.txt"]["additions"] == 1 and files["a.txt"]["deletions"] == 1
+    assert files["b.txt"]["status"] == "A"
+    assert "-v1" in cmp["diff"] and "+v2" in cmp["diff"]
+
+    fl = svc.agent_files(info1["assistant_id"])
+    assert "a.txt" in fl["files"] and "b.txt" not in fl["files"]
+    fc = svc.agent_file(info1["assistant_id"], "a.txt")
+    assert fc["content"] == "v1\n" and fc["truncated"] is False
+
+    with pytest.raises(WorkspaceError):
+        svc.agent_file(info1["assistant_id"], "../escape.txt")
+    cmp_bad = svc.agent_compare(info1["assistant_id"], "no-such-node")
+    assert cmp_bad["ok"] is False

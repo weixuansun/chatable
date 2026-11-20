@@ -250,6 +250,7 @@ class ApproveBody(BaseModel):
     step_id: str
     decision: str  # "approve" | "deny"
     always: bool = False
+    scope: str = "tool"  # "tool" (this tool) | "writes" (write_file+edit_file)
 
 
 class RestoreBody(BaseModel):
@@ -639,7 +640,10 @@ def api_agent_approve(body: ApproveBody) -> dict:
     _require_agent()
     if body.decision not in ("approve", "deny"):
         raise HTTPException(status_code=400, detail="decision must be 'approve' or 'deny'")
-    if not service.resolve_approval(body.step_id, body.decision, always=body.always):
+    if body.scope not in ("tool", "writes"):
+        raise HTTPException(status_code=400, detail="scope must be 'tool' or 'writes'")
+    if not service.resolve_approval(body.step_id, body.decision,
+                                    always=body.always, scope=body.scope):
         raise HTTPException(status_code=404,
                             detail=f"no pending approval for step: {body.step_id}")
     return {"ok": True}
@@ -668,6 +672,37 @@ def api_agent_step_diff(step_id: str) -> dict:
         return service.step_diff(step_id)
     except NodeNotFoundError:
         raise HTTPException(status_code=404, detail=f"node not found: {step_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/agent/compare")
+def api_agent_compare(a: str, b: str) -> dict:
+    """Diff the workspace snapshots nearest nodes ``a`` and ``b`` (branch
+    compare): unified diff plus a per-file additions/deletions summary."""
+    _require_agent()
+    try:
+        return service.agent_compare(a, b)
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/agent/files")
+def api_agent_files(node: str) -> dict:
+    """Files tracked in the snapshot nearest ``node``."""
+    _require_agent()
+    try:
+        return service.agent_files(node)
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/agent/file")
+def api_agent_file(node: str, path: str) -> dict:
+    """One file's content at the snapshot nearest ``node`` (200KB cap)."""
+    _require_agent()
+    try:
+        return service.agent_file(node, path)
     except WorkspaceError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
