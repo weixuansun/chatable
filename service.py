@@ -805,7 +805,8 @@ class ChatService:
         summary = " ".join((node.summary or "").split())
         if len(summary) > preview_len:
             summary = summary[: preview_len - 1] + "…"
-        return {
+        md = node.metadata if isinstance(node.metadata, dict) else {}
+        data = {
             "id": node.id,
             "role": node.role,
             "parent_id": node.parent_id,
@@ -816,8 +817,14 @@ class ChatService:
             "tags": self._node_tags(node),
             "token_count": node.token_count,
             "created_at": node.created_at,
-            "tool": (node.metadata or {}).get("tool") if isinstance(node.metadata, dict) else None,
+            "tool": md.get("tool"),
         }
+        # Agent step/snapshot fields for the mind map and restore buttons.
+        if md.get("ws_commit"):
+            data["ws_commit"] = md["ws_commit"]
+        if node.role == "step":
+            data["step_status"] = md.get("status")
+        return data
 
     def tree(self) -> dict:
         """Return the whole tree as nested JSON rooted at the synthetic ROOT.
@@ -896,6 +903,14 @@ class ChatService:
                 "attachments": meta.get("attachments") or [],
                 "suggestions": meta.get("suggestions") or [],
                 "usage": n.usage,
+                # Agent fields: the turn's final snapshot (assistant nodes) and
+                # the full step payload, so the UI can rebuild the timeline.
+                "ws_commit": meta.get("ws_commit"),
+                "step": (
+                    {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
+                                              "result", "error", "diff", "ws_commit")}
+                    if n.role == "step" else None
+                ),
             })
         return out
 
