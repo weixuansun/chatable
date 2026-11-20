@@ -29,6 +29,7 @@ try {
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
 <link rel="stylesheet" href="/static/css/app.css" />
 <script src="/static/js/ui-enhancements.js" defer></script>
+<script src="/static/js/agent.js" defer></script>
 </head>
 <body>
 <div id="toast-container" aria-live="polite"></div>
@@ -333,21 +334,92 @@ try {
                   </template>
                 </div>
               </template>
-              <!-- tool cards: live tools while this row streams, else persisted -->
-              <template x-for="(t, ti) in (streams[m.id] ? streams[m.id].tools : (m.tool_results || []))" :key="ti">
-                <details class="tool" :open="t.running === true">
-                  <summary>
-                    <i data-lucide="wrench"></i>
-                    <span class="tool-name" x-text="t.name"></span>
-                    <span class="tool-args" x-text="JSON.stringify(t.arguments)"></span>
-                    <template x-if="t.running"><span class="tool-badge run">running…</span></template>
-                    <template x-if="!t.running && t.ok === true"><span class="tool-badge ok">✓</span></template>
-                    <template x-if="!t.running && t.ok === false"><span class="tool-badge fail">✗</span></template>
-                    <template x-if="t.duration_ms"><span class="tool-ms" x-text="t.duration_ms + 'ms'"></span></template>
-                    <template x-if="t.images"><span class="tool-ms" x-text="'🖼 ' + t.images"></span></template>
-                  </summary>
-                  <pre class="tool-out" x-text="t.error || t.output || '…'"></pre>
-                </details>
+              <!-- tool cards: live tools while this row streams, else persisted
+                   (hidden for agent turns — their step timeline replaces them) -->
+              <template x-if="!agentStepsFor(m).length">
+                <template x-for="(t, ti) in (streams[m.id] ? streams[m.id].tools : (m.tool_results || []))" :key="ti">
+                  <details class="tool" :open="t.running === true">
+                    <summary>
+                      <i data-lucide="wrench"></i>
+                      <span class="tool-name" x-text="t.name"></span>
+                      <span class="tool-args" x-text="JSON.stringify(t.arguments)"></span>
+                      <template x-if="t.running"><span class="tool-badge run">running…</span></template>
+                      <template x-if="!t.running && t.ok === true"><span class="tool-badge ok">✓</span></template>
+                      <template x-if="!t.running && t.ok === false"><span class="tool-badge fail">✗</span></template>
+                      <template x-if="t.duration_ms"><span class="tool-ms" x-text="t.duration_ms + 'ms'"></span></template>
+                      <template x-if="t.images"><span class="tool-ms" x-text="'🖼 ' + t.images"></span></template>
+                    </summary>
+                    <pre class="tool-out" x-text="t.error || t.output || '…'"></pre>
+                  </details>
+                </template>
+              </template>
+              <!-- agent step timeline: one card per tool call, live while this
+                   row streams (stream steps), else rebuilt from persisted
+                   step nodes (m.steps) -->
+              <template x-if="agentStepsFor(m).length">
+                <div class="step-timeline">
+                  <template x-for="s in agentStepsFor(m)" :key="s.id">
+                    <div class="step-card" :class="'st-' + s.status" :id="'step-' + s.id">
+                      <details :open="s.status === 'pending_approval'">
+                        <summary>
+                          <i :data-lucide="stepIcon(s.tool)"></i>
+                          <span class="tool-name" x-text="s.tool"></span>
+                          <span class="tool-args" :title="s.args_summary" x-text="s.args_summary"></span>
+                          <span class="step-badge" :class="s.status" x-text="stepStatusLabel(s.status)"></span>
+                          <template x-if="s.duration_ms"><span class="tool-ms" x-text="s.duration_ms + 'ms'"></span></template>
+                        </summary>
+                        <div class="step-body">
+                          <!-- approval card: accent-bordered, shown while the
+                               server-side turn waits for a decision -->
+                          <template x-if="s.status === 'pending_approval'">
+                            <div class="approval-card">
+                              <div class="approval-head">
+                                <i data-lucide="shield-alert"></i>
+                                <span x-text="s.tool === 'run_shell' ? 'Approve this command?' : 'Approve this change?'"></span>
+                              </div>
+                              <template x-if="s.preview_diff">
+                                <div class="diff-view" x-html="renderDiff(s.preview_diff)"></div>
+                              </template>
+                              <template x-if="!s.preview_diff">
+                                <pre class="tool-out" x-text="s.tool === 'run_shell' ? (s.args.command || '') : JSON.stringify(s.args, null, 1)"></pre>
+                              </template>
+                              <div class="approval-actions">
+                                <button class="btn-primary btn-sm" :disabled="s.deciding"
+                                        @click="approveStep(s, 'approve')"><i data-lucide="check"></i> Approve</button>
+                                <button class="btn-ghost danger btn-sm" :disabled="s.deciding"
+                                        @click="approveStep(s, 'deny')"><i data-lucide="x"></i> Deny</button>
+                                <button class="btn-ghost btn-sm" :disabled="s.deciding"
+                                        x-show="s.tool === 'write_file' || s.tool === 'edit_file'"
+                                        @click="approveStep(s, 'approve', true)"><i data-lucide="check-check"></i> Always approve writes this session</button>
+                              </div>
+                            </div>
+                          </template>
+                          <template x-if="s.diff">
+                            <div class="diff-view" x-html="renderDiff(s.diff)"></div>
+                          </template>
+                          <template x-if="s.result">
+                            <pre class="tool-out" x-text="s.result"></pre>
+                          </template>
+                          <div class="step-actions">
+                            <button class="fork-btn" @click="viewStepDiff(s)" title="Show this step's diff">
+                              <i data-lucide="file-diff"></i> View diff
+                            </button>
+                            <template x-if="s.ws_commit">
+                              <button class="fork-btn" @click="restoreWorkspace(s.id)"
+                                      title="Reset the workspace to this step's snapshot">
+                                <i data-lucide="history"></i> Restore workspace here
+                              </button>
+                            </template>
+                            <button class="fork-btn" @click="forkFromHere(s.id)"
+                                    title="Fork the conversation from this step (agent mode restores its workspace snapshot on send)">
+                              <i data-lucide="git-branch"></i> Fork from here
+                            </button>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  </template>
+                </div>
               </template>
               <!-- planning: non-streaming tool-decision in progress -->
               <template x-if="streams[m.id] && streams[m.id].planning">
@@ -407,6 +479,12 @@ try {
                       <i data-lucide="network"></i>思维图
                     </button>
                   </template>
+                  <template x-if="m.role === 'assistant' && m.ws_commit">
+                    <button class="fork-btn" @click="restoreWorkspace(m.id)"
+                            title="恢复工作区到这条回复结束时的快照">
+                      <i data-lucide="history"></i>恢复工作区
+                    </button>
+                  </template>
                   <button class="fork-btn" @click="copyMessage(m)"
                           :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
                     <i :data-lucide="copiedMsgId === m.id ? 'check' : 'copy'"></i>复制
@@ -464,6 +542,14 @@ try {
             <i data-lucide="network"></i>思维图
           </button>
         </template>
+        <!-- agent mode: workspace file/shell tools for this conversation -->
+        <button class="ctx-map-btn agent-toggle" :class="{on: agentMode, off: !agent.available}"
+                @click="toggleAgentMode()" :title="agentTooltip()"
+                :aria-pressed="agentMode" aria-label="Toggle agent mode">
+          <i data-lucide="bot"></i>Agent
+        </button>
+        <span x-show="agentMode && agent.workspace" class="agent-ws" :title="agent.workspace"
+              x-text="agent.workspace"></span>
       </div>
       <!-- attachments -->
       <template x-if="attachments.length">
@@ -690,6 +776,38 @@ try {
     </div>
   </template>
 
+  <!-- agent step detail/diff modal (chat timeline "View diff", map step click) -->
+  <template x-if="stepModal.open">
+    <div class="modal-backdrop" @click.self="stepModal.open = false">
+      <div class="modal step-modal" @keydown="trapModalTab($event)">
+        <div class="modal-head">
+          <h2><i data-lucide="terminal"></i><span x-text="stepModal.title"></span></h2>
+          <button class="icon-btn" @click="stepModal.open = false" title="Close (Esc)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <template x-if="stepModal.loading">
+            <div class="planning"><span class="spin"></span><span>loading…</span></div>
+          </template>
+          <template x-if="!stepModal.loading && stepModal.diff">
+            <div class="diff-view" x-html="renderDiff(stepModal.diff)"></div>
+          </template>
+          <template x-if="!stepModal.loading && stepModal.result">
+            <pre class="tool-out step-modal-out" x-text="stepModal.result"></pre>
+          </template>
+          <template x-if="!stepModal.loading && !stepModal.diff && !stepModal.result">
+            <p class="hint">No diff or output recorded for this step.</p>
+          </template>
+        </div>
+        <div class="modal-foot" x-show="stepModal.ws_commit">
+          <button class="btn-ghost" @click="stepModal.open = false; restoreWorkspace(stepModal.nodeId)"
+                  title="Reset the workspace to this step's snapshot">
+            <i data-lucide="history"></i> Restore workspace here
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
   <!-- tree-row "⋯" action menu -->
   <template x-if="nodeMenu.node">
     <div class="node-menu-backdrop" @click="nodeMenu.node=null" @contextmenu.prevent="nodeMenu.node=null">
@@ -759,10 +877,17 @@ try {
             <path class="map-edge" :d="mindmap.edgesD"></path>
           </svg>
           <template x-for="mn in mindmap.nodes" :key="mn.id">
-            <div class="map-node" :class="{center: mn.isCenter, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
+            <div class="map-node" :class="{center: mn.isCenter, 'map-step-node': mn.isStep, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
                  :style="`left:${mn.x}px; top:${mn.y}px;`"
                  :title="mn.q || mn.a"
                  @click.stop="mapNodeClick(mn)">
+              <!-- agent step card: tool icon + name + short args + status -->
+              <div class="map-step" x-show="mn.isStep" :class="'st-' + (mn.stepStatus || 'ok')">
+                <i :data-lucide="stepIcon(mn.tool)"></i>
+                <span class="map-step-name" x-text="mn.tool"></span>
+                <span class="map-step-args" x-text="mn.q"></span>
+                <span class="step-badge" :class="mn.stepStatus" x-text="stepStatusLabel(mn.stepStatus)"></span>
+              </div>
               <div class="map-q" x-show="mn.isPair">
                 <span class="role-dot role-user" :class="{'streaming': !!(streams[mn.id] || (mn.replyId && streams[mn.replyId]))}"></span>
                 <span class="map-q-text" x-text="mn.q"></span>
@@ -787,6 +912,18 @@ try {
                 <button class="map-detail-btn" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
                   <i data-lucide="message-square"></i>查看细节
                 </button>
+                <template x-if="mn.isStep">
+                  <button class="map-detail-btn" @click.stop="mapForkFrom(mn.id)"
+                          title="从这里分叉（agent 模式发送前会先恢复工作区快照）">
+                    <i data-lucide="git-branch"></i>分叉
+                  </button>
+                </template>
+                <template x-if="mn.wsCommit">
+                  <button class="map-detail-btn" @click.stop="restoreWorkspace(mn.replyId || mn.id)"
+                          title="恢复工作区到此快照">
+                    <i data-lucide="history"></i>恢复
+                  </button>
+                </template>
               </div>
             </div>
           </template>
@@ -1120,6 +1257,15 @@ function chatable() {
     },
     totals: {turns: 0, in: 0, out: 0, cache_read: 0, cache_creation: 0},
 
+    // Agent mode (workspace file/shell tools; see docs/agent-api.md). `agent`
+    // is the server status from /api/config; `agentMode` is the toggle for the
+    // current conversation (mirrored to the server for existing conversations).
+    agent: {available: false, reason: '', workspace: '', auto_approve: []},
+    agentMode: false,
+    // Step detail/diff modal (chat timeline "View diff", mind-map step detail).
+    stepModal: {open: false, title: '', diff: '', result: '', ws_commit: null,
+                nodeId: null, loading: false},
+
     // True when any reply is streaming. Derived; never a send gate.
     get anyStreaming() { return Object.keys(this.streams).length > 0; },
 
@@ -1154,6 +1300,7 @@ function chatable() {
       this.initDragDrop();
       this.initQuotePop();
       this.config = await (await fetch('/api/config')).json();
+      if (this.config.agent) this.agent = this.config.agent;
       await this.refreshTree();
       // Open as a top-level conversation list (one row per trunk); carets
       // drill into branches. Search still sees inside collapsed subtrees.
@@ -1171,6 +1318,7 @@ function chatable() {
         if (this.quotePop.show) { this.quotePop.show = false; return; }
         if (this.effortOpen) { this.effortOpen = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
+        if (this.stepModal.open) { this.stepModal.open = false; return; }
         if (this.report.open) { this.closeReport(); return; }
         if (this.bmDetail) { this.bmDetail = null; return; }
         if (this.mindmap.open) {
@@ -1210,6 +1358,7 @@ function chatable() {
       let st = {
         userId: null, parentId: null, content: '',
         text: '', reasoning: '', tools: [], stats: '', ctx: '',
+        steps: [], agent: false,
         usage: null, abortCtrl: new AbortController(), stopped: false,
         tempKey: null, assistantId, pendId: null, evIndex: 0,
         _counted: true,  // session totals were counted on the original send
@@ -2042,6 +2191,163 @@ function chatable() {
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
     },
 
+    // ---- agent mode (workspace tools, steps, approvals, snapshots) ---------
+
+    agentTooltip() {
+      if (!this.agent.available) {
+        return this.agent.reason || 'Agent mode requires CHATTABLE_AUTH_TOKEN to be set';
+      }
+      const base = this.agentMode ? 'Agent mode ON — model can edit files and run commands in the workspace'
+                                  : 'Agent mode OFF — toggle to let the model work in the workspace';
+      return this.agent.workspace ? base + '\nworkspace: ' + this.agent.workspace : base;
+    },
+
+    async toggleAgentMode() {
+      if (!this.agent.available) {
+        toast(this.agent.reason || 'Agent mode requires CHATTABLE_AUTH_TOKEN to be set', 'error');
+        return;
+      }
+      const next = !this.agentMode;
+      this.agentMode = next;
+      // Existing conversation: persist the toggle on its trunk metadata so it
+      // survives reloads. New trunk: the flag rides along with /api/send.
+      const anchor = this.messages.length ? this.messages[0].id : this.selectedId;
+      if (anchor) {
+        try {
+          const r = await fetch('/api/agent/mode', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({node_id: anchor, enabled: next}),
+          });
+          if (!r.ok) throw new Error(await this.errDetail(r));
+        } catch (e) {
+          this.agentMode = !next;
+          toast('Agent mode: ' + (e && e.message ? e.message : e), 'error');
+        }
+      }
+      this.refreshIcons();
+    },
+
+    // Reflect the conversation's persisted agent_mode after switching branches.
+    async syncAgentMode() {
+      if (!this.messages.length) return;
+      try {
+        const d = await (await fetch('/api/node/' + encodeURIComponent(this.messages[0].id))).json();
+        this.agentMode = !!(d.metadata && d.metadata.agent_mode);
+      } catch (e) { /* best-effort; keep the current toggle */ }
+    },
+
+    // The step timeline of an assistant row: live steps while streaming, else
+    // the persisted ones attached by loadPath.
+    agentStepsFor(m) {
+      const st = this.streams[m.id];
+      if (st && st.steps && st.steps.length) return st.steps;
+      return m.steps || [];
+    },
+
+    // Persisted step message (from /api/path) → timeline entry shape.
+    _stepFromPath(msg) {
+      const md = msg.step || {};
+      return {
+        id: msg.id, tool: md.tool || msg.tool || 'tool', args: md.args || {},
+        args_summary: md.args_summary || msg.content || '',
+        status: md.status || 'ok', result: md.result || '', error: md.error || '',
+        diff: md.diff || '', duration_ms: 0, ws_commit: md.ws_commit || null,
+      };
+    },
+
+    stepIcon(tool) { return stepIcon(tool); },
+    stepStatusLabel(status) { return stepStatusLabel(status); },
+    renderDiff(diff) { return renderUnifiedDiff(diff); },
+
+    async approveStep(s, decision, always = false) {
+      if (s.deciding) return;
+      s.deciding = true;
+      try {
+        const r = await fetch('/api/agent/approve', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({step_id: s.id, decision, always}),
+        });
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        // The SSE approval_resolved/step_done events confirm the final state.
+        s.status = decision === 'approve' ? 'approved' : 'denied';
+      } catch (e) {
+        toast('Approval failed: ' + (e && e.message ? e.message : e), 'error');
+      } finally {
+        s.deciding = false;
+      }
+    },
+
+    async restoreWorkspace(nodeId) {
+      if (!confirm('Restore the workspace to the snapshot at #' + nodeId.slice(0, 6) +
+                   '? Files changed after it will be overwritten (a workspace .git is kept).')) return;
+      try {
+        const r = await fetch('/api/agent/restore', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({node_id: nodeId}),
+        });
+        const data = r.ok ? await r.json() : {ok: false, reason: await this.errDetail(r)};
+        if (data.restored) {
+          toast('Workspace restored to ' + String(data.commit).slice(0, 8), 'success');
+        } else {
+          toast(data.reason || 'No workspace snapshot on this path', 'info');
+        }
+      } catch (e) {
+        toast('Restore failed: ' + (e && e.message ? e.message : e), 'error');
+      }
+    },
+
+    // Open the step detail modal; fetch the diff when the step has none stored
+    // (e.g. shell steps, where it is computed from the shadow repo).
+    async viewStepDiff(s) {
+      this.stepModal = {
+        open: true, title: (s.tool || 'step') + '  ' + (s.args_summary || ''),
+        diff: s.diff || '', result: s.result || '', ws_commit: s.ws_commit || null,
+        nodeId: s.id, loading: !s.diff && !!s.ws_commit,
+      };
+      if (s.diff || !s.ws_commit) return;
+      try {
+        const r = await fetch('/api/agent/step/' + encodeURIComponent(s.id) + '/diff');
+        if (r.ok) {
+          const data = await r.json();
+          this.stepModal.diff = data.diff || '';
+          this.stepModal.ws_commit = data.ws_commit || this.stepModal.ws_commit;
+        }
+      } catch (e) { /* the modal still shows the result text */ }
+      finally { this.stepModal.loading = false; }
+    },
+
+    // Mind-map step click: recenter (handled by mapNodeClick) + open details.
+    async mapStepDetail(mn) {
+      this.stepModal = {open: true, title: (mn.tool || 'step'), diff: '', result: '',
+                        ws_commit: mn.wsCommit || null, nodeId: mn.id, loading: true};
+      try {
+        const r = await fetch('/api/node/' + encodeURIComponent(mn.id));
+        if (r.ok) {
+          const d = await r.json();
+          const md = d.metadata || {};
+          this.stepModal.title = (md.tool || mn.tool || 'step') + '  ' + (md.args_summary || '');
+          this.stepModal.result = md.result || '';
+          this.stepModal.diff = md.diff || '';
+          this.stepModal.ws_commit = md.ws_commit || this.stepModal.ws_commit;
+        }
+      } catch (e) { /* fall through to the diff endpoint */ }
+      if (!this.stepModal.diff) {
+        try {
+          const r = await fetch('/api/agent/step/' + encodeURIComponent(mn.id) + '/diff');
+          if (r.ok) this.stepModal.diff = (await r.json()).diff || '';
+        } catch (e) { /* no diff available */ }
+      }
+      this.stepModal.loading = false;
+    },
+
+    // Mind-map "fork from here" on a step: the chat view switches to the
+    // step's branch and the composer forks from it (an agent send restores
+    // the workspace to the step's snapshot server-side).
+    mapForkFrom(id) {
+      this.mindmap.open = false;
+      this.select(id);
+    },
+
     // Composer mind-map button: open the current conversation's map, centered
     // on the selected fork point when there is one, else on the tail of the
     // viewed path (layoutMindmap always lays out the whole trunk tree).
@@ -2551,6 +2857,8 @@ function chatable() {
         }
         if (!emit) return { x };
         const pos = { id: node.id, replyId: node.replyId, isPair: node.isPair,
+                      isStep: !!node.isStep, tool: node.tool || '',
+                      stepStatus: node.stepStatus || '', wsCommit: node.wsCommit || null,
                       q: node.q, a: node.a, kidCount: kids.length,
                       x, y: depth * (NH + GY),
                       isTrunk: depth === 0,
@@ -2579,6 +2887,22 @@ function chatable() {
     // card node for the mind map. Extra replies beside the chosen one (rare)
     // become assistant-only cards so no branch information is lost.
     buildPairTree(node) {
+      // Agent step node: a compact, visually distinct card chained under its
+      // assistant reply — never merged into a Q/A pair.
+      if (node.role === 'step') {
+        return {
+          id: node.id,
+          replyId: null,
+          isPair: false,
+          isStep: true,
+          tool: node.tool || 'tool',
+          stepStatus: node.step_status || 'ok',
+          wsCommit: node.ws_commit || null,
+          q: node.preview || node.title || '',
+          a: '',
+          children: (node.children || []).map(c => this.buildPairTree(c)),
+        };
+      }
       if (node.role === 'user') {
         const kids = node.children || [];
         const replies = kids.filter(c => c.role === 'assistant');
@@ -2592,6 +2916,7 @@ function chatable() {
           id: node.id,
           replyId: reply ? reply.id : null,
           isPair: true,
+          wsCommit: (reply && reply.ws_commit) || null,
           q: node.title || node.preview || '(untitled)',
           a: reply ? (reply.summary || reply.title || reply.reply_preview || reply.preview || '') : '',
           children,
@@ -2602,6 +2927,7 @@ function chatable() {
         id: node.id,
         replyId: node.id,
         isPair: false,
+        wsCommit: node.ws_commit || null,
         q: '',
         a: node.summary || node.title || node.reply_preview || node.preview || '(empty)',
         children: (node.children || []).map(c => this.buildPairTree(c)),
@@ -2635,6 +2961,8 @@ function chatable() {
       // A drag ending on a node shouldn't recenter — treat it as panning.
       if (this._mapSuppressClick) { this._mapSuppressClick = false; return; }
       this.centerOnNode(mn.id, true);
+      // Step cards open their detail/diff modal; Q/A cards just recenter.
+      if (mn.isStep) this.mapStepDetail(mn);
     },
 
     mapShowDetail(id) {
@@ -2827,7 +3155,27 @@ function chatable() {
     async loadPath(id, scrollMode = 'top') {
       if (!id) { this.messages = []; return; }
       const data = await (await fetch('/api/path/' + id)).json();
-      this.messages = data.messages;
+      // Fold agent step nodes into the assistant row they belong to: the
+      // trajectory renders as that reply's step timeline, and the steps never
+      // become standalone message rows (or suggestion targets).
+      const msgs = [];
+      for (const msg of data.messages) {
+        if (msg.role === 'step') {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === 'assistant') {
+              msgs[i].steps = msgs[i].steps || [];
+              msgs[i].steps.push(this._stepFromPath(msg));
+              // The timeline supersedes the folded tool cards of this reply.
+              msgs[i].tool_results = [];
+              break;
+            }
+          }
+          continue;
+        }
+        msgs.push(msg);
+      }
+      this.messages = msgs;
+      this.syncAgentMode();
       this.refreshIcons();
       // Replies that finished unseen (tab closed mid-stream, server buffer
       // reaped) never got their follow-up suggestions. Generate them for the
@@ -2941,6 +3289,7 @@ function chatable() {
         // Raw composer state for this turn, so a stop can restore it for editing.
         typed, attachments: ready.slice(),
         text: '', reasoning: '', tools: [], stats: '', ctx: '',
+        steps: [], agent: false,
         usage: null, abortCtrl: new AbortController(), stopped: false,
         tempKey, assistantId: null, pendId: tempKey + '-user',
         evIndex: 0,   // count of SSE events consumed, for reconnect offset
@@ -2974,6 +3323,7 @@ function chatable() {
           body: JSON.stringify({
             content, parent_id: parentId,
             attachments: ready.map(a => ({filename: a.filename, path: a.path, mime: a.mime})),
+            agent: this.agentMode,
           }),
           signal: st.abortCtrl.signal,
         });
@@ -3129,6 +3479,11 @@ function chatable() {
             row.content = streamedText;
             row.tool_results = streamedTools;
             row.usage = streamedUsage;
+          }
+          // Agent turns: the step timeline supersedes the folded tool cards.
+          if (st.agent && st.steps && st.steps.length) {
+            row.steps = st.steps;
+            row.tool_results = [];
           }
           // Persisted reasoning renders collapsed; carry the live text over.
           if (st.reasoning) row.reasoning = st.reasoning;
@@ -3350,7 +3705,8 @@ function chatable() {
       };
       // Any concrete progress (reasoning/text/tool/finish) ends the "planning"
       // indicator; a fresh `planning` event re-arms it for the next round.
-      if (['reasoning', 'delta', 'tool_call', 'tool_result', 'tool_skipped', 'done', 'error', 'reset'].includes(evt.type)) {
+      if (['reasoning', 'delta', 'tool_call', 'tool_result', 'tool_skipped', 'done', 'error', 'reset',
+           'step_start', 'step_done', 'approval_required', 'approval_resolved'].includes(evt.type)) {
         st.planning = false;
       }
       switch (evt.type) {
@@ -3362,8 +3718,54 @@ function chatable() {
           break;
         case 'assistant_start':
           st.ctx = '· ' + evt.context.messages + ' msgs ~' + evt.context.estimated_tokens + ' tok';
+          if (evt.agent) st.agent = true;
           this.refreshIcons();
           break;
+        // ---- agent steps (see docs/agent-api.md) ----
+        case 'step_start':
+          st.steps.push({
+            id: evt.id, parent_id: evt.parent_id, tool: evt.tool,
+            args: evt.args || {}, args_summary: evt.args_summary || '',
+            status: 'running', result: '', error: '', diff: '',
+            duration_ms: 0, ws_commit: null, deciding: false,
+          });
+          this.refreshIcons();
+          follow();
+          break;
+        case 'step_done': {
+          const s = st.steps.find(x => x.id === evt.id);
+          if (s) {
+            s.status = evt.status;
+            if (evt.duration_ms) s.duration_ms = evt.duration_ms;
+            if (evt.ws_commit) s.ws_commit = evt.ws_commit;
+          }
+          follow();
+          break;
+        }
+        case 'approval_required': {
+          const s = st.steps.find(x => x.id === evt.step_id);
+          if (s) {
+            s.status = 'pending_approval';
+            s.preview_diff = evt.preview_diff || '';
+          }
+          this.refreshIcons();
+          follow();
+          // Pending approvals must be seen: bring the card into view even
+          // when the user scrolled away from the bottom.
+          this.$nextTick(() => {
+            const el = document.getElementById('step-' + evt.step_id);
+            if (el && onView && onView()) el.scrollIntoView({block: 'center', behavior: 'smooth'});
+          });
+          break;
+        }
+        case 'approval_resolved': {
+          const s = st.steps.find(x => x.id === evt.step_id);
+          if (s && s.status === 'pending_approval') {
+            s.status = evt.decision === 'approve' ? 'approved' : 'denied';
+          }
+          follow();
+          break;
+        }
         case 'planning':
           st.planning = true;
           this.refreshIcons();
@@ -3395,6 +3797,16 @@ function chatable() {
           rec.running = false; rec.ok = evt.ok; rec.output = evt.output || '';
           rec.error = evt.error || ''; rec.duration_ms = evt.duration_ms;
           rec.images = evt.images || 0;
+          // Agent steps run in the same order: the latest step of this tool
+          // without a result picks up the output for its expanded view.
+          for (let i = st.steps.length - 1; i >= 0; i--) {
+            const s = st.steps[i];
+            if (s.tool === evt.name && !s.result) {
+              s.result = evt.output || '';
+              if (!evt.ok) s.error = evt.error || '';
+              break;
+            }
+          }
           follow();
           break;
         }

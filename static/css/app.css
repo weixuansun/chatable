@@ -1190,3 +1190,94 @@ body.col-resizing { cursor: col-resize; user-select: none; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important;
                            transition-duration: .01ms !important; }
 }
+
+/* ---------------------------------------------------------------------------
+ * Agent mode: composer toggle, step timeline, approvals, diffs, mind-map steps
+ * ------------------------------------------------------------------------- */
+
+/* composer pill — shares .ctx-map-btn metrics; accent when on, muted when the
+   server reports agent mode unavailable (tooltip explains why) */
+.agent-toggle { transition: background .12s, color .12s, border-color .12s; }
+.agent-toggle .lucide { width: 11px; height: 11px; }
+.agent-toggle.on { color: var(--accent); background: var(--accent-soft);
+                   border-color: var(--accent-ring); font-weight: 600; }
+.agent-toggle.on .lucide { color: var(--accent); }
+.agent-toggle.off { opacity: .45; cursor: not-allowed; }
+.agent-ws { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            color: var(--dim-2); font-size: 10.5px; font-family: var(--font-mono);
+            direction: rtl; /* keep the tail (the meaningful part) visible */ }
+
+/* ---- step timeline (chat): one card per agent tool call ------------------ */
+.step-timeline { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.step-card { background: var(--card); border: 1px solid var(--border);
+             border-left: 3px solid var(--border-2); border-radius: var(--radius);
+             font-size: 13px; overflow: hidden; }
+.step-card.st-running { border-left-color: var(--accent); }
+.step-card.st-pending_approval { border-left-color: var(--branch); border-color: var(--branch); }
+.step-card.st-ok, .step-card.st-approved { border-left-color: var(--ok); }
+.step-card.st-error, .step-card.st-denied { border-left-color: var(--fail); }
+.step-card details { margin: 0; }
+.step-card summary { cursor: pointer; padding: 7px 12px; display: flex; align-items: center;
+                     gap: 8px; list-style: none; user-select: none; transition: background .12s; }
+.step-card summary:hover { background: var(--card-hover); }
+.step-card summary::-webkit-details-marker { display: none; }
+.step-card summary .lucide { width: 13px; height: 13px; color: var(--dim-2); flex: none; }
+.step-card .tool-name { color: var(--fg); font-weight: 600; font-family: var(--font-mono);
+                        font-size: 12.5px; flex: none; }
+.step-card .tool-args { color: var(--dim-2); font-family: var(--font-mono); font-size: 12px;
+                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                        min-width: 0; flex: 1; }
+.step-badge { margin-left: auto; flex: none; font-size: 11px; line-height: 18px; padding: 0 8px;
+              border-radius: 999px; font-weight: 600; }
+.step-badge.ok, .step-badge.approved { color: var(--ok); background: var(--ok-soft); }
+.step-badge.error, .step-badge.denied { color: var(--fail); background: var(--fail-soft); }
+.step-badge.running { color: var(--accent); background: var(--accent-soft); }
+.step-badge.pending_approval { color: var(--branch); background: var(--branch-soft); }
+.step-body { padding: 0 12px 10px; border-top: 1px solid var(--border); }
+.step-body .tool-out { border-top: 0; margin: 8px -12px 0; border-radius: 0; }
+.step-body .diff-view { margin-top: 8px; }
+.step-actions { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 8px; margin-left: -8px; }
+
+/* ---- approval card (inside a pending step) -------------------------------- */
+.approval-card { margin-top: 10px; padding: 10px 12px;
+                 background: var(--branch-soft);
+                 border: 1px solid var(--branch); border-radius: 10px; }
+.approval-head { display: flex; align-items: center; gap: 7px; font-weight: 600;
+                 font-size: 13px; margin-bottom: 8px; }
+.approval-head .lucide { width: 14px; height: 14px; color: var(--branch); }
+.approval-card .tool-out { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 8px; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
+
+/* ---- unified diff view (escaped lines, colored) --------------------------- */
+.diff-view { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+             padding: 8px 0; max-height: 320px; overflow: auto;
+             font-family: var(--font-mono); font-size: 12px; line-height: 1.55; }
+.diff-view span { display: block; padding: 0 12px; white-space: pre-wrap; word-break: break-all; }
+.diff-view .d-add { color: var(--ok); background: color-mix(in srgb, var(--ok) 9%, transparent); }
+.diff-view .d-del { color: var(--fail); background: color-mix(in srgb, var(--fail) 9%, transparent); }
+.diff-view .d-hunk { color: var(--accent); }
+.diff-view .d-file { color: var(--dim); font-weight: 600; }
+.diff-view .d-ctx { color: var(--dim-2); }
+
+/* ---- step detail modal ----------------------------------------------------- */
+.step-modal { width: 640px; }
+.step-modal .modal-body { display: flex; flex-direction: column; gap: 10px; }
+.step-modal-out { margin: 0; border: 1px solid var(--border); border-radius: 8px; max-height: 320px; }
+
+/* ---- mind-map step cards --------------------------------------------------- */
+.map-node.map-step-node { background: var(--panel-2); border-style: dashed; }
+.map-step { display: flex; align-items: center; gap: 7px; padding: 8px 10px; min-height: 40px; }
+.map-step .lucide { width: 13px; height: 13px; color: var(--dim-2); flex: none; }
+.map-step-name { font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+                 color: var(--fg); flex: none; }
+.map-step-args { font-family: var(--font-mono); font-size: 11px; color: var(--dim-2);
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.map-step .step-badge { margin-left: 0; }
+.map-step.st-pending_approval { border-left: 3px solid var(--branch); }
+.map-step.st-ok, .map-step.st-approved { border-left: 3px solid var(--ok); }
+.map-step.st-error, .map-step.st-denied { border-left: 3px solid var(--fail); }
+.map-step.st-running { border-left: 3px solid var(--accent); }
+
+/* sidebar tree: agent step rows get their own dot color */
+.role-step .role-dot, .role-dot.role-step { background: var(--accent-2); }
