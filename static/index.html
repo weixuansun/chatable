@@ -410,16 +410,25 @@ try {
                   </template>
                   <button class="suggest-refresh" :class="{busy: !!suggesting[m.id]}"
                           :disabled="!!suggesting[m.id]" @click="suggestFor(m.id, {force: true, manual: true})"
-                          title="换一批问题"><i data-lucide="refresh-cw"></i></button>
+                          title="换一批问题" aria-label="换一批追问建议"><i data-lucide="refresh-cw"></i></button>
                 </div>
               </template>
               <template x-if="!streams[m.id] && canSuggest(m) && !(m.suggestions && m.suggestions.length) && suggesting[m.id]">
-                <div class="suggest-row suggest-loading"><span class="spin"></span><span>正在想可以继续问的问题…</span></div>
+                <div class="suggest-row suggest-loading" role="status"><span class="spin"></span><span>正在想可以继续问的问题…</span></div>
               </template>
-              <!-- older replies have none: offer them on demand for the reply at the end of the view -->
-              <template x-if="!streams[m.id] && canSuggest(m) && !(m.suggestions && m.suggestions.length) && !suggesting[m.id] && m === messages[messages.length - 1]">
+              <!-- an automatic run failed: quiet inline retry, no toast spam -->
+              <template x-if="!streams[m.id] && canSuggest(m) && !(m.suggestions && m.suggestions.length) && !suggesting[m.id] && suggestFailed[m.id]">
                 <div class="suggest-row">
-                  <button class="suggest-more" @click="suggestFor(m.id, {manual: true})">
+                  <button class="suggest-more suggest-retry" @click="suggestFor(m.id, {manual: true})"
+                          title="重新生成追问建议" aria-label="重新生成追问建议">
+                    <i data-lucide="refresh-cw"></i>追问生成失败 · 重试</button>
+                </div>
+              </template>
+              <!-- replies with none yet: offer them on demand for the reply at the end of the view -->
+              <template x-if="!streams[m.id] && canSuggest(m) && !(m.suggestions && m.suggestions.length) && !suggesting[m.id] && !suggestFailed[m.id] && m === messages[messages.length - 1]">
+                <div class="suggest-row">
+                  <button class="suggest-more" @click="suggestFor(m.id, {manual: true})"
+                          title="为这条回复生成追问建议" aria-label="为这条回复生成追问建议">
                     <i data-lucide="sparkles"></i>推荐追问</button>
                 </div>
               </template>
@@ -435,6 +444,12 @@ try {
       <div class="ctx">
         <template x-if="selectedId"><span class="ctx-pill fork-pill"><i data-lucide="git-branch"></i>Forking from <span class="fork" x-text="'#' + selectedId.slice(0,6)"></span></span></template>
         <template x-if="!selectedId"><span class="ctx-pill"><i data-lucide="sprout"></i>New trunk · no fork point selected</span></template>
+        <template x-if="selectedId || messages.length">
+          <button class="ctx-map-btn" @click="openComposerMindmap()"
+                  title="打开当前对话的思维结构图" aria-label="打开当前对话的思维结构图">
+            <i data-lucide="network"></i>思维图
+          </button>
+        </template>
       </div>
       <!-- attachments -->
       <template x-if="attachments.length">
@@ -956,8 +971,10 @@ function chatable() {
     // quote-fork popup: selected text + its message id + fixed-position coords
     quotePop: {show: false, x: 0, y: 0, text: '', msgId: null},
     selectedId: null, messages: [],
-    copiedMsgId: null,
-    suggesting: {},                      // assistant ids whose follow-up suggestions are being generated  // message id whose copy button just succeeded (icon feedback)
+    copiedMsgId: null,                   // message id whose copy button just succeeded (icon feedback)
+    suggesting: {},                      // assistant ids whose follow-up suggestions are being generated
+    suggestFailed: {},                   // assistant ids whose automatic suggestion run failed (inline retry)
+    _suggestTried: {},                   // assistant ids already auto-suggested this session (fire once per reply)
     draft: '', status: '',
     // IME (e.g. Chinese pinyin) composition tracking. event.isComposing alone
     // is not reliable: on some browser/IME combos compositionend fires BEFORE
@@ -1955,7 +1972,17 @@ function chatable() {
     newTrunk() { this.selectedId = null; this.messages = []; },
     forkFromHere(id) {
       this.selectedId = id;
+      this.refreshIcons();
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // Composer mind-map button: open the current conversation's map, centered
+    // on the selected fork point when there is one, else on the tail of the
+    // viewed path (layoutMindmap always lays out the whole trunk tree).
+    openComposerMindmap() {
+      const last = this.messages[this.messages.length - 1];
+      const id = this.selectedId || (last && last.id);
+      if (id) this.openMindmap(id);
     },
 
     // ---- quote-fork popup (select text in a bubble → follow-up on it) ------
@@ -2736,6 +2763,15 @@ function chatable() {
       const data = await (await fetch('/api/path/' + id)).json();
       this.messages = data.messages;
       this.refreshIcons();
+      // Replies that finished unseen (tab closed mid-stream, server buffer
+      // reaped) never got their follow-up suggestions. Generate them for the
+      // tail reply — once per reply per session (suggestFor dedupes), and
+      // free when suggestions are already persisted server-side.
+      const last = this.messages[this.messages.length - 1];
+      if (last && this.config.auto_suggest && !this.streamKeyFor(last.id) &&
+          this.canSuggest(last) && !(last.suggestions && last.suggestions.length)) {
+        this.suggestFor(last.id);
+      }
       // 'top'    : land at the start of the selected node (clicking to read it).
       // 'bottom' : jump to the end (e.g. after sending, to watch the answer).
       if (scrollMode === 'bottom') {
@@ -3040,9 +3076,12 @@ function chatable() {
       delete s2[key];
       this.streams = s2;
 
-      // Candidate next questions for this reply, in the background.
-      if (assistantId && this.config.auto_suggest && !gone && !errored) {
-        this.suggestFor(assistantId);
+      // Candidate next questions for this reply, in the background — once per
+      // completed reply, and never for a failed or empty one (st._sawError is
+      // a server-side error event; `errored` is a broken connection).
+      if (assistantId && this.config.auto_suggest && !gone && !errored && !st._sawError) {
+        const row = this.messages.find(m => m.id === assistantId);
+        if (!row || this.canSuggest(row)) this.suggestFor(assistantId);
       }
 
       if (errored) this.status = 'error: ' + errored;
@@ -3063,12 +3102,17 @@ function chatable() {
     },
 
     // Generate (or, with force, regenerate) the follow-up suggestions of an
-    // assistant reply. Automatic runs fail silently; manual ones say why.
+    // assistant reply. Automatic runs fire at most once per reply per session
+    // and fail silently into an inline retry chip; manual runs say why.
     async suggestFor(nodeId, {force = false, manual = false} = {}) {
       if (this.suggesting[nodeId]) return;
+      if (!manual && !force) {
+        if (this._suggestTried[nodeId]) return;
+        this._suggestTried[nodeId] = true;
+      }
       this.suggesting = {...this.suggesting, [nodeId]: true};
       this.refreshIcons();
-      let error = '';
+      let error = '', failed = false;
       try {
         const resp = await fetch('/api/suggest/' + encodeURIComponent(nodeId) + (force ? '?force=true' : ''),
                                  {method: 'POST'});
@@ -3077,16 +3121,25 @@ function chatable() {
           // The row may have been re-fetched meanwhile; update whichever is shown.
           const row = this.messages.find(m => m.id === nodeId);
           if (row) row.suggestions = data.suggestions;
+        } else if (data.error) {
+          error = data.error; failed = true;          // a real failure (LLM/HTTP): offer retry
         } else {
-          error = data.error || data.skipped || '';
+          error = data.skipped || '';                 // a legit skip (not a finished answer etc.)
         }
       } catch (e) {
-        error = e.message || String(e);
+        error = e.message || String(e); failed = true;
       } finally {
         const s = {...this.suggesting};
         delete s[nodeId];
         this.suggesting = s;
         this.refreshIcons();
+      }
+      if (failed) {
+        this.suggestFailed = {...this.suggestFailed, [nodeId]: true};
+      } else if (this.suggestFailed[nodeId]) {
+        const f = {...this.suggestFailed};
+        delete f[nodeId];
+        this.suggestFailed = f;
       }
       if (error && manual) toast('生成追问失败：' + error, 'error');
     },
@@ -3300,6 +3353,7 @@ function chatable() {
           break;
         case 'error':
           st._sawDone = true;
+          st._sawError = true;
           st.text += '\n\n[error: ' + evt.message + ']';
           break;
       }
