@@ -134,13 +134,18 @@ class BookmarkStore:
 
     def list(self) -> list[Bookmark]:
         """Return all bookmarks sorted by creation time (newest last)."""
-        return sorted(self._bookmarks.values(), key=lambda b: b.created_at)
+        with self._lock:
+            # Snapshot under the lock: enrichment runs on background threads,
+            # so the dict can change size while a request thread iterates it.
+            bookmarks = list(self._bookmarks.values())
+        return sorted(bookmarks, key=lambda b: b.created_at)
 
     def get(self, bid: str) -> Bookmark:
-        try:
-            return self._bookmarks[bid]
-        except KeyError as e:
-            raise BookmarkNotFoundError(bid) from e
+        with self._lock:
+            try:
+                return self._bookmarks[bid]
+            except KeyError as e:
+                raise BookmarkNotFoundError(bid) from e
 
     def add(self, bookmark: Bookmark) -> Bookmark:
         with self._lock:
@@ -171,8 +176,10 @@ class BookmarkStore:
     def search(self, query: str) -> list[Bookmark]:
         """Case-insensitive search across URL, title, and summary."""
         q = query.casefold()
+        with self._lock:
+            bookmarks = list(self._bookmarks.values())
         return [
-            bm for bm in self._bookmarks.values()
+            bm for bm in bookmarks
             if q in bm.url.casefold()
             or q in bm.title.casefold()
             or q in bm.summary.casefold()

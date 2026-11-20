@@ -354,15 +354,17 @@ class JsonlTreeStore:
     def get(self, nid: str) -> Node:
         if nid == ROOT_ID:
             return self._root()
-        try:
-            return self._copy(self._nodes[nid])
-        except KeyError as e:
-            raise NodeNotFoundError(nid) from e
+        with self._lock:
+            try:
+                return self._copy(self._nodes[nid])
+            except KeyError as e:
+                raise NodeNotFoundError(nid) from e
 
     def exists(self, nid: str) -> bool:
         if nid == ROOT_ID:
             return True
-        return nid in self._nodes
+        with self._lock:
+            return nid in self._nodes
 
     def _lookup(self, nid: str) -> Node:
         node = self._nodes.get(nid)
@@ -529,10 +531,9 @@ class JsonlTreeStore:
         return self.get(nid)
 
     def pinned_nodes(self) -> list[Node]:
-        return sorted(
-            [n for n in self._nodes.values() if n.pinned],
-            key=lambda n: n.created_at,
-        )
+        with self._lock:
+            pinned = [self._copy(n) for n in self._nodes.values() if n.pinned]
+        return sorted(pinned, key=lambda n: n.created_at)
 
     def path_to_root(self, nid: str) -> list[Node]:
         """Return root→nid order, EXCLUDING the synthetic ROOT node."""
@@ -545,7 +546,11 @@ class JsonlTreeStore:
         return out
 
     def all_nodes(self) -> list[Node]:
-        return sorted(self._nodes.values(), key=lambda n: n.created_at)
+        with self._lock:
+            # Copy under the lock: a generation thread may be appending/
+            # mutating nodes while a request thread iterates for the UI.
+            nodes = [self._copy(n) for n in self._nodes.values()]
+        return sorted(nodes, key=lambda n: n.created_at)
 
     def trunk_nodes(self, trunk_id: str) -> list[Node]:
         """Copies of every node in one conversation (trunk + all branches),
@@ -561,15 +566,16 @@ class JsonlTreeStore:
         return nodes
 
     def children_map(self) -> dict[str, list[str]]:
-        created: dict[str, float] = {nid: n.created_at for nid, n in self._nodes.items()}
-        m: dict[str, list[str]] = {}
-        for nid, node in self._nodes.items():
-            if node.parent_id is not None:
-                m.setdefault(node.parent_id, []).append(nid)
-        for k in m:
-            # Newest children first so the sidebar tree shows recent turns at the top.
-            m[k].sort(key=lambda i: created.get(i, 0), reverse=True)
-        return m
+        with self._lock:
+            created: dict[str, float] = {nid: n.created_at for nid, n in self._nodes.items()}
+            m: dict[str, list[str]] = {}
+            for nid, node in self._nodes.items():
+                if node.parent_id is not None:
+                    m.setdefault(node.parent_id, []).append(nid)
+            for k in m:
+                # Newest children first so the sidebar tree shows recent turns at the top.
+                m[k].sort(key=lambda i: created.get(i, 0), reverse=True)
+            return m
 
     def node_columns(self) -> set[str]:
         """Backwards-compat: all fields are always present."""
@@ -577,11 +583,13 @@ class JsonlTreeStore:
 
     def schema_info(self) -> dict:
         files = glob.glob(os.path.join(self.trees_dir, "*.jsonl"))
+        with self._lock:
+            node_count = len(self._nodes)
         return {
             "db_path": self.db_path,
             "trees_dir": self.trees_dir,
             "tree_files": len(files),
-            "nodes": len(self._nodes),
+            "nodes": node_count,
             "schema_version": 1,
             "expected_schema_version": 1,
             "columns": sorted(self.node_columns()),

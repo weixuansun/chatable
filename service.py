@@ -504,7 +504,13 @@ class ChatService:
             bookmark_service = BookmarkService(store=BookmarkStore(db_path=bm_path))
         self.bookmark_service = bookmark_service
         # Memoized base64 data URLs for image attachments, keyed by file path.
+        # Written by concurrent background turn threads — guard with a lock.
         self._img_data_urls: dict[str, str] = {}
+        self._img_data_urls_lock = threading.Lock()
+        # Serializes start_turn against rebind_store: the settings endpoint
+        # refuses to rebind while streams are active, but a turn could start
+        # in the gap between that check and the store swap.
+        self._rebind_lock = threading.Lock()
         # In-progress turns, so generation survives a client disconnect/refresh.
         self.live = _LiveTurns()
         # In-progress survey-report jobs, keyed by trunk id. Kept apart from
@@ -765,19 +771,24 @@ class ChatService:
         """
         if self.has_active_streams():
             raise RuntimeError("cannot switch storage while a reply is generating")
-        new_path = resolve_db_path(data_dir)
-        # No-op if it's already the active store.
-        if os.path.abspath(new_path) != os.path.abspath(self.store.db_path):
-            self.store = TreeStore(db_path=new_path)
-            from bookmark_store import BookmarkStore
-            bookmarks_path = resolve_bookmarks_path(
-                data_dir=os.path.dirname(os.path.abspath(new_path))
-            )
-            self.bookmark_service = BookmarkService(
-                store=BookmarkStore(db_path=bookmarks_path),
-                fetcher=self.bookmark_service.fetcher,
-                summarizer=self.bookmark_service.summarizer,
-            )
+        with self._rebind_lock:
+            # Re-check under the lock that start_turn also takes: a turn that
+            # slipped in since the check above would hold the old store.
+            if self.has_active_streams():
+                raise RuntimeError("cannot switch storage while a reply is generating")
+            new_path = resolve_db_path(data_dir)
+            # No-op if it's already the active store.
+            if os.path.abspath(new_path) != os.path.abspath(self.store.db_path):
+                self.store = TreeStore(db_path=new_path)
+                from bookmark_store import BookmarkStore
+                bookmarks_path = resolve_bookmarks_path(
+                    data_dir=os.path.dirname(os.path.abspath(new_path))
+                )
+                self.bookmark_service = BookmarkService(
+                    store=BookmarkStore(db_path=bookmarks_path),
+                    fetcher=self.bookmark_service.fetcher,
+                    summarizer=self.bookmark_service.summarizer,
+                )
         return {"ok": True, "db_path": self.store.db_path}
 
     def generate_title(self, node_id: str, force: bool = False) -> dict:
@@ -1614,16 +1625,18 @@ class ChatService:
 
     def _image_data_url(self, path: str, mime: str) -> str:
         """base64 data URL for an uploaded image, memoized per path."""
-        if path not in self._img_data_urls:
-            try:
-                with open(path, "rb") as f:
-                    data = f.read()
-            except OSError:
-                return ""
-            self._img_data_urls[path] = (
-                f"data:{mime};base64,{base64.b64encode(data).decode()}"
-            )
-        return self._img_data_urls[path]
+        with self._img_data_urls_lock:
+            if path in self._img_data_urls:
+                return self._img_data_urls[path]
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return ""
+        url = f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        with self._img_data_urls_lock:
+            self._img_data_urls[path] = url
+        return url
 
     # ------------------------------------------------------------------ #
     # The core: streamed send (generation runs in the background so a client
@@ -1641,33 +1654,37 @@ class ChatService:
         ``attachments`` (uploaded files, e.g. images) are persisted on the user
         node's metadata — only descriptors, the bytes live in the uploads dir.
         """
-        parent_id = parent_id or ROOT_ID
-        if not self.store.exists(parent_id):
-            parent_id = ROOT_ID
-        parent = self.store.get(parent_id)
+        # Under _rebind_lock: rebind_store refuses to swap the store while a
+        # stream is active, so turn creation must not straddle a swap either.
+        # (The lock is only held for node creation — never across generation.)
+        with self._rebind_lock:
+            parent_id = parent_id or ROOT_ID
+            if not self.store.exists(parent_id):
+                parent_id = ROOT_ID
+            parent = self.store.get(parent_id)
 
-        user_node = Node.new(role="user", content=content, parent_id=parent.id)
-        if attachments:
-            user_node.metadata = {
-                "attachments": [
-                    {k: a[k] for k in ("filename", "path", "mime") if a.get(k)}
-                    for a in attachments
-                ]
-            }
-        self.store.add(user_node)
+            user_node = Node.new(role="user", content=content, parent_id=parent.id)
+            if attachments:
+                user_node.metadata = {
+                    "attachments": [
+                        {k: a[k] for k in ("filename", "path", "mime") if a.get(k)}
+                        for a in attachments
+                    ]
+                }
+            self.store.add(user_node)
 
-        # Assistant node created up front so the UI has a stable, clickable id.
-        assistant_node = Node.new(role="assistant", content="", parent_id=user_node.id)
-        self.store.add(assistant_node)
+            # Assistant node created up front so the UI has a stable, clickable id.
+            assistant_node = Node.new(role="assistant", content="", parent_id=user_node.id)
+            self.store.add(assistant_node)
 
-        turn = self.live.create(assistant_node.id)
-        turn.append({"type": "user_node", "id": user_node.id, "parent_id": parent.id})
-        turn.append({"type": "assistant_node", "id": assistant_node.id, "parent_id": user_node.id})
+            turn = self.live.create(assistant_node.id)
+            turn.append({"type": "user_node", "id": user_node.id, "parent_id": parent.id})
+            turn.append({"type": "assistant_node", "id": assistant_node.id, "parent_id": user_node.id})
 
-        thread = threading.Thread(
-            target=self._run_turn, args=(turn, user_node, assistant_node), daemon=True,
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=self._run_turn, args=(turn, user_node, assistant_node), daemon=True,
+            )
+            thread.start()
 
         return {
             "user_id": user_node.id,

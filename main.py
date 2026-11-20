@@ -19,6 +19,7 @@ import json
 import hashlib
 import os
 import re
+import tempfile
 import threading
 import time
 from copy import deepcopy
@@ -171,6 +172,47 @@ def _load_persisted_config() -> dict:
         return {}
 
 
+# Serializes every settings.json read-modify-write (settings panel, effort
+# switch, background vision probe) so concurrent writers can't lose each
+# other's fields.
+_SETTINGS_LOCK = threading.Lock()
+
+
+def _write_settings_atomic(data: dict) -> None:
+    """Atomically write ``data`` to SETTINGS_PATH (0600 — it holds the API key).
+
+    Temp file in the same directory + flush/fsync + os.replace, so a crash
+    mid-write never leaves a torn settings.json behind. Best-effort: a write
+    failure never breaks the running process.
+    """
+    directory = os.path.dirname(SETTINGS_PATH)
+    tmp = ""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # mkstemp already creates the file 0600; os.replace keeps that mode.
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".settings.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SETTINGS_PATH)
+    except OSError:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _update_settings(mutate) -> None:
+    """The ONE way settings.json is written: read-modify-write under a lock,
+    persisted atomically. ``mutate`` edits the loaded dict in place."""
+    with _SETTINGS_LOCK:
+        data = _load_persisted_config()
+        mutate(data)
+        _write_settings_atomic(data)
+
+
 def persist_config(data_dir: str = "") -> None:
     """Write the live config to SETTINGS_PATH.
 
@@ -179,32 +221,15 @@ def persist_config(data_dir: str = "") -> None:
     storage folder, and a folder-only save keeps the model fields.
     Best-effort: a write failure never breaks the running process.
     """
-    data = _load_persisted_config()
-    data.update({
-        "base_url": OPENAI_BASE_URL,
-        "api_key": OPENAI_API_KEY,
-        "model": OPENAI_MODEL,
-    })
-    if data_dir:
-        data["data_dir"] = data_dir
-    try:
-        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        fd = os.open(SETTINGS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except OSError:
-        pass
-
-
-def _save_persisted_config(data: dict) -> None:
-    """Write ``data`` to SETTINGS_PATH (0600 — it holds the API key). Best-effort."""
-    try:
-        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        fd = os.open(SETTINGS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except OSError:
-        pass
+    def _merge(data: dict) -> None:
+        data.update({
+            "base_url": OPENAI_BASE_URL,
+            "api_key": OPENAI_API_KEY,
+            "model": OPENAI_MODEL,
+        })
+        if data_dir:
+            data["data_dir"] = data_dir
+    _update_settings(_merge)
 
 
 # ---- reasoning effort (composer control) -------------------------------------
@@ -235,9 +260,7 @@ def set_reasoning_effort(level: str) -> str:
     if level not in EFFORT_LEVELS:
         raise ConfigError(f"effort must be one of {', '.join(EFFORT_LEVELS)}")
     _apply_effort(level)
-    data = _load_persisted_config()
-    data["reasoning_effort"] = level
-    _save_persisted_config(data)
+    _update_settings(lambda data: data.__setitem__("reasoning_effort", level))
     return level
 
 
@@ -274,19 +297,13 @@ def _vision_cache_key() -> str:
 
 def _persist_vision_flag() -> None:
     """Record the probe outcome in settings.json (merged, best-effort)."""
-    try:
-        data = _load_persisted_config()
+    def _merge(data: dict) -> None:
         vs = data.get("vision_support")
         if not isinstance(vs, dict):
             vs = {}
         vs[_vision_cache_key()] = VISION_SUPPORTED
         data["vision_support"] = vs
-        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
-        fd = os.open(SETTINGS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except OSError:
-        pass
+    _update_settings(_merge)
 
 
 def probe_vision_support() -> Optional[bool]:
