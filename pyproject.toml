@@ -19,14 +19,25 @@ classifiers = [
   "Topic :: Communications :: Chat",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Single source of truth for dependencies. requirements.txt is only a shim
+# pointing here (`-e .`); do not add pins there.
 dependencies = [
   "httpx>=0.27",
   "requests>=2.28",
   "openai>=1.0",
   "PyPDF2>=3.0",
+  "pymupdf>=1.24",
   "fastapi>=0.110",
   "uvicorn>=0.29",
   "python-multipart>=0.0.9",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# Test suite: pip install -e ".[dev]" && pytest
+# (httpx is already a runtime dependency; TestClient builds on it.)
+dev = [
+  "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -37,4 +48,8 @@ Homepage = "https://github.com/weixuansun/chatable"
 Repository = "https://github.com/weixuansun/chatable"
 
 [tool.setuptools]
-py-modules = ["bookmark_store", "bookmark_service", "jsonl_store", "main", "models", "report_store", "store", "tools", "web_tools", "service", "server"]
+py-modules = ["bookmark_store", "bookmark_service", "jsonl_store", "main", "models", "report_store", "sqlite_to_jsonl", "store", "tools", "web_tools", "service", "server"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

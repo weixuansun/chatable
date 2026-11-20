@@ -54,10 +54,18 @@ alongside your data and can be copied or downloaded as Markdown.
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python 3.10+. Dependencies are declared in `pyproject.toml`
+(`requirements.txt` is just a `-e .` shim over it).
 
 ```bash
 pip install -e .
+```
+
+For development (runs the test suite from the repo root):
+
+```bash
+pip install -e ".[dev]"
+pytest
 ```
 
 
@@ -79,6 +87,20 @@ point.
 `DEEPSEEK_MODEL`, `CHATTABLE_WEB_HOST` / `CHATTABLE_WEB_PORT` (bind address),
 and more — the in-app settings panel covers model, base URL, API key, and
 storage folder.
+
+### Exposing the server (optional)
+
+By default the server only accepts requests whose `Host` header is localhost,
+`127.0.0.1` or `[::1]` (plus the bind host), and rejects cross-origin
+writes — so other devices and web pages you visit cannot reach your chats.
+If you deliberately serve beyond localhost:
+
+- `CHATABLE_ALLOWED_HOSTS` — comma-separated extra hostnames to accept
+  (e.g. `CHATABLE_ALLOWED_HOSTS=chat.lan,myhost`).
+- `CHATABLE_AUTH_TOKEN` — require this token for every request. Open
+  `http://<host>:<port>/?token=<token>` once to set the login cookie;
+  scripts can use `Authorization: Bearer <token>`.
+  Binding to a non-loopback address without a token prints a loud warning.
 
 ### Web search (optional)
 
