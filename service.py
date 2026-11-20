@@ -19,6 +19,12 @@ Event shapes yielded by ``send_stream`` (each is a plain dict):
   {"type": "delta",          "text"}
   {"type": "error",          "message"}
   {"type": "done",           "id", "usage", "stats", "elapsed"}
+
+Agent-mode turns additionally emit:
+  {"type": "step_start",        "id", "parent_id", "tool", "args", "args_summary"}
+  {"type": "step_done",         "id", "status", "tool", "ok", "duration_ms", "ws_commit"}
+  {"type": "approval_required", "step_id", "tool", "args", "preview_diff"}
+  {"type": "approval_resolved", "step_id", "decision"}
 """
 from __future__ import annotations
 
@@ -38,12 +44,20 @@ import main
 import report_store
 from main import build_context, call_backend, extract_text, extract_tool_calls, extract_usage, stream_backend
 from models import Node
-from store import ROOT_ID, TreeStore, resolve_db_path
+from store import ROOT_ID, NodeNotFoundError, TreeStore, resolve_db_path
 from tools import TOOL_REGISTRY, ToolResult
 
 from bookmark_service import BookmarkService
 from bookmark_store import resolve_bookmarks_path
 from web_tools import local_path_allowed, register_local_read_root
+from agent_tools import MUTATING_TOOLS, WRITE_TOOLS, build_agent_registry, preview_change
+from workspace import (
+    ShadowGit,
+    Workspace,
+    WorkspaceError,
+    default_shadow_git_dir,
+    default_workspace_path,
+)
 
 
 # Mirror the CLI configuration so behaviour matches across front-ends.
@@ -74,6 +88,65 @@ def _is_transient_stream_error(e: Exception) -> bool:
 # folded system text) so the next turn's request shares a byte-identical prefix
 # with the previous turn's — the whole investigation stays cache-hittable.
 NATIVE_TOOL_HISTORY = os.environ.get("CHATTABLE_NATIVE_TOOL_HISTORY", "1").lower() not in ("0", "false", "no")
+
+# Agent mode (off by default; per-send `agent` flag or per-conversation
+# "agent_mode" metadata). Agent turns get their own tool set (workspace file
+# tools + shell), higher limits, no call dedupe, per-call step nodes and
+# shadow-git workspace snapshots.
+AGENT_MAX_ROUNDS = int(os.environ.get("CHATTABLE_AGENT_MAX_ROUNDS", "25"))
+AGENT_MAX_CALLS_PER_ROUND = int(os.environ.get("CHATTABLE_AGENT_MAX_CALLS_PER_ROUND", "8"))
+AGENT_APPROVAL_TIMEOUT_S = float(os.environ.get("CHATTABLE_AGENT_APPROVAL_TIMEOUT_S", "600"))
+
+
+def _agent_auth_token() -> str:
+    """The token that gates agent mode (read dynamically so tests/UI can toggle)."""
+    return (os.environ.get("CHATTABLE_AUTH_TOKEN")
+            or os.environ.get("CHATABLE_AUTH_TOKEN") or "").strip()
+
+
+def agent_available() -> bool:
+    """Agent mode is only offered when the server is token-protected: the
+    agent's shell/write tools would otherwise be a local RCE channel for any
+    process that can reach the (loopback-exempt) port."""
+    return bool(_agent_auth_token())
+
+
+AGENT_TOKEN_MESSAGE = "Agent mode requires CHATTABLE_AUTH_TOKEN to be set"
+
+
+def _agent_auto_approve() -> set[str]:
+    """CHATTABLE_AGENT_AUTO_APPROVE tokens: "writes", "shell", "all"."""
+    raw = os.environ.get("CHATTABLE_AGENT_AUTO_APPROVE", "")
+    return {t.strip().lower() for t in raw.split(",") if t.strip()}
+
+
+def _agent_system_prompt(ws: "Workspace") -> str:
+    return (
+        "Agent mode is ON for this conversation. You are working autonomously "
+        "on the user's task inside a dedicated workspace directory; all tool "
+        f"paths are relative to the workspace root ({ws.root}). Use the "
+        "list_dir/read_file/grep tools to inspect, write_file/edit_file to "
+        "change files, and run_shell to run commands or tests. Mutating tools "
+        "may require user approval — if a call is denied, do not retry the "
+        "same call unchanged; adapt your plan or explain the blocker. Prefer "
+        "small verifiable steps: read before editing, run tests after changes. "
+        "When the task is complete, give a concise summary of what you did."
+    )
+
+
+def _args_summary(name: str, args: dict) -> str:
+    """One-line, human-readable summary of a tool call for step nodes/UI."""
+    path = args.get("path")
+    if name == "run_shell":
+        text = f"$ {args.get('command', '')}"
+    elif path is not None:
+        text = f"{name} {path}"
+    elif name == "grep":
+        text = f"grep {args.get('pattern', '')!r}"
+    else:
+        text = f"{name} {json.dumps(args, ensure_ascii=False, sort_keys=True)}"
+    text = " ".join(str(text).split())
+    return text[:120] + ("…" if len(text) > 120 else "")
 
 
 def _canon_assistant_tool_msg(content: str, raw_calls: list[dict], reasoning: str = "") -> dict:
@@ -522,6 +595,14 @@ class ChatService:
         # Serializes starting a job, saving its report, and deleting the
         # conversation it belongs to.
         self._report_lock = threading.Lock()
+        # Agent mode: pending approval waits keyed by step node id, and the
+        # session-scoped "always allow this tool" set.
+        self._approvals: dict[str, dict] = {}
+        self._approvals_lock = threading.Lock()
+        self._always_approve: set[str] = set()
+        # Workspace + shadow git are cached per data dir (rebind resets them).
+        self._ws_cache: dict[str, Workspace] = {}
+        self._shadow_cache: dict[tuple[str, str], ShadowGit] = {}
 
     # ------------------------------------------------------------------ #
     # Uploads (browser drag-and-drop → server-side file the tools can read)
@@ -541,6 +622,149 @@ class ChatService:
         path = os.path.join(base, "uploads")
         os.makedirs(path, exist_ok=True)
         return path
+
+    # ------------------------------------------------------------------ #
+    # Agent mode: workspace, shadow git, approvals
+    # ------------------------------------------------------------------ #
+
+    def data_dir(self) -> str:
+        return os.path.dirname(os.path.abspath(self.store.db_path))
+
+    def workspace(self) -> Workspace:
+        """The agent workspace: CHATTABLE_WORKSPACE, else <data_dir>/workspace."""
+        path = os.environ.get("CHATTABLE_WORKSPACE", "").strip()
+        if not path:
+            path = default_workspace_path(self.data_dir())
+        root = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+        ws = self._ws_cache.get(root)
+        if ws is None:
+            ws = Workspace(root)
+            self._ws_cache[root] = ws
+        return ws
+
+    def shadow_git(self) -> ShadowGit:
+        """The shadow snapshot repo for the current workspace."""
+        ws = self.workspace()
+        key = (ws.root, default_shadow_git_dir(self.data_dir()))
+        shadow = self._shadow_cache.get(key)
+        if shadow is None:
+            shadow = ShadowGit(ws, key[1])
+            self._shadow_cache[key] = shadow
+        return shadow
+
+    def agent_status(self) -> dict:
+        ok = agent_available()
+        return {
+            "available": ok,
+            "reason": "" if ok else AGENT_TOKEN_MESSAGE,
+            "workspace": self.workspace().root,
+            "auto_approve": sorted(_agent_auto_approve()),
+            "git": self.shadow_git().available,
+        }
+
+    def set_agent_mode(self, node_id: str, enabled: bool) -> dict:
+        """Toggle agent mode for the conversation owning *node_id*."""
+        if enabled and not agent_available():
+            raise ValueError(AGENT_TOKEN_MESSAGE)
+        if node_id == ROOT_ID:
+            raise ValueError("send a message first, then toggle agent mode on the conversation")
+        path = self.store.path_to_root(node_id)  # raises NodeNotFoundError
+        trunk = path[0]
+        self.store.update_metadata(trunk.id, {"agent_mode": bool(enabled)})
+        return {"ok": True, "trunk_id": trunk.id, "agent_mode": bool(enabled)}
+
+    def _conversation_agent_mode(self, parent_id: str) -> bool:
+        """True when the conversation owning *parent_id* has agent mode on."""
+        if parent_id == ROOT_ID:
+            return False
+        try:
+            path = self.store.path_to_root(parent_id)
+        except NodeNotFoundError:
+            return False
+        if not path:
+            return False
+        md = path[0].metadata
+        return bool(isinstance(md, dict) and md.get("agent_mode"))
+
+    def _needs_approval(self, name: str) -> bool:
+        if name in self._always_approve:
+            return False
+        auto = _agent_auto_approve()
+        if "all" in auto:
+            return False
+        if "writes" in auto and name in WRITE_TOOLS:
+            return False
+        if "shell" in auto and name == "run_shell":
+            return False
+        return True
+
+    def _register_approval(self, step_id: str) -> dict:
+        ap = {"event": threading.Event(), "decision": None, "always": False}
+        with self._approvals_lock:
+            self._approvals[step_id] = ap
+        return ap
+
+    def _wait_approval(self, step_id: str, ap: dict, turn: "_LiveTurn") -> str:
+        """Block the turn thread until the user decides (or timeout/stop)."""
+        deadline = time.monotonic() + AGENT_APPROVAL_TIMEOUT_S
+        try:
+            while True:
+                if ap["event"].wait(timeout=0.5):
+                    break
+                if turn.stop_requested or time.monotonic() >= deadline:
+                    ap["decision"] = "deny"
+                    break
+            return ap["decision"] or "deny"
+        finally:
+            with self._approvals_lock:
+                self._approvals.pop(step_id, None)
+
+    def resolve_approval(self, step_id: str, decision: str, always: bool = False) -> bool:
+        """Unblock a pending approval wait. False when the step isn't waiting."""
+        with self._approvals_lock:
+            ap = self._approvals.get(step_id)
+            if ap is None:
+                return False
+            ap["decision"] = "approve" if decision == "approve" else "deny"
+            ap["always"] = bool(always)
+            ap["event"].set()
+            return True
+
+    def nearest_ws_commit(self, node_id: str) -> Optional[str]:
+        """The closest ws_commit at or above *node_id* (the node's file state)."""
+        if node_id == ROOT_ID or not self.store.exists(node_id):
+            return None
+        for n in reversed(self.store.path_to_root(node_id)):
+            md = n.metadata if isinstance(n.metadata, dict) else {}
+            if md.get("ws_commit"):
+                return str(md["ws_commit"])
+        return None
+
+    def restore_workspace(self, node_id: str) -> dict:
+        """Reset the workspace to the snapshot of the node nearest *node_id*."""
+        if node_id == ROOT_ID:
+            return {"ok": False, "restored": False, "reason": "root has no snapshot"}
+        if not self.store.exists(node_id):
+            raise NodeNotFoundError(node_id)
+        commit = self.nearest_ws_commit(node_id)
+        if not commit:
+            return {"ok": False, "restored": False,
+                    "reason": "no workspace snapshot on this node's path"}
+        self.shadow_git().restore(commit)
+        return {"ok": True, "restored": True, "commit": commit, "node_id": node_id}
+
+    def step_diff(self, step_id: str) -> dict:
+        """The diff a step produced: its stored edit diff, else its snapshot diff."""
+        node = self.store.get(step_id)  # raises NodeNotFoundError
+        md = node.metadata if isinstance(node.metadata, dict) else {}
+        diff = md.get("diff") or ""
+        if not diff and md.get("ws_commit"):
+            diff = self.shadow_git().diff(
+                str(md["ws_commit"]),
+                str(md["ws_parent_commit"]) if md.get("ws_parent_commit") else None,
+            )
+        return {"id": step_id, "tool": md.get("tool"), "status": md.get("status"),
+                "ws_commit": md.get("ws_commit"), "diff": diff}
 
     def save_upload(self, filename: str, data: bytes) -> dict:
         """Persist an uploaded file and return a descriptor the UI can reference.
@@ -692,6 +916,7 @@ class ChatService:
             "llm": main.current_config(),
             "active_streams": len(self.live.active_ids()),
             "bookmarks_count": len(self.bookmark_service.list_bookmarks()),
+            "agent": self.agent_status(),
         }
 
     def has_active_streams(self) -> bool:
@@ -1670,7 +1895,8 @@ class ChatService:
     # ------------------------------------------------------------------ #
 
     def start_turn(self, content: str, parent_id: Optional[str] = None,
-                   attachments: Optional[list[dict]] = None) -> dict:
+                   attachments: Optional[list[dict]] = None,
+                   agent: bool = False) -> dict:
         """Create the user+assistant nodes and start generating in the background.
 
         Returns immediately with the new node ids. Generation proceeds in a
@@ -1679,6 +1905,12 @@ class ChatService:
         connection, refreshing or closing the tab does not stop the reply.
         ``attachments`` (uploaded files, e.g. images) are persisted on the user
         node's metadata — only descriptors, the bytes live in the uploads dir.
+
+        With ``agent=True`` (or the conversation's agent_mode metadata set) the
+        turn runs the agent loop instead; agent mode requires
+        CHATTABLE_AUTH_TOKEN and raises ValueError otherwise. Sending from a
+        node in agent mode first restores the workspace to that node's nearest
+        snapshot, so the files match the branch the user is continuing.
         """
         # Under _rebind_lock: rebind_store refuses to swap the store while a
         # stream is active, so turn creation must not straddle a swap either.
@@ -1687,9 +1919,19 @@ class ChatService:
             parent_id = parent_id or ROOT_ID
             if not self.store.exists(parent_id):
                 parent_id = ROOT_ID
+            agent_mode = bool(agent) or self._conversation_agent_mode(parent_id)
+            if agent_mode:
+                if not agent_available():
+                    raise ValueError(AGENT_TOKEN_MESSAGE)
+                # Restore-on-checkout: the workspace follows the fork point.
+                commit = self.nearest_ws_commit(parent_id)
+                if commit:
+                    self.shadow_git().restore(commit)
             parent = self.store.get(parent_id)
 
             user_node = Node.new(role="user", content=content, parent_id=parent.id)
+            if agent_mode:
+                user_node.metadata = {**(user_node.metadata or {}), "agent": True}
             if attachments:
                 # Attachment descriptors come from the client, so their paths
                 # are untrusted: only files the server itself accepted (the
@@ -1714,7 +1956,8 @@ class ChatService:
             turn.append({"type": "assistant_node", "id": assistant_node.id, "parent_id": user_node.id})
 
             thread = threading.Thread(
-                target=self._run_turn, args=(turn, user_node, assistant_node), daemon=True,
+                target=self._run_turn, args=(turn, user_node, assistant_node, agent_mode),
+                daemon=True,
             )
             thread.start()
 
@@ -1722,6 +1965,7 @@ class ChatService:
             "user_id": user_node.id,
             "assistant_id": assistant_node.id,
             "parent_id": parent.id,
+            "agent": agent_mode,
         }
 
     def subscribe(self, assistant_id: str, from_index: int = 0) -> Optional[Iterator[dict]]:
@@ -1755,10 +1999,11 @@ class ChatService:
         if sub is not None:
             yield from sub
 
-    def _run_turn(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node) -> None:
+    def _run_turn(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
+                  agent: bool = False) -> None:
         """Background generation body: push events into ``turn`` until done."""
         try:
-            self._generate(turn, user_node, assistant_node)
+            self._generate(turn, user_node, assistant_node, agent)
         except Exception as e:  # noqa: BLE001 - last-resort guard for the thread
             turn.append({"type": "error", "message": f"{type(e).__name__}: {e}", "id": assistant_node.id})
         finally:
@@ -1773,10 +2018,261 @@ class ChatService:
             timer.daemon = True
             timer.start()
 
-    def _generate(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node) -> None:
+    def _generate(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
+                  agent: bool = False) -> None:
+        if agent:
+            return self._generate_agent(turn, user_node, assistant_node)
         if TOOL_DECISION_MODE in ("native", "openai"):
             return self._generate_unified(turn, user_node, assistant_node)
         return self._generate_legacy(turn, user_node, assistant_node)
+
+    # ------------------------------------------------------------------ #
+    # Agent mode: workspace tools, step nodes, approvals, snapshots
+    # ------------------------------------------------------------------ #
+
+    def _run_agent_step(self, turn: "_LiveTurn", registry, ws: Workspace,
+                        shadow: ShadowGit, call: dict, assistant_id: str,
+                        state: dict) -> ToolResult:
+        """Execute one agent tool call, persisting a step node as it happens.
+
+        The step node is chained under the previous step (or the assistant
+        node for the first call), so the trajectory is a path in the tree.
+        Write/shell calls go through approval unless policy auto-approves
+        them, and snapshot the workspace (recording ws_commit) on success.
+        """
+        emit = turn.append
+        name = call["name"]
+        args = call.get("arguments") or {}
+        summary = _args_summary(name, args)
+        step = Node.new(role="step", content=summary,
+                        parent_id=state["last_step_id"] or assistant_id)
+        step.metadata = {
+            "step": True,
+            "tool": name,
+            "name": name,
+            "call_id": call["_cid"],
+            "args": args,
+            "args_summary": summary,
+            "status": "running",
+        }
+        self.store.add(step)
+        state["last_step_id"] = step.id
+        emit({"type": "step_start", "id": step.id, "parent_id": step.parent_id,
+              "tool": name, "args": args, "args_summary": summary})
+
+        try:
+            spec = registry.get(name)
+        except ValueError:
+            spec = None  # unknown tool: registry.run reports the error, no approval
+        mutating = name in MUTATING_TOOLS
+
+        if spec is not None and not spec.read_only and self._needs_approval(name):
+            preview = preview_change(ws, name, args) if name in WRITE_TOOLS else ""
+            self.store.update_metadata(step.id, {"status": "pending_approval"})
+            ap = self._register_approval(step.id)
+            emit({"type": "approval_required", "step_id": step.id, "tool": name,
+                  "args": args, "preview_diff": preview})
+            decision = self._wait_approval(step.id, ap, turn)
+            emit({"type": "approval_resolved", "step_id": step.id, "decision": decision})
+            if decision != "approve":
+                output = ("[tool call denied by the user; do not retry the same "
+                          "call — adapt your plan or explain the blocker]")
+                self.store.update_metadata(step.id, {"status": "denied", "result": output})
+                emit({"type": "step_done", "id": step.id, "status": "denied", "tool": name})
+                return ToolResult(call_id=call["_cid"], name=name, arguments=args,
+                                  ok=False, output=output, error="denied by user")
+            if ap["always"]:
+                self._always_approve.add(name)
+
+        # Snapshot the pre-turn workspace state before the first mutation, so
+        # "undo the whole turn" is possible and the first step has a parent.
+        if mutating and not state["base_taken"]:
+            state["base_taken"] = True
+            state["last_commit"] = shadow.snapshot(
+                f"workspace before agent turn {assistant_id}", allow_empty=True)
+        parent_commit = state["last_commit"] if mutating else None
+
+        emit({"type": "tool_call", "name": name, "arguments": args})
+        result = registry.run(name, args)
+
+        status = "ok" if result.ok else "error"
+        update: dict = {"status": status, "result": result.output[:4000]}
+        if result.error:
+            update["error"] = result.error
+        diff = (result.metadata or {}).get("diff")
+        if diff:
+            update["diff"] = diff
+        if mutating and result.ok:
+            commit = shadow.snapshot(f"agent step: {summary}")
+            if commit:
+                update["ws_commit"] = commit
+                if parent_commit:
+                    update["ws_parent_commit"] = parent_commit
+                state["last_commit"] = commit
+        self.store.update_metadata(step.id, update)
+        emit({"type": "step_done", "id": step.id, "status": status, "tool": name,
+              "ok": result.ok, "duration_ms": result.duration_ms,
+              "ws_commit": update.get("ws_commit")})
+        emit({"type": "tool_result", "name": name, "arguments": args,
+              "ok": result.ok, "error": result.error,
+              "duration_ms": result.duration_ms, "output": result.output})
+        return result
+
+    def _generate_agent(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node) -> None:
+        """Agent-mode tool loop.
+
+        Same streaming shape as ``_generate_unified``, but with the workspace
+        tool set, higher limits (AGENT_MAX_ROUNDS rounds / per-round call
+        cap), no cross-round call dedupe (re-reading a file after editing it
+        is legitimate), and a persisted step node per executed call.
+        """
+        emit = turn.append
+        ws = self.workspace()
+        shadow = self.shadow_git()
+        registry = build_agent_registry(ws)
+        tool_results: list[dict] = []
+        context = self._live_context(user_node.id, tool_results)
+        loop_messages = list(context["messages"])
+        # Agent instructions right after the base system prompt.
+        loop_messages.insert(1, {"role": "system", "content": _agent_system_prompt(ws)})
+
+        emit({
+            "type": "assistant_start",
+            "id": assistant_node.id,
+            "context": {
+                "messages": len(loop_messages),
+                "estimated_tokens": context["estimated_tokens"],
+                "pinned": len(context["pinned_nodes"]),
+                "shortened": len(context["omitted_nodes"]),
+                "prefix": context["cache"]["prefix_before_latest_user_hash"][:10],
+            },
+            "agent": True,
+            "workspace": ws.root,
+        })
+
+        usage: dict = {}
+        reasoning_parts: list[str] = []
+        segments: list[str] = []
+        replay: list[dict] = []
+        nudged = False
+        round_no = 0
+        t0 = time.monotonic()
+        state = {"last_step_id": None, "last_commit": None, "base_taken": False}
+
+        while True:
+            if turn.stop_requested:
+                break
+            allow_tools = not nudged and round_no < AGENT_MAX_ROUNDS
+            tools = registry.openai_tools() if allow_tools else None
+
+            # One stream iteration, with a single retry on transient upstream
+            # failures (same contract as the research loop).
+            text_parts: list[str] = []
+            iter_calls: list[dict] = []
+            iter_reasoning: list[str] = []
+            for attempt in (1, 2):
+                text_parts = []
+                iter_calls = []
+                iter_reasoning = []
+                stripper = _ToolCallStripper()  # suppress hallucinated tool-call XML
+                if attempt > 1:
+                    emit({"type": "reset", "reason": "upstream stream truncated; regenerating"})
+                try:
+                    for kind, payload in stream_backend(loop_messages, tools=tools):
+                        if turn.stop_requested:
+                            break
+                        if kind == "done":
+                            for k, v in (payload or {}).items():
+                                if isinstance(v, (int, float)):
+                                    usage[k] = usage.get(k, 0) + v
+                            break
+                        if kind == "reasoning":
+                            reasoning_parts.append(payload)
+                            iter_reasoning.append(payload)
+                            emit({"type": "reasoning", "text": payload})
+                        elif kind == "delta":
+                            text_parts.append(payload)
+                            safe = stripper.feed(payload)
+                            if safe:
+                                emit({"type": "delta", "text": safe})
+                        elif kind == "tool_calls":
+                            iter_calls = payload
+                    tail = stripper.flush()
+                    if tail:
+                        emit({"type": "delta", "text": tail})
+                    break
+                except Exception as e:  # noqa: BLE001 - surface stream failures on the node
+                    if _is_transient_stream_error(e) and attempt == 1:
+                        continue
+                    err = f"{type(e).__name__}: {e}"
+                    self.store.append_content(assistant_node.id, f"[error: {err}]")
+                    emit({"type": "error", "message": err, "id": assistant_node.id})
+                    return
+
+            iter_text = "".join(text_parts)
+            if _scrub_answer_text(iter_text).strip():
+                segments.append(iter_text)
+
+            # Agent mode: no dedupe (re-running the same call after a change
+            # is legitimate); only the per-round cap applies.
+            fresh: list[dict] = list(iter_calls)[:AGENT_MAX_CALLS_PER_ROUND]
+
+            if not fresh or turn.stop_requested:
+                joined = _scrub_answer_text("\n\n".join(segments))
+                if turn.stop_requested or joined.strip() or nudged:
+                    break
+                nudged = True
+                if iter_text.strip():
+                    loop_messages.append({"role": "assistant", "content": iter_text})
+                loop_messages.append({"role": "user", "content": _NO_TOOL_NUDGE})
+                continue
+
+            raw_calls = []
+            for i, call in enumerate(fresh):
+                cid = call["id"] or f"call_{round_no}_{i}"
+                call["_cid"] = cid
+                raw_calls.append(_canon_raw_call(cid, call["name"], call["arguments"]))
+            assistant_msg = _canon_assistant_tool_msg(iter_text, raw_calls,
+                                                      "".join(iter_reasoning))
+            loop_messages.append(assistant_msg)
+            replay.append(assistant_msg)
+
+            answered: set[str] = set()
+            for call in fresh:
+                if turn.stop_requested:
+                    break
+                result = self._run_agent_step(
+                    turn, registry, ws, shadow, call, assistant_node.id, state)
+                record = self._tool_record(call, result)
+                tool_results.append(record)
+                tool_msg = _canon_tool_result_msg(call["_cid"], record["output"])
+                loop_messages.append(tool_msg)
+                replay.append(tool_msg)
+                answered.add(call["_cid"])
+
+            # Answer any unexecuted call ids with a stub (see the research
+            # loop for why dangling ids poison the persisted replay).
+            for call in fresh:
+                if call["_cid"] in answered:
+                    continue
+                stub = _canon_tool_result_msg(call["_cid"], _UNEXECUTED_TOOL_OUTPUT)
+                loop_messages.append(stub)
+                replay.append(stub)
+
+            round_no += 1
+
+        full_text = _scrub_answer_text("\n\n".join(segments))
+        # The turn's final file state lives on its last step; mirror it onto
+        # the assistant node so "restore to this reply" resolves correctly.
+        extra = {"agent": True}
+        if state["last_commit"]:
+            extra["ws_commit"] = state["last_commit"]
+        self._finalize_turn(
+            turn, user_node, assistant_node,
+            context=context, full_text=full_text, usage=usage,
+            reasoning="".join(reasoning_parts), tool_results=tool_results,
+            tool_messages=replay, t0=t0, extra_metadata=extra,
+        )
 
     def _generate_unified(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node) -> None:
         """Single streaming tool-use loop.
@@ -1994,6 +2490,7 @@ class ChatService:
         reasoning: str,
         tool_results: list[dict],
         tool_messages: Optional[list[dict]] = None,
+        extra_metadata: Optional[dict] = None,
         t0: float,
     ) -> None:
         """Persist the assistant node and emit the closing ``done`` event."""
@@ -2018,6 +2515,8 @@ class ChatService:
         if tool_messages:
             # Native tool exchange for byte-identical replay on later turns.
             metadata["tool_messages"] = tool_messages
+        if extra_metadata:
+            metadata.update(extra_metadata)
         # One locked write appending a single line (was 3 separate flushes).
         self.store.finalize_node(assistant_node.id, full_text, usage, metadata)
 

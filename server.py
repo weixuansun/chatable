@@ -44,6 +44,7 @@ import main as llm
 from service import ChatService
 from store import NodeNotFoundError, resolve_db_path, TreeStore
 from bookmark_store import BookmarkStore, resolve_bookmarks_path, BookmarkNotFoundError
+from workspace import WorkspaceError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
@@ -235,6 +236,24 @@ class SendBody(BaseModel):
     parent_id: Optional[str] = None
     # Uploaded attachment descriptors (filename/path/mime), images included.
     attachments: Optional[list[dict]] = None
+    # Run this turn in agent mode (workspace file/shell tools). Requires
+    # CHATTABLE_AUTH_TOKEN; also enabled per conversation via /api/agent/mode.
+    agent: bool = False
+
+
+class AgentModeBody(BaseModel):
+    node_id: str
+    enabled: bool
+
+
+class ApproveBody(BaseModel):
+    step_id: str
+    decision: str  # "approve" | "deny"
+    always: bool = False
+
+
+class RestoreBody(BaseModel):
+    node_id: str
 
 
 class SettingsBody(BaseModel):
@@ -546,7 +565,11 @@ def api_send(body: SendBody) -> StreamingResponse:
     content = (body.content or "").strip()
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
-    info = service.start_turn(content, body.parent_id, attachments=body.attachments)
+    try:
+        info = service.start_turn(content, body.parent_id,
+                                  attachments=body.attachments, agent=body.agent)
+    except ValueError as e:  # agent mode requested without CHATTABLE_AUTH_TOKEN
+        raise HTTPException(status_code=400, detail=str(e))
     sub = service.subscribe(info["assistant_id"], 0)
     # `sub` is None only if the turn was reaped before we subscribed (not
     # possible here since we just created it), but guard anyway.
@@ -578,6 +601,75 @@ def api_active() -> dict:
 def api_stop(assistant_id: str) -> dict:
     """Request that an in-progress turn stop generating."""
     return {"ok": service.request_stop(assistant_id)}
+
+
+# ---------------------------------------------------------------------------
+# Agent mode (workspace tools, approvals, workspace snapshots)
+# ---------------------------------------------------------------------------
+
+def _require_agent() -> None:
+    """Agent endpoints are dead without the token that makes agent mode safe."""
+    if not _auth_token():
+        raise HTTPException(
+            status_code=403,
+            detail="Agent mode requires CHATTABLE_AUTH_TOKEN to be set")
+
+
+@app.get("/api/agent/status")
+def api_agent_status() -> dict:
+    """Whether agent mode can be used, and where its workspace lives."""
+    return service.agent_status()
+
+
+@app.post("/api/agent/mode")
+def api_agent_mode(body: AgentModeBody) -> dict:
+    """Toggle agent mode for the conversation owning ``node_id`` (stored on
+    the conversation's root node metadata, so it survives reloads)."""
+    try:
+        return service.set_agent_mode(body.node_id, body.enabled)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {body.node_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/agent/approve")
+def api_agent_approve(body: ApproveBody) -> dict:
+    """Approve or deny a tool call whose step node is pending approval."""
+    _require_agent()
+    if body.decision not in ("approve", "deny"):
+        raise HTTPException(status_code=400, detail="decision must be 'approve' or 'deny'")
+    if not service.resolve_approval(body.step_id, body.decision, always=body.always):
+        raise HTTPException(status_code=404,
+                            detail=f"no pending approval for step: {body.step_id}")
+    return {"ok": True}
+
+
+@app.post("/api/agent/restore")
+def api_agent_restore(body: RestoreBody) -> dict:
+    """Reset the workspace to the snapshot nearest ``node_id``.
+
+    Files that did not exist in that snapshot are deleted; any ``.git``
+    directory inside the workspace is left untouched.
+    """
+    _require_agent()
+    try:
+        return service.restore_workspace(body.node_id)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {body.node_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/agent/step/{step_id}/diff")
+def api_agent_step_diff(step_id: str) -> dict:
+    """The diff produced by one step (its edit diff, else its snapshot diff)."""
+    try:
+        return service.step_diff(step_id)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {step_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/fs/list")
