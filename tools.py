@@ -257,16 +257,18 @@ def default_registry() -> ToolRegistry:
     registry.register(ToolSpec(
         name="web_fetch",
         description=(
-            "Fetch a URL (HTML/PDF), local PDF file, or arXiv paper as readable "
-            "text. The WHOLE document is indexed for grep even when the returned "
-            "text is truncated for length — to read later sections of a long PDF, "
-            "use grep instead of fetching the same URL again."
+            "Fetch a public http(s) URL (HTML/PDF), an arXiv paper, or a file "
+            "the user uploaded to this chat, as readable text. Only public "
+            "addresses are reachable; local paths work only for uploaded "
+            "attachments. The WHOLE document is indexed for grep even when the "
+            "returned text is truncated for length — to read later sections of "
+            "a long PDF, use grep instead of fetching the same URL again."
         ),
         input_schema={
             "type": "object",
             "required": ["url"],
             "properties": {
-                "url": {"type": "string", "description": "HTTP/HTTPS URL or local file path."},
+                "url": {"type": "string", "description": "Public HTTP/HTTPS URL, or the path of an uploaded attachment."},
                 "max_length": {"type": "integer", "description": "Chars of text to return, 500-500000 (default 8000). The full document is always searchable via grep regardless of this."},
                 "no_cache": {"type": "boolean", "description": "Bypass in-memory cache."},
             },

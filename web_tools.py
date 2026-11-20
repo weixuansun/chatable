@@ -8,8 +8,11 @@ from __future__ import annotations
 import asyncio
 import html as html_mod
 import io
+import ipaddress
 import os
 import re
+import socket
+import threading
 import time
 import urllib.parse
 from collections import OrderedDict
@@ -89,23 +92,29 @@ def _extract_image_urls(html: str, base_url: str, limit: int = 8) -> list[str]:
 
 async def _download_images(urls: list[str], limit: int = 4,
                            max_bytes: int = 5 * 1024 * 1024) -> list[dict]:
-    """Download images and inline them as base64 data URLs. Failures skipped."""
+    """Download images and inline them as base64 data URLs. Failures skipped.
+
+    Each candidate URL goes through the same SSRF validation as a top-level
+    fetch (page-controlled image URLs could otherwise point at loopback or
+    cloud-metadata addresses), and redirects are NOT followed — a redirect
+    target would be an unvalidated hop.
+    """
     if httpx is None:
         return []
     out: list[dict] = []
     async with httpx.AsyncClient(
-        timeout=10.0, follow_redirects=True, headers=_FETCH_HEADERS,
+        timeout=10.0, follow_redirects=False, headers=_FETCH_HEADERS,
     ) as client:
         for u in urls:
             if len(out) >= limit:
                 break
             try:
-                r = await client.get(u)
-                ct = r.headers.get("content-type", "").split(";")[0].strip()
-                if r.status_code == 200 and ct.startswith("image/") and 0 < len(r.content) <= max_bytes:
+                status, headers, body = await _stream_get(client, u, max_bytes=max_bytes)
+                ct = headers.get("content-type", "").split(";")[0].strip()
+                if status == 200 and ct.startswith("image/") and 0 < len(body) <= max_bytes:
                     out.append({
                         "url": u,
-                        "data_url": f"data:{ct};base64,{_base64.b64encode(r.content).decode()}",
+                        "data_url": f"data:{ct};base64,{_base64.b64encode(body).decode()}",
                     })
             except Exception:  # noqa: BLE001 - a broken image never fails the fetch
                 continue
@@ -406,6 +415,165 @@ def web_search(query: str, max_results: int = 8, language: str = "") -> WebToolR
 
 
 # ---------------------------------------------------------------------------
+# SSRF guard: web_fetch must only ever talk to public http(s) addresses
+# ---------------------------------------------------------------------------
+
+_MAX_REDIRECTS = 5
+# Hard cap on a fetched response body (HTML or PDF). Prevents a hostile or
+# broken endpoint from exhausting memory; the tool truncates for display far
+# below this anyway.
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+_FETCH_TIMEOUT = httpx.Timeout(30.0, connect=10.0) if httpx is not None else None
+
+
+class _FetchRefused(Exception):
+    """A fetch was refused (SSRF guard, size cap) — surfaced as a tool error."""
+
+
+def _ip_is_public(ip_str: str) -> bool:
+    """True only for globally routable addresses.
+
+    ``ipaddress.is_global`` already refuses loopback (127/8, ::1), private
+    ranges (10/8, 172.16/12, 192.168/16, fc00::/7), link-local (169.254/16
+    including cloud metadata 169.254.169.254, fe80::/10), CGNAT (100.64/10),
+    multicast, reserved and unspecified (0.0.0.0, ::) addresses. IPv4-mapped
+    IPv6 forms (e.g. ::ffff:127.0.0.1) are unwrapped and judged as IPv4.
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global
+
+
+def _validate_fetch_url(url: str) -> Optional[str]:
+    """SSRF check for one hop. Returns a refusal message, or None if allowed.
+
+    Only http/https schemes pass. The host is resolved and EVERY returned
+    address must be public — this also catches numeric oddities
+    (http://2130706433/, http://0x7f000001/) because getaddrinfo applies
+    inet_aton semantics to them. Callers must re-validate every redirect hop.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        scheme = parts.scheme.lower()
+        host = parts.hostname
+        port = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return f"Refused: invalid URL {url!r}"
+    if scheme not in ("http", "https"):
+        return (f"Refused: only http:// and https:// URLs can be fetched "
+                f"(got scheme {scheme!r} or none)")
+    if not host:
+        return f"Refused: URL has no host: {url!r}"
+    # Literal IP host (hostname strips the brackets of [::1] forms).
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if not _ip_is_public(host):
+            return f"Refused: {host} is not a public IP address"
+        return None
+    # Hostname: resolve and require every candidate address to be public.
+    try:
+        infos = socket.getaddrinfo(
+            host, port or (443 if scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror as exc:
+        return f"Cannot resolve host {host!r}: {exc}"
+    addrs = {info[4][0] for info in infos}
+    if not addrs:
+        return f"Cannot resolve host {host!r}: no addresses"
+    for addr in addrs:
+        if not _ip_is_public(addr):
+            return (f"Refused: host {host!r} resolves to non-public address "
+                    f"{addr} (SSRF protection)")
+    return None
+
+
+async def _stream_get(
+    client: "httpx.AsyncClient", url: str, max_bytes: int = _MAX_RESPONSE_BYTES,
+) -> tuple[int, "httpx.Headers", bytes]:
+    """One validated, size-capped GET. Returns (status, headers, body).
+
+    Raises _FetchRefused on SSRF refusal or when the body exceeds the size
+    cap. The URL is re-validated immediately before connecting: validation
+    and connection both resolve DNS, so a rebind between the two stays a
+    race — validating at the last moment shrinks that window as far as
+    httpx allows.
+    """
+    refusal = _validate_fetch_url(url)
+    if refusal is not None:
+        raise _FetchRefused(refusal)
+    async with client.stream("GET", url) as resp:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes(65536):
+            total += len(chunk)
+            if total > max_bytes:
+                raise _FetchRefused(
+                    f"Refused: response from {url} exceeds the "
+                    f"{max_bytes // (1024 * 1024)} MB size cap")
+            chunks.append(chunk)
+        return resp.status_code, resp.headers, b"".join(chunks)
+
+
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+async def _fetch_redirected(
+    client: "httpx.AsyncClient", url: str,
+) -> tuple[int, "httpx.Headers", bytes, str]:
+    """GET ``url`` following redirects MANUALLY (cap ``_MAX_REDIRECTS``), so
+    every hop is re-validated by the SSRF guard — httpx's follow_redirects
+    would happily land on 169.254.169.254 after one 302.
+
+    Returns (status, headers, body, final_url). Raises _FetchRefused on
+    refusal, httpx.TimeoutException / httpx.RequestError on transport failure.
+    """
+    for _ in range(_MAX_REDIRECTS + 1):
+        status, headers, body = await _stream_get(client, url)
+        location = headers.get("location")
+        if status in _REDIRECT_STATUSES and location:
+            url = urllib.parse.urljoin(url, location)
+            continue
+        return status, headers, body, url
+    raise _FetchRefused(f"Refused: too many redirects (>{_MAX_REDIRECTS})")
+
+
+def _decode_body(headers: "httpx.Headers", body: bytes) -> str:
+    ct = headers.get("content-type", "")
+    m = re.search(r"charset=([\w.\-]+)", ct, re.IGNORECASE)
+    enc = m.group(1) if m else "utf-8"
+    try:
+        return body.decode(enc, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
+def _local_path_allowed(file_path: str) -> bool:
+    """True when a local path web_fetch may read: only inside the uploads/ or
+    images/ folders of the active data directory (user attachments). Anything
+    else on the server's filesystem (settings.json with the API key, chat
+    history, /etc/…) is refused. Symlinks are resolved before the check."""
+    try:
+        from store import resolve_db_path  # noqa: PLC0415 - avoid import cycle
+        data_dir = os.path.dirname(os.path.abspath(resolve_db_path()))
+    except Exception:  # noqa: BLE001
+        return False
+    real = os.path.realpath(file_path)
+    for sub in ("uploads", "images"):
+        root = os.path.realpath(os.path.join(data_dir, sub))
+        if real.startswith(root + os.sep):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Web fetch
 # ---------------------------------------------------------------------------
 
@@ -414,34 +582,40 @@ _CACHE_MAX = 50
 
 
 class _FetchCache:
+    """Thread-safe: web_fetch/grep run on concurrent background-turn threads."""
+
     def __init__(self, maxsize: int = _CACHE_MAX, ttl: float = _CACHE_TTL) -> None:
         self._cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._maxsize = maxsize
         self._ttl = ttl
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[str]:
-        if key not in self._cache:
-            return None
-        ts, value = self._cache[key]
-        if time.monotonic() - ts > self._ttl:
-            del self._cache[key]
-            return None
-        self._cache.move_to_end(key)
-        return value
+        with self._lock:
+            if key not in self._cache:
+                return None
+            ts, value = self._cache[key]
+            if time.monotonic() - ts > self._ttl:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+            return value
 
     def set(self, key: str, value: str) -> None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        self._cache[key] = (time.monotonic(), value)
-        while len(self._cache) > self._maxsize:
-            self._cache.popitem(last=False)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            self._cache[key] = (time.monotonic(), value)
+            while len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
 
 
 _fetch_cache = _FetchCache()
 
 # Store raw text of fetches so grep can search across them.
-# {url: full_text}
+# {url: full_text}  — guarded by _content_store_lock (concurrent turn threads).
 _content_store: dict[str, str] = {}
+_content_store_lock = threading.Lock()
 _CONTENT_STORE_MAX = 20
 
 # Upper bound on the `max_length` a caller may request for the RETURNED
@@ -463,9 +637,10 @@ def _register_content(url: str, text: str) -> None:
     """
     if not text:
         return
-    _content_store[url] = text
-    while len(_content_store) > _CONTENT_STORE_MAX:
-        _content_store.pop(next(iter(_content_store)))
+    with _content_store_lock:
+        _content_store[url] = text
+        while len(_content_store) > _CONTENT_STORE_MAX:
+            _content_store.pop(next(iter(_content_store)))
 
 _FETCH_HEADERS: dict[str, str] = {
     "User-Agent": (
@@ -565,13 +740,27 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
     if httpx is None:
         return WebToolResult.error("httpx is required for web_fetch; install requirements.txt")
 
-    # Strip file:// prefix
-    if url.startswith("file://"):
-        url = url[7:]
+    # file:// is refused outright — web_fetch must never become a local file
+    # read primitive for a prompt-injected page or a misbehaving model.
+    if url.lower().startswith("file://"):
+        return WebToolResult.error(
+            "Refused: file:// URLs are not supported. Only http:// and "
+            "https:// URLs (or files uploaded to this chat) can be fetched.",
+            url=url,
+        )
 
-    # Local file path — read directly
+    # Local file path — allowed ONLY inside the uploads/images folders of the
+    # data directory (user attachments the model is told to read). Any other
+    # path (/etc/passwd, settings.json with the API key, …) is refused.
     if url.startswith("/") or url.startswith("~/"):
         file_path = os.path.expanduser(url)
+        if not _local_path_allowed(file_path):
+            return WebToolResult.error(
+                f"Refused: local file access is restricted to files uploaded "
+                f"to this chat (the uploads/images folders of the chatable "
+                f"data directory): {file_path}",
+                url=url,
+            )
         if not os.path.isfile(file_path):
             return WebToolResult.error(f"File not found: {file_path}", url=url)
         try:
@@ -630,52 +819,54 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
             _register_content(url, body)
             return WebToolResult.success(cached, url=url, from_cache=True)
 
-    # Fresh client per call (bound to this asyncio.run loop). Body is fully
-    # buffered by httpx during .get(), so response.text/.content stay usable
-    # after the client closes.
+    # Fresh client per call (bound to this asyncio.run loop). Redirects are
+    # followed manually so every hop is re-validated by the SSRF guard, and
+    # the body is streamed with a hard size cap instead of buffered whole.
     async with httpx.AsyncClient(
-        timeout=30.0, follow_redirects=True, headers=_FETCH_HEADERS,
+        timeout=_FETCH_TIMEOUT, follow_redirects=False, headers=_FETCH_HEADERS,
     ) as client:
         try:
-            response = await client.get(url)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # arXiv HTML version may not exist — fall back to abstract page
-            if exc.response.status_code == 404 and arxiv_match:
-                fallback_url = f"https://arxiv.org/abs/{arxiv_match.group(1)}"
-                try:
-                    resp2 = await client.get(fallback_url)
-                    resp2.raise_for_status()
-                    raw_text = resp2.text
-                    raw_len = len(raw_text)
-                    text = _html_to_text(raw_text) if "html" in str(resp2.headers.get("content-type", "")) else raw_text
-                    if not text.strip():
-                        return WebToolResult.error(f"No readable content at {fallback_url}", url=fallback_url)
-                    # Register full text for grep; truncate only what's shown.
-                    _register_content(fallback_url, text)
-                    display = _truncate_for_display(text, max_length, fallback_url)
-                    return WebToolResult.success(
-                        f"Content from {fallback_url}:\n\n{display}",
-                        url=fallback_url, status_code=resp2.status_code,
-                    )
-                except Exception:
-                    pass  # fall through to error below
-            return WebToolResult.error(
-                f"HTTP {exc.response.status_code} error fetching {url}: {exc.response.reason_phrase}",
-                url=url,
-            )
+            status, resp_headers, raw_bytes, final_url = await _fetch_redirected(client, url)
+        except _FetchRefused as exc:
+            return WebToolResult.error(str(exc), url=url)
         except httpx.TimeoutException:
             return WebToolResult.error(f"Request timed out fetching {url}", url=url)
         except httpx.RequestError as exc:
             return WebToolResult.error(f"Request error fetching {url}: {exc}", url=url)
 
-    content_type = response.headers.get("content-type", "")
-    raw_text = response.text
+        # arXiv HTML version may not exist — fall back to the abstract page.
+        if status == 404 and arxiv_match:
+            fallback_url = f"https://arxiv.org/abs/{arxiv_match.group(1)}"
+            try:
+                st2, hd2, body2, fin2 = await _fetch_redirected(client, fallback_url)
+            except Exception:  # noqa: BLE001 - fall through to the 404 error below
+                pass
+            else:
+                raw_text2 = _decode_body(hd2, body2)
+                text = _html_to_text(raw_text2) if "html" in hd2.get("content-type", "") else raw_text2
+                if st2 < 400 and text.strip():
+                    # Register full text for grep; truncate only what's shown.
+                    _register_content(fin2, text)
+                    display = _truncate_for_display(text, max_length, fin2)
+                    return WebToolResult.success(
+                        f"Content from {fin2}:\n\n{display}",
+                        url=fin2, status_code=st2,
+                    )
+        if status >= 400:
+            return WebToolResult.error(
+                f"HTTP {status} error fetching {url}",
+                url=url, status_code=status,
+            )
+        if final_url != url:
+            print(f"  [web_fetch] followed redirect → {final_url}")
+        url = final_url
+
+    content_type = resp_headers.get("content-type", "")
+    raw_text = _decode_body(resp_headers, raw_bytes)
     raw_len = len(raw_text)
 
     # PDF — extract text from binary content
     if "pdf" in content_type or url.lower().endswith(".pdf"):
-        raw_bytes = response.content
         # Extract the FULL document, register it all for grep, and only truncate
         # the model-visible text.
         pdf_text = _read_pdf_bytes(raw_bytes)
@@ -687,7 +878,7 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
             output = f"Content from {url} (PDF, {len(raw_bytes)} bytes):\n\n{text}{note}"
             _fetch_cache.set(cache_key, output)
             return WebToolResult.success(
-                output, url=url, status_code=response.status_code,
+                output, url=url, status_code=status,
                 content_type=content_type, is_pdf=True, images=images,
             )
         if images:
@@ -697,13 +888,13 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
                 f"text — {len(images)} page image(s) captured and provided to the model."
             )
             return WebToolResult.success(
-                output, url=url, status_code=response.status_code,
+                output, url=url, status_code=status,
                 content_type=content_type, is_pdf=True, images=images,
             )
         return WebToolResult.error(
             f"PDF text extraction failed for {url} ({len(raw_bytes)} bytes). "
             f"The PDF may be image-based or encrypted.",
-            url=url, status_code=response.status_code, is_pdf=True,
+            url=url, status_code=status, is_pdf=True,
         )
 
     if "html" in content_type:
@@ -724,7 +915,7 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
                     f"Page contains almost no readable text (likely JS-rendered or blocked). "
                     f"Page title: \"{title}\". Raw HTML size: {raw_len} chars. "
                     f"Try a different URL or use a service that renders JavaScript.",
-                    url=url, status_code=response.status_code, content_type=content_type,
+                    url=url, status_code=status, content_type=content_type,
                     raw_size=raw_len,
                 )
             text = raw_snippet + (
@@ -740,7 +931,7 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
         title = title_match.group(1).strip() if title_match else "unknown"
         return WebToolResult.error(
             f"No readable content found at {url} (page title: \"{title}\", raw size: {raw_len} chars)",
-            url=url, status_code=response.status_code, content_type=content_type,
+            url=url, status_code=status, content_type=content_type,
             raw_size=raw_len,
         )
 
@@ -755,7 +946,7 @@ async def web_fetch_async(url: str, max_length: int = 8000, no_cache: bool = Fal
     output = f"Content from {url}:\n\n{display}{note}"
     _fetch_cache.set(cache_key, output)
     return WebToolResult.success(
-        output, url=url, status_code=response.status_code,
+        output, url=url, status_code=status,
         content_type=content_type, raw_size=raw_len, images=images,
     )
 
@@ -773,7 +964,11 @@ def grep_content(pattern: str, url: str = "", max_lines: int = 30, ignore_case: 
     """
     if not pattern.strip():
         return WebToolResult.error("No search pattern provided")
-    if not _content_store:
+    with _content_store_lock:
+        # Snapshot under the lock: a concurrent web_fetch on another turn
+        # thread may mutate the store while we iterate it below.
+        snapshot = dict(_content_store)
+    if not snapshot:
         return WebToolResult.error("No content has been fetched yet. Use web_fetch first.")
 
     flags = re.IGNORECASE if ignore_case else 0
@@ -782,10 +977,10 @@ def grep_content(pattern: str, url: str = "", max_lines: int = 30, ignore_case: 
     except re.error as exc:
         return WebToolResult.error(f"Invalid regex pattern: {exc}")
 
-    targets = {url: _content_store[url]} if url and url in _content_store else _content_store
-    if url and url not in _content_store:
+    targets = {url: snapshot[url]} if url and url in snapshot else snapshot
+    if url and url not in snapshot:
         return WebToolResult.error(
-            f"URL not in cache: {url}. Available: {', '.join(list(_content_store.keys())[:5])}",
+            f"URL not in cache: {url}. Available: {', '.join(list(snapshot.keys())[:5])}",
         )
 
     lines_out: list[str] = []
