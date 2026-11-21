@@ -17,7 +17,7 @@ from typing import Optional
 from models import Node
 from orch.context import detect_test_cmd
 from orch.store import new_id
-from orch.worktree import commit_worktree_tree, merge_into_worktree, worktree_remove
+from orch.worktree import commit_worktree_tree, merge_base, merge_into_worktree, worktree_remove
 
 STEP_RESULT_CAP = 4000
 
@@ -238,7 +238,8 @@ class ChatRunsMixin:
             turn.append({"type": "done", "id": aid, "content": content,
                          "usage": usage or {}, "stats": "", "elapsed": facts.get("duration_s"),
                          "ws_commit": end_commit, "stop_reason": md["stop_reason"],
-                         "run_status": status, "tool_results": []})
+                         "run_status": status, "tool_results": [],
+                         "run": self.chat._run_fields(md)})
             self._retire_turn(turn, aid)
 
     def _open_steps(self, aid: str) -> list[str]:
@@ -295,7 +296,15 @@ class ChatRunsMixin:
             raise ValueError("the nodes are in different conversations")
         if lca in node_ids:
             raise ValueError("one node is an ancestor of another — nothing to merge")
+        # The common ancestor may be a plain chat node with no snapshot of its
+        # own: fall back to the git merge-base of the branches' snapshots so
+        # the merge node still has a base (diff / files changed / tests).
         base_commit = chat.nearest_ws_commit(lca)
+        if not base_commit:
+            try:
+                base_commit = merge_base(self.shadow, commits)
+            except Exception:  # noqa: BLE001
+                base_commit = None
         nodes = [chat.store.get(i) for i in node_ids]
 
         def instr(n) -> str:
@@ -389,7 +398,8 @@ class ChatRunsMixin:
         chat.store.finalize_node(asst.id, content, {}, md)
         turn.append({"type": "done", "id": asst.id, "content": content, "usage": {},
                      "stats": "", "ws_commit": md["ws_commit"], "stop_reason": md["stop_reason"],
-                     "run_status": status, "tool_results": []})
+                     "run_status": status, "tool_results": [],
+                     "run": self.chat._run_fields(md)})
         self._retire_turn(turn, asst.id)
         if status in ("conflict", "tests_failed") and merge_commit:
             if status == "conflict":

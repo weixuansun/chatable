@@ -1072,6 +1072,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
         border-bottom: 1px solid var(--border); background: var(--panel); flex: none; }
 .mindmap-head h3 { margin: 0; font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 9px;
         flex: 1; min-width: 0; }
+.mindmap-head h3 { white-space: nowrap; min-width: 0; }
 .mindmap-head h3 .lucide { width: 16px; height: 16px; color: var(--accent); flex: none; }
 .mindmap-head h3 .mm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim-2);
         font-weight: 400; font-size: 13px; padding-left: 10px; border-left: 1px solid var(--border-2); }
@@ -1595,3 +1596,5 @@ body.col-resizing { cursor: col-resize; user-select: none; }
   box-shadow: 0 6px 24px rgba(0,0,0,.22); z-index: 6; }
 .map-selbar .fork-btn.primary { background: var(--accent); color: var(--accent-fg, #fff); }
 .map-selbar .fork-btn:disabled { opacity: .45; cursor: not-allowed; }
+.run-notice.info { color: var(--dim); background: var(--card); border-color: var(--border); }
+.run-notice.info .lucide { color: var(--accent); }

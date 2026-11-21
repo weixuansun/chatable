@@ -42,6 +42,19 @@ it is required for these routes like any other.
 | `POST /api/agent/adopt` | `{node_id}` | Adopt the node's snapshot into the workspace: snapshots the current state first, restores, records `adopted_at`/`adopted_commit`/`previous_commit` on the node. Returns `{ok, adopted_commit, previous_commit, files}`. |
 | `POST /api/agent/undo-adopt` | `{previous_commit}` | Restore the pre-adopt snapshot (commit must exist in the shadow repo). |
 
+### Agent runs in the conversation (CHA-5, the UI's 「交给 agent」 mode)
+
+| Method & path | Body / query | Description |
+|---|---|---|
+| `GET /api/run/executors` | — | `{executors: {id: {available, reason}}, agent_ok, workspace}` — ids `builtin`, `kimi`, `claude`, `codex`; unavailable ones carry the reason. |
+| `POST /api/run` | `{content, parent_id?, agents: [id…]}` | Run the instruction from conversation node `parent_id` (none = new conversation), once per agent (several = race), each in its own worktree from the parent's snapshot. Creates a user node (`orch_run`, `executor`) and an assistant node (`run_status` queued→running→ok/failed/cancelled) per agent and returns `{runs: [{run_id, user_id, assistant_id, agent}]}`. Progress streams like a chat turn on `/api/stream/{assistant_id}` (`assistant_start` with `run: true`, `notice`, `step_start`/`step_done`, `plan`, `done`). The finished assistant node carries `ws_commit` / `ws_parent_commit`, `files_changed`, `facts.test` (baseline-relative) and the agent's conclusion as content, so the node buttons (改动/对比/文件/采用/从此分叉) work unchanged. `.chatable/CONTEXT.md` is built from the conversation path; the agent session is resumed when the same agent continues its own run. Several sends from the same node = parallel siblings. |
+| `POST /api/run/merge` | `{node_ids: [id…≥2], agent?, test?}` | 3-way merge of the nodes' snapshots under their lowest common ancestor → a new merge node (`orch_merge`, `merged_from`, `run_status` ok/conflict/tests_failed/failed). On conflict or new test failures a resolver run with `agent` starts automatically from the merge node. Returns `{user_id, assistant_id, parent_id}`. |
+| `POST /api/stop/{assistant_id}` | — | On a run node: cancel it (queued → cancelled at once; running → stopped, partial work is still snapshotted). |
+
+`POST /api/send` with `agent: false` is always plain chat, even in a
+conversation whose legacy `agent_mode` flag is on. The old orchestrator
+overlay is gone from the UI; `/api/orch/*` is kept for API use.
+
 `GET /api/agent/compare?a=&b=` also accepts `a=workspace` (current workspace
 state, snapshotted on the spot) — used by the adopt dialog's preview.
 

@@ -126,6 +126,29 @@ def test_parallel_runs_from_one_node_then_merge(tmp_path, monkeypatch):
 
 
 @git_required
+def test_merge_under_a_plain_chat_node_without_snapshot(tmp_path, monkeypatch):
+    """Runs dispatched from an ordinary chat reply (no ws_commit of its own):
+    the merge still gets a base (git merge-base) so diff / files changed work."""
+    from models import Node
+    chat, orch = _svc(tmp_path, monkeypatch,
+                      {"a": WriterExecutor("a.txt"), "b": WriterExecutor("b.txt")})
+    u = Node.new(role="user", content="hi", parent_id=ROOT_ID)
+    chat.store.add(u)
+    r = Node.new(role="assistant", content="hello", parent_id=u.id)
+    chat.store.add(r)
+    (ra,) = orch.start_chat_runs("do A", r.id, ["a"])
+    (rb,) = orch.start_chat_runs("do B", r.id, ["b"])
+    _wait(chat, ra["assistant_id"]); _wait(chat, rb["assistant_id"])
+    m = orch.start_chat_merge([ra["assistant_id"], rb["assistant_id"]], "a")
+    assert m["parent_id"] == r.id
+    _ev, md = _wait(chat, m["assistant_id"])
+    assert md["run_status"] == "ok" and md["ws_parent_commit"]
+    assert md["files_changed"] == 2
+    files = sorted(f["path"] for f in chat.node_diff(m["assistant_id"])["files"])
+    assert files == ["a.txt", "b.txt"]
+
+
+@git_required
 def test_racing_same_instruction_on_two_agents(tmp_path, monkeypatch):
     chat, orch = _svc(tmp_path, monkeypatch,
                       {"a": WriterExecutor("x.txt", "A\n"), "b": WriterExecutor("x.txt", "B\n")})

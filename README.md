@@ -185,16 +185,29 @@ Shell commands run through two safety layers:
   `CHATTABLE_AGENT_SHELL_DENYLIST=off` disables it — note the sandbox, not
   the deny-list, is the real protection.
 
-### Orchestrator (prototype, optional)
+### 交给 agent: external coding agents in the conversation tree
 
-The orchestrator turns chatable into a dispatcher over external coding
-agents (Kimi Code, Claude Code, Codex) plus the built-in DeepSeek agent:
-each instruction runs in an isolated git worktree from a snapshot of your
-workspace, producing a DAG of snapshot nodes you can compare, merge
-(3-way, with an auto-dispatched resolver run on conflicts or red tests),
-and adopt into the workspace. Open it from the workflow icon above the
-conversation list. See [docs/orchestrator-design.md](docs/orchestrator-design.md)
-for the model and API.
+One switch above the composer decides what a message does:
+
+- **对话** — a normal chatable reply; nothing touches your files.
+- **交给 agent** — the message is an instruction for a coding agent
+  (built-in DeepSeek agent, Kimi Code, Claude Code or Codex; pick one or
+  several — several = race the same instruction). It runs in an isolated git
+  worktree from the current node's file snapshot, its steps stream into the
+  main chat, and the result becomes a normal reply node with status, files
+  changed and test result. The real workspace changes only when you click
+  **采用 (Adopt)**.
+
+After sending, the composer stays on the same node, so sending another
+instruction starts a parallel task; the 「从这里发出的 agent 任务」 list under
+the conversation shows each one's live status (查看 / 取消). In the mind
+map, run cards show the agent and status; **Shift+click** (or the ☐ button)
+two or more cards with snapshots to **合并** (3-way merge under their common
+ancestor; conflicts or new test failures are handed to a resolver agent
+automatically) or **对比**. The agent's context (`.chatable/CONTEXT.md`) is
+built from the conversation path. API: see "Agent runs in the conversation"
+in [docs/agent-api.md](docs/agent-api.md); design notes in
+[docs/orchestrator-design.md](docs/orchestrator-design.md).
 
 - Executors are auto-detected (`CHATTABLE_KIMI_BIN` / `CHATTABLE_CLAUDE_BIN`
   / `CHATTABLE_CODEX_BIN` to override); unavailable ones show greyed out.
