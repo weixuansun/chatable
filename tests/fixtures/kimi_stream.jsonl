@@ -1,0 +1,9 @@
+{"role":"meta","type":"system.version","version":"2.2.0"}
+{"role":"assistant","tool_calls":[{"type":"function","id":"tool_2rtKYGxnQI76nYCGWE9sDvNk","function":{"name":"Read","arguments":"{\"path\":\"a.py\"}"}}]}
+{"role":"tool","tool_call_id":"tool_2rtKYGxnQI76nYCGWE9sDvNk","content":"1\tx = 1"}
+{"role":"assistant","tool_calls":[{"type":"function","id":"tool_YmJmwtqrPJZaSepQPHXoRuEb","function":{"name":"Edit","arguments":"{\"path\":\"a.py\",\"old_string\":\"x = 1\",\"new_string\":\"x = 2\"}"}}]}
+{"role":"tool","tool_call_id":"tool_YmJmwtqrPJZaSepQPHXoRuEb","content":"Replaced 1 occurrence in a.py"}
+{"role":"assistant","tool_calls":[{"type":"function","id":"tool_hi1RqQBckOdiWYacFDEMx5QD","function":{"name":"Bash","arguments":"{\"command\":\"python3 a.py && echo done\"}"}}]}
+{"role":"tool","tool_call_id":"tool_hi1RqQBckOdiWYacFDEMx5QD","content":"done\n"}
+{"role":"assistant","content":"I changed x to 2 in a.py, and running `python3 a.py && echo done` printed \"done\" successfully."}
+{"role":"meta","type":"session.resume_hint","session_id":"session_c13db92b-0b92-467c-b2e0-7bca25e22bf1","command":"kimi -r session_c13db92b-0b92-467c-b2e0-7bca25e22bf1","content":"To resume this session: kimi -r session_c13db92b-0b92-467c-b2e0-7bca25e22bf1"}
