@@ -15,6 +15,9 @@ Two independent defences:
    sandbox above is the real boundary.
 
 CHATTABLE_AGENT_SANDBOX=auto|bwrap|off (auto = bwrap when available).
+CHATTABLE_AGENT_SANDBOX_PATH_HOME=1 also re-mounts non-venv PATH dirs
+that live under $HOME (skipped by default: ~/.local/bin, tool config
+dirs, etc. may hold credentials).
 """
 from __future__ import annotations
 
@@ -100,15 +103,32 @@ def denylist_reason(command: str) -> Optional[str]:
     return None
 
 
+def _is_venv_root(path: str) -> bool:
+    """A Python venv (pyvenv.cfg) or conda env (conda-meta/) root."""
+    return os.path.isfile(os.path.join(path, "pyvenv.cfg")) or \
+        os.path.isdir(os.path.join(path, "conda-meta"))
+
+
+def _is_home_dir(path: str, env: dict) -> bool:
+    """True for $HOME itself, /root, or a /home/<user> directory."""
+    rp = os.path.realpath(path)
+    home = os.path.realpath(env.get("HOME", "") or "x")
+    if home != "x" and rp == home:
+        return True
+    if rp == "/root":
+        return True
+    return bool(re.match(r"^/home/[^/]+$", rp))
+
+
 def build_bwrap_argv(command: str, ws_root: str, network: bool = False,
                      data_dir: str = "", env: Optional[dict] = None) -> list[str]:
     """The bwrap argv running ``command`` confined to *ws_root*.
 
     Read-only system dirs, private tmpfs /tmp, homes and the chatable data
     dir hidden, workspace rw at the same path, HOME redirected inside the
-    sandbox, no network unless asked. PATH dirs (incl. a venv's parent when
-    it looks like <venv>/bin) are re-mounted read-only after the home tmpfs
-    so a toolchain living under /home keeps working.
+    sandbox, no network unless asked. PATH dirs are re-mounted read-only so
+    the configured toolchain keeps working — narrowly: a parent dir only
+    when it is a real venv/conda root (never a home dir or the data dir).
     """
     env = os.environ if env is None else env
     argv: list[str] = [BWRAP, "--die-with-parent",
@@ -133,21 +153,37 @@ def build_bwrap_argv(command: str, ws_root: str, network: bool = False,
     if data_dir and os.path.exists(data_dir) and not (
             os.path.realpath(data_dir).startswith(("/tmp", "/home", "/root"))):
         argv += ["--tmpfs", data_dir]
-    # Toolchain: every PATH dir back in, read-only (after the home tmpfs).
-    # A venv/conda-style <root>/bin also gets its root (site-packages etc.).
-    # Symlinked entries (/bin -> /usr/bin) are skipped: their targets are
-    # already bound, and bwrap cannot mount onto a symlink.
+    # Toolchain: PATH dirs back in, read-only (after the home tmpfs) — but
+    # narrowly, so home-local credential stores are never exposed: a parent
+    # dir is bound only when it is clearly a Python venv (pyvenv.cfg) or
+    # conda env (conda-meta/) and never a home dir or the data dir; PATH
+    # entries under $HOME that are not venv bins are skipped entirely unless
+    # CHATTABLE_AGENT_SANDBOX_PATH_HOME=1.
+    home = os.path.realpath(env.get("HOME", "") or "") or None
+    allow_home = os.environ.get("CHATTABLE_AGENT_SANDBOX_PATH_HOME", "") \
+        .strip().lower() in ("1", "true", "yes")
+    dd = os.path.realpath(data_dir) if data_dir else None
     seen: set[str] = set()
     for entry in env.get("PATH", "").split(":"):
         entry = entry.rstrip("/")
         if not entry or entry == "/" or entry in seen \
                 or not os.path.isdir(entry) or os.path.islink(entry):
             continue
-        seen.add(entry)
+        real = os.path.realpath(entry)
+        if dd and (real == dd or real.startswith(dd + os.sep)):
+            continue  # never expose the data dir through PATH
         parent = os.path.dirname(entry)
-        if os.path.basename(entry) == "bin" and parent and parent != "/" \
-                and os.path.isdir(parent) and not os.path.islink(parent) \
-                and parent not in seen:
+        parent_is_env = (
+            os.path.basename(entry) == "bin"
+            and parent and _is_venv_root(parent)
+            and not _is_home_dir(parent, env)
+            and not (dd and os.path.realpath(parent) == dd)
+        )
+        if home and real.startswith(home + os.sep) and not parent_is_env \
+                and not allow_home:
+            continue  # home-local tools stay hidden by default
+        seen.add(entry)
+        if parent_is_env and parent not in seen:
             seen.add(parent)
             argv += ["--ro-bind", parent, parent]
         argv += ["--ro-bind", entry, entry]

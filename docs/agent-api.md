@@ -54,9 +54,12 @@ state, snapshotted on the spot) — used by the adopt dialog's preview.
    same path, private tmpfs `/tmp`, tmpfs over `/home` and `/root`, the
    chatable data dir hidden, synthetic `HOME` (`/tmp/agent-home`),
    `--unshare-pid/ipc/uts`, `--die-with-parent`, and **no network** unless
-   `CHATTABLE_AGENT_SHELL_NET=1`. PATH directories (and a venv's root when a
-   PATH entry is `<venv>/bin`) are re-mounted read-only, so an existing
-   toolchain outside the workspace keeps working. `CHATTABLE_AGENT_SANDBOX=
+   `CHATTABLE_AGENT_SHELL_NET=1`. PATH directories are re-mounted read-only
+   so an existing toolchain outside the workspace keeps working — narrowly:
+   a PATH entry's parent is bound only when it is a real venv/conda root
+   (`pyvenv.cfg` / `conda-meta/`, never a home dir or the data dir), and
+   PATH entries under `$HOME` that are not venv bins are skipped entirely
+   unless `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`. `CHATTABLE_AGENT_SANDBOX=
    off` disables; when auto can't find bwrap, `/api/agent/status` reports
    `sandbox: "off"` plus a loud `sandbox_warning` (the composer shows a red
    "no sandbox" badge).
@@ -196,6 +199,7 @@ affected; persisted step results stay full.
 | `CHATTABLE_AGENT_SANDBOX` | `auto` | `auto` (bwrap if available) / `bwrap` / `off`. |
 | `CHATTABLE_AGENT_SHELL_NET` | (unset) | `1` allows network inside the shell sandbox. |
 | `CHATTABLE_AGENT_SHELL_DENYLIST` | (unset) | `off` disables the advisory command deny-list. |
+| `CHATTABLE_AGENT_SANDBOX_PATH_HOME` | (unset) | `1` also re-mounts non-venv PATH dirs under `$HOME` (skipped by default). |
 
 ## Shadow git snapshots
 

@@ -146,7 +146,10 @@ Shell commands run through two safety layers:
   `run_shell` commands execute confined: read-only system dirs, the workspace
   read-write at its real path, private `/tmp`, hidden home and data
   directories, a synthetic `HOME`, no network by default. PATH directories
-  (including a venv outside the workspace) stay available read-only.
+  stay available read-only — narrowly: a PATH entry's parent is bound only
+  for real venv/conda roots (`pyvenv.cfg` / `conda-meta/`), and non-venv
+  PATH dirs under `$HOME` are skipped unless
+  `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`.
   - `CHATTABLE_AGENT_SANDBOX=auto|bwrap|off` (default `auto`: bwrap when
     available; `/api/agent/status` and the composer badge warn when not).
   - `CHATTABLE_AGENT_SHELL_NET=1` allows network access inside the sandbox.
