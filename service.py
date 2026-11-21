@@ -900,6 +900,24 @@ class ChatService:
                 return str(md["ws_commit"])
         return None
 
+    @staticmethod
+    def _run_fields(md: dict) -> dict:
+        """CHA-5 agent-run fields for the chat view / map (empty otherwise)."""
+        if not isinstance(md, dict) or not (md.get("orch_run") or md.get("orch_merge")):
+            return {}
+        out = {"orch_run": True, "executor": md.get("executor"),
+               "run_status": md.get("run_status"),
+               "orch_merge": bool(md.get("orch_merge")),
+               "merged_from": md.get("merged_from") or []}
+        if "files_changed" in md:
+            out["files_changed"] = md.get("files_changed")
+        test = ((md.get("facts") or {}).get("test")) or None
+        if test:
+            out["test"] = {"ok": test.get("ok"), "passed": test.get("passed"),
+                           "failed": test.get("failed"),
+                           "new_failures": len(test.get("new_failures") or [])}
+        return out
+
     def node_ws_commit(self, node_id: str) -> Optional[str]:
         """The snapshot recorded ON *node_id*. Agent assistant nodes store
         the turn's single end-of-turn snapshot; conversations saved before
@@ -1159,6 +1177,7 @@ class ChatService:
             self.node_ws_commit(node.id) if node.role == "assistant" and md.get("agent") else None)
         if wsc:
             data["ws_commit"] = wsc
+        data.update(self._run_fields(md))
         if node.role == "assistant" and md.get("agent"):
             # Mind-map / sidebar node status (steps themselves are not drawn).
             data["agent"] = True
@@ -1286,6 +1305,7 @@ class ChatService:
                 "plan": meta.get("plan"),
                 "stop_reason": meta.get("stop_reason"),
                 "incomplete": bool(meta.get("incomplete")),
+                **self._run_fields(meta),
                 "step": (
                     {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
                                               "result", "error", "diff", "ws_commit",
@@ -2385,7 +2405,7 @@ class ChatService:
 
     def start_turn(self, content: str, parent_id: Optional[str] = None,
                    attachments: Optional[list[dict]] = None,
-                   agent: bool = False,
+                   agent: Optional[bool] = False,
                    agent_overrides: Optional[dict] = None) -> dict:
         """Create the user+assistant nodes and start generating in the background.
 
@@ -2409,7 +2429,13 @@ class ChatService:
             parent_id = parent_id or ROOT_ID
             if not self.store.exists(parent_id):
                 parent_id = ROOT_ID
-            agent_mode = bool(agent) or self._conversation_agent_mode(parent_id)
+            # agent=None: follow the conversation's persisted agent mode
+            # (legacy). An explicit False (the unified composer's 对话 mode)
+            # is always a plain chat turn.
+            if agent is None:
+                agent_mode = self._conversation_agent_mode(parent_id)
+            else:
+                agent_mode = bool(agent)
             if agent_mode:
                 if not agent_available():
                     raise ValueError(AGENT_TOKEN_MESSAGE)
@@ -2485,6 +2511,13 @@ class ChatService:
         if turn is None:
             return False
         turn.request_stop()
+        # Agent runs (CHA-5) are executed by the orchestrator queue: cancel there.
+        hook = getattr(self, "run_stop_hook", None)
+        if hook is not None:
+            try:
+                hook(assistant_id)
+            except Exception:  # noqa: BLE001 - stopping is best-effort
+                pass
         # A shell command running for this turn dies with it (whole group).
         proc = self._agent_procs.get(assistant_id)
         if proc is not None:

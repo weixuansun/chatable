@@ -7,7 +7,9 @@ import threading
 import time
 from typing import Iterator, Optional
 
-from orch.context import PROMPT_TEMPLATE, detect_test_cmd, parse_conclusion, write_context
+from orch.chat_runs import ChatRunsMixin
+from orch.context import (PROMPT_TEMPLATE, build_chat_context, detect_test_cmd,
+                          parse_conclusion, write_chat_context, write_context)
 from orch.executors import RUN_TIMEOUT_S, default_executors
 from orch.store import OrchStore, new_id
 from orch.testrun import compare_to_baseline, run_test_cmd
@@ -39,7 +41,7 @@ def _parse_limits() -> dict[str, int]:
     return limits
 
 
-class OrchService:
+class OrchService(ChatRunsMixin):
     def __init__(self, chat_service, executors: Optional[dict] = None) -> None:
         self.chat = chat_service
         self.workspace = chat_service.workspace()
@@ -58,7 +60,11 @@ class OrchService:
         # Test results cached per snapshot commit — one test run serves as
         # the baseline for every sibling branching off that snapshot.
         self._test_cache: dict[str, dict] = {}
+        # CHA-5 chat-native runs: run id → live chat turn; assistant id → run id.
+        self._chat_turns: dict = {}
+        self._chat_run_by_asst: dict[str, str] = {}
         self._ensure_root()
+        self._recover_chat_runs()
         threading.Thread(target=self._queue_loop, daemon=True).start()
 
     # ------------------------------------------------------------------ #
@@ -80,6 +86,26 @@ class OrchService:
         self.store.add_node(node)
         self._emit({"type": "node_created", "node": node})
         return node
+
+    def _recover_chat_runs(self) -> None:
+        """Chat runs interrupted by a server restart: mark them failed so
+        their nodes don't spin forever (queued ones simply run again)."""
+        for run in list(self.store.runs.values()):
+            if not run.get("chat") or run.get("status") != "running":
+                continue
+            self.store.update_run(run["id"], status="failed", finished_at=time.time(),
+                                  error="server restarted during the run")
+            aid = run["chat"].get("assistant_id")
+            try:
+                if aid and self.chat.store.exists(aid):
+                    self.chat.store.finalize_node(aid, "运行被中断（服务重启）。", {}, {
+                        "agent": True, "orch_run": True, "executor": run.get("agent"),
+                        "run_id": run["id"], "run_status": "failed",
+                        "ws_commit": run["chat"].get("base_commit"),
+                        "ws_parent_commit": run["chat"].get("base_commit"),
+                        "files_changed": 0, "stop_reason": "error"})
+            except Exception:  # noqa: BLE001
+                pass
 
     def _emit(self, ev: dict) -> None:
         with self._cond:
@@ -162,6 +188,11 @@ class OrchService:
         if run["status"] == "queued":
             self.store.update_run(run_id, status="cancelled",
                                   finished_at=time.time())
+            if run.get("chat"):
+                base = run["chat"]["base_commit"]
+                self._chat_run_finished(run, status="cancelled", end_commit=base, base=base,
+                                        files=[], facts={}, conclusion={}, final_text="",
+                                        session_id=None, usage={}, error="")
             return True
         if run["status"] == "running":
             self._cancelled.add(run_id)
@@ -220,6 +251,11 @@ class OrchService:
                                   started_at=time.time())
             self._emit({"type": "run_started", "run_id": run["id"],
                         "agent": run["agent"], "instruction": run["instruction"]})
+            if run.get("chat"):
+                try:
+                    self._chat_run_started(run)
+                except Exception:  # noqa: BLE001
+                    pass
             threading.Thread(target=self._run_one, args=(dict(run),),
                              daemon=True).start()
 
@@ -229,7 +265,12 @@ class OrchService:
 
     def _run_one(self, run: dict) -> None:
         run_id = run["id"]
-        parent = self.store.nodes[run["from_node"]]
+        chat = run.get("chat")
+        if chat:
+            parent = {"id": None, "snapshot": chat["base_commit"]}
+        else:
+            parent = self.store.nodes[run["from_node"]]
+        chat_state: dict = {}
         wt = os.path.join(self.runs_dir, run_id, "wt")
         t0 = time.monotonic()
         events: list[dict] = []
@@ -242,18 +283,30 @@ class OrchService:
             test_cmd = self.store.meta.get("test_cmd") or detect_test_cmd(wt)
             if test_cmd and not self.store.meta.get("test_cmd"):
                 self.store.set_meta(test_cmd=test_cmd)
-            write_context(self.store, parent, run["instruction"], test_cmd, wt,
-                          merge=run.get("merge"),
-                          parent_diff=self._parent_diff(parent))
+            if chat:
+                write_chat_context(wt, build_chat_context(
+                    self._chat_path_nodes(chat["parent_id"]), run["instruction"],
+                    test_cmd, wt, notes=self.store.meta.get("notes", ""),
+                    parent_diff=self._chat_parent_diff(chat["parent_id"]),
+                    extra=chat.get("extra_context", "")))
+            else:
+                write_context(self.store, parent, run["instruction"], test_cmd, wt,
+                              merge=run.get("merge"),
+                              parent_diff=self._parent_diff(parent))
             prompt = PROMPT_TEMPLATE.format(instruction=run["instruction"])
             executor = self.executors[run["agent"]]
             ok, reason = executor.available()
             if not ok:
                 raise RuntimeError(reason)
-            resume_id = (parent.get("session_id")
-                         if parent.get("agent") == run["agent"] else None)
+            if chat:
+                resume_id = self._chat_resume_session(chat["parent_id"], run["agent"])
+            else:
+                resume_id = (parent.get("session_id")
+                             if parent.get("agent") == run["agent"] else None)
 
             def should_stop() -> bool:
+                if chat and self._chat_should_stop(run):
+                    self._cancelled.add(run_id)
                 return run_id in self._cancelled
 
             def proc_reg(p) -> None:
@@ -267,6 +320,8 @@ class OrchService:
                                    timeout=RUN_TIMEOUT_S):
                 events.append(ev)
                 self._emit({"type": "run_event", "run_id": run_id, "event": ev})
+                if chat:
+                    self._chat_event(run, ev, chat_state)
                 if ev.get("type") == "result":
                     result = ev
         except Exception as e:  # noqa: BLE001 - a failed run still produces a node
@@ -305,6 +360,8 @@ class OrchService:
         # red only when it introduces NEW failures — pre-existing failures
         # (e.g. a bug being fixed on a sibling branch) don't count.
         if status == "ok" and test_cmd and os.path.isdir(wt):
+            if chat:
+                self._chat_notice(run, f"运行测试：{test_cmd}")
             fact = self._build_test_fact(wt, test_cmd, parent["snapshot"])
             facts["test"] = fact
             if not fact["ok"]:
@@ -312,6 +369,24 @@ class OrchService:
                 facts["error"] = "new test failures vs the parent baseline"
 
         conclusion = parse_conclusion(result.get("final_text") or error or "")
+        if chat:
+            self.store.update_run(run_id, status=status, node_id=chat["assistant_id"],
+                                  finished_at=time.time(), error=error,
+                                  events=events[-_EVENT_CAP_PER_RUN:])
+            try:
+                self._chat_run_finished(
+                    run, status=status, end_commit=end_commit, base=parent["snapshot"],
+                    files=files, facts=facts, conclusion=conclusion,
+                    final_text=result.get("final_text") or "",
+                    session_id=result.get("session_id"),
+                    usage=result.get("usage") or {}, error=error)
+            finally:
+                self._emit({"type": "run_finished", "run_id": run_id,
+                            "status": status, "node_id": None})
+                worktree_remove(self.shadow, wt)
+                with self._cond:
+                    self._cond.notify_all()
+            return
         node = {
             "id": new_id(), "snapshot": end_commit,
             "instruction": run["instruction"], "parents": [parent["id"]],

@@ -62,6 +62,8 @@ llm.init_vision_flag()
 
 # The orchestrator (external coding agents over the snapshot DAG).
 orch = OrchService(service)
+# Stop on an agent-run reply cancels the queued/running orchestrator run.
+service.run_stop_hook = orch.stop_chat_run
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +244,8 @@ class SendBody(BaseModel):
     attachments: Optional[list[dict]] = None
     # Run this turn in agent mode (workspace file/shell tools). Requires
     # CHATTABLE_AUTH_TOKEN; also enabled per conversation via /api/agent/mode.
-    agent: bool = False
+    # Omitted → follow the conversation's agent mode (legacy); false → chat.
+    agent: Optional[bool] = None
 
 
 class AgentModeBody(BaseModel):
@@ -794,6 +797,51 @@ class OrchMergeBody(BaseModel):
 class OrchProjectBody(BaseModel):
     notes: Optional[str] = None
     test_cmd: Optional[str] = None
+
+
+class RunBody(BaseModel):
+    content: str
+    parent_id: Optional[str] = None
+    agents: list[str]
+
+
+class RunMergeBody(BaseModel):
+    node_ids: list[str]
+    agent: str = "builtin"
+    test: bool = True
+
+
+@app.get("/api/run/executors")
+def api_run_executors() -> dict:
+    """Which agents can take an instruction (unavailable ones say why)."""
+    return {"executors": orch.executors_status(), "agent_ok": bool(_auth_token()),
+            "workspace": orch.workspace.root}
+
+
+@app.post("/api/run")
+def api_run(body: RunBody) -> dict:
+    """交给 agent: run the instruction from a conversation node, once per
+    selected agent, each in its own worktree. Progress streams through
+    /api/stream/{assistant_id}; the result is a snapshot node in the tree."""
+    _require_agent()
+    try:
+        return {"runs": orch.start_chat_runs(body.content, body.parent_id, body.agents)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"node not found: {body.parent_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/run/merge")
+def api_run_merge(body: RunMergeBody) -> dict:
+    """Merge ≥2 result nodes (3-way merge of their snapshots) into a new node."""
+    _require_agent()
+    try:
+        return orch.start_chat_merge(body.node_ids, body.agent, run_tests=body.test)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"node not found: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/orch/state")
