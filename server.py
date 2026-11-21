@@ -257,6 +257,14 @@ class RestoreBody(BaseModel):
     node_id: str
 
 
+class AdoptBody(BaseModel):
+    node_id: str
+
+
+class UndoAdoptBody(BaseModel):
+    previous_commit: str
+
+
 class SettingsBody(BaseModel):
     # LLM settings (all optional — only apply if `model` is given).
     base_url: Optional[str] = None
@@ -661,6 +669,29 @@ def api_agent_approvals_reset(body: RestoreBody) -> dict:
     """Clear the conversation's session auto-approvals."""
     _require_agent()
     return service.reset_session_approvals(body.node_id)
+
+
+@app.post("/api/agent/adopt")
+def api_agent_adopt(body: AdoptBody) -> dict:
+    """Adopt a node's workspace snapshot: snapshot the current state first
+    (undoable), restore the target snapshot, record the adoption."""
+    _require_agent()
+    try:
+        return service.adopt_snapshot(body.node_id)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {body.node_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/agent/undo-adopt")
+def api_agent_undo_adopt(body: UndoAdoptBody) -> dict:
+    """Undo an adoption: restore the workspace to its pre-adopt snapshot."""
+    _require_agent()
+    try:
+        return service.undo_adopt(body.previous_commit)
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/agent/restore")

@@ -214,3 +214,15 @@ def test_auto_approve_writes_env(tmp_path, monkeypatch):
 
 def test_resolve_unknown_step_returns_false(svc):
     assert svc.resolve_approval("no-such-step", "approve") is False
+
+
+def test_denylisted_command_refused_before_approval(svc):
+    """A deny-listed shell command is refused outright — no approval prompt."""
+    _info, approvals, _calls = drive(svc, [
+        tool_call("run_shell", command="sudo rm -rf /"),
+        ANSWER,
+    ], lambda s, ev: s.resolve_approval(ev["step_id"], "approve"))
+    assert approvals == []  # never asked
+    (step,) = step_nodes(svc)
+    assert step.metadata["status"] == "error"
+    assert "deny-list" in step.metadata["error"]

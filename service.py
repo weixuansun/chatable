@@ -55,6 +55,13 @@ from bookmark_service import BookmarkService
 from bookmark_store import resolve_bookmarks_path
 from web_tools import local_path_allowed, register_local_read_root
 from agent_tools import MUTATING_TOOLS, WRITE_TOOLS, build_agent_registry, preview_change
+from shell_sandbox import (
+    denylist_enabled,
+    denylist_reason,
+    sandbox_mode,
+    sandbox_warning,
+    shell_net_enabled,
+)
 from workspace import (
     ShadowGit,
     Workspace,
@@ -740,6 +747,10 @@ class ChatService:
             "workspace": self.workspace().root,
             "auto_approve": sorted(_agent_auto_approve()),
             "git": self.shadow_git().available,
+            "sandbox": sandbox_mode(),
+            "sandbox_warning": sandbox_warning(),
+            "shell_network": shell_net_enabled(),
+            "shell_denylist": denylist_enabled(),
         }
 
     def set_agent_mode(self, node_id: str, enabled: bool) -> dict:
@@ -882,13 +893,25 @@ class ChatService:
                 "ws_commit": md.get("ws_commit"), "diff": diff}
 
     def agent_compare(self, a_id: str, b_id: str) -> dict:
-        """Diff the workspace snapshots nearest two nodes (branch compare)."""
-        ca, cb = self.nearest_ws_commit(a_id), self.nearest_ws_commit(b_id)
+        """Diff the workspace snapshots nearest two nodes (branch compare).
+
+        ``a_id == "workspace"`` compares the CURRENT workspace state (a fresh
+        snapshot is taken first) against the node — used by the adopt dialog
+        to preview what adopting would change.
+        """
+        shadow = self.shadow_git()
+        if a_id == "workspace":
+            ca = shadow.snapshot("current workspace state", allow_empty=True)
+            if not ca:
+                return {"ok": False, "reason": "workspace snapshots unavailable (git?)",
+                        "a_commit": None, "b_commit": None}
+        else:
+            ca = self.nearest_ws_commit(a_id)
+        cb = self.nearest_ws_commit(b_id)
         if not ca or not cb:
             return {"ok": False,
                     "reason": "both nodes need a workspace snapshot on their path",
                     "a_commit": ca, "b_commit": cb}
-        shadow = self.shadow_git()
         return {
             "ok": True,
             "a_commit": ca,
@@ -896,6 +919,37 @@ class ChatService:
             "diff": shadow.diff(cb, ca),
             "files": shadow.diff_numstat(ca, cb),
         }
+
+    def adopt_snapshot(self, node_id: str) -> dict:
+        """Restore the workspace to *node_id*'s snapshot ("adopt this branch").
+
+        The current workspace state is snapshotted first so the adoption
+        itself is undoable; the adoption is recorded on the node's metadata.
+        """
+        if not self.store.exists(node_id):
+            raise NodeNotFoundError(node_id)
+        commit = self.nearest_ws_commit(node_id)
+        if not commit:
+            return {"ok": False, "reason": "no workspace snapshot on this node's path"}
+        shadow = self.shadow_git()
+        previous = shadow.snapshot(f"workspace before adopting #{node_id[:6]}",
+                                   allow_empty=True)
+        shadow.restore(commit)
+        self.store.update_metadata(node_id, {
+            "adopted_at": time.time(),
+            "adopted_commit": commit,
+            "previous_commit": previous,
+        })
+        files = shadow.diff_numstat(previous, commit) if previous else []
+        return {"ok": True, "adopted_commit": commit,
+                "previous_commit": previous, "files": files}
+
+    def undo_adopt(self, previous_commit: str) -> dict:
+        """Restore a commit recorded by adopt_snapshot (undo the adoption)."""
+        shadow = self.shadow_git()
+        shadow.snapshot("workspace before undo-adopt", allow_empty=True)
+        shadow.restore(previous_commit)  # validates the commit exists
+        return {"ok": True, "restored": previous_commit}
 
     def agent_files(self, node_id: str) -> dict:
         """Files tracked in the snapshot nearest *node_id*."""
@@ -2359,7 +2413,11 @@ class ChatService:
                 spec = None  # unknown tool: registry.run reports the error, no approval
             mutating = name in MUTATING_TOOLS
 
-            if spec is not None and not spec.read_only and \
+            # The advisory deny-list refuses dangerous shell commands outright
+            # — before any approval prompt (no point asking for a refusal).
+            refused = denylist_reason(str(args.get("command") or "")) \
+                if name == "run_shell" else None
+            if refused is None and spec is not None and not spec.read_only and \
                     self._needs_approval(name, state.get("trunk_id", "")):
                 preview = preview_change(ws, name, args) if name in WRITE_TOOLS else ""
                 self.store.update_metadata(step.id, {"status": "pending_approval"})
@@ -2388,7 +2446,11 @@ class ChatService:
             parent_commit = state["last_commit"] if mutating else None
 
             emit({"type": "tool_call", "name": name, "arguments": args})
-            result = registry.run(name, args)
+            if refused is not None:
+                result = ToolResult(call_id=call["_cid"], name=name, arguments=args,
+                                    ok=False, output=f"[{refused}]", error=refused)
+            else:
+                result = registry.run(name, args)
 
             status = "ok" if result.ok else "error"
             update: dict = {"status": status, "result": result.output[:4000],
@@ -2448,6 +2510,7 @@ class ChatService:
             }) if agent_ctx.get("step_id") else None,
             "should_stop": lambda: turn.stop_requested,
             "on_proc": lambda p: self._track_agent_proc(assistant_node.id, p),
+            "data_dir": self.data_dir(),
         })
         registry = build_agent_registry(ws, agent_ctx)
         # Base snapshot BEFORE anything runs, recorded on the user node, so

@@ -23,6 +23,13 @@ from typing import Any, Callable, Optional
 from tools import ToolRegistry, ToolSpec
 from web_tools import WebToolResult
 from workspace import Workspace, WorkspaceError
+from shell_sandbox import (
+    build_bwrap_argv,
+    denylist_reason,
+    sandbox_mode,
+    scrubbed_env,
+    shell_net_enabled,
+)
 
 READ_CAP_BYTES = 200 * 1024          # reads truncate past this, with a note
 WRITE_CAP_BYTES = 1024 * 1024        # refuse larger writes
@@ -44,12 +51,6 @@ SKIP_DIRS = frozenset({
 })
 
 PLAN_STATUSES = ("pending", "in_progress", "completed")
-
-# Never handed to shell subprocesses: the agent must not exfiltrate the
-# server's credentials or the auth token that gates agent mode itself.
-_SCRUB_ENV_RE = re.compile(r"(^OPENAI_API_KEY$|^DEEPSEEK_API_KEY$|"
-                           r"^CHATTABLE_AUTH_TOKEN$|^CHATABLE_AUTH_TOKEN$|"
-                           r"_API_KEY$|_SECRET$|_TOKEN$)")
 
 
 def _err(message: str) -> WebToolResult:
@@ -443,19 +444,35 @@ def preview_change(ws: Workspace, name: str, args: dict[str, Any]) -> str:
 def do_run_shell(ws: Workspace, command: str, timeout: int = SHELL_DEFAULT_TIMEOUT_S,
                  on_output: Optional[Callable[[str], None]] = None,
                  on_proc: Optional[Callable] = None,
-                 should_stop: Optional[Callable[[], bool]] = None) -> WebToolResult:
+                 should_stop: Optional[Callable[[], bool]] = None,
+                 data_dir: str = "") -> WebToolResult:
     """Run a shell command, streaming output chunks to ``on_output``.
 
     The command runs in its own process group (start_new_session); a stop
     request (``should_stop``) or the timeout kills the WHOLE group with
     SIGKILL, so children of the command die with it.  Stored output keeps the
     first and last SHELL_STREAM_KEEP bytes with an omission note.
+
+    Safety layers (see shell_sandbox.py): an advisory deny-list refuses
+    obviously destructive commands outright, and when bubblewrap is
+    available the command runs sandboxed — read-only system, workspace
+    read-write, hidden homes/data dir, no network by default.
     """
+    refused = denylist_reason(command)
+    if refused:
+        return _err(f"[refused] {refused}")
     timeout = max(1, min(int(timeout or SHELL_DEFAULT_TIMEOUT_S), SHELL_MAX_TIMEOUT_S))
-    env = {k: v for k, v in os.environ.items() if not _SCRUB_ENV_RE.search(k)}
+    env = scrubbed_env()
+    if sandbox_mode() == "bwrap":
+        popen_args: Any = build_bwrap_argv(
+            command, ws.root, network=shell_net_enabled(), data_dir=data_dir, env=os.environ)
+        use_shell = False
+    else:
+        popen_args = command
+        use_shell = True
     try:
         proc = subprocess.Popen(
-            command, shell=True, cwd=ws.root, env=env,
+            popen_args, shell=use_shell, cwd=ws.root, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, start_new_session=True,
         )
@@ -701,7 +718,7 @@ def build_agent_registry(ws: Workspace, ctx: Optional[dict] = None) -> ToolRegis
         handler=lambda a: do_run_shell(
             ws, _str(a, "command"), int(a.get("timeout") or SHELL_DEFAULT_TIMEOUT_S),
             on_output=ctx.get("on_output"), on_proc=ctx.get("on_proc"),
-            should_stop=ctx.get("should_stop")),
+            should_stop=ctx.get("should_stop"), data_dir=ctx.get("data_dir", "")),
         read_only=False,
         result_max_chars=40_000,
     ))

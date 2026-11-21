@@ -469,6 +469,42 @@ def test_compare_and_snapshot_file_reads(svc):
 
 
 @git_required
+def test_adopt_and_undo(svc):
+    """Adopt restores the branch's snapshot, records it, and is undoable."""
+    info1, _e1, _c1 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        ANSWER,
+    ])
+    info2, _e2, _c2 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v2\n"),
+        ANSWER,
+    ], content="second turn", parent_id=info1["assistant_id"])
+    target = os.path.join(svc.workspace().root, "a.txt")
+    assert open(target).read() == "v2\n"
+
+    # Preview: compare the CURRENT workspace against the target snapshot.
+    preview = svc.agent_compare("workspace", info1["assistant_id"])
+    assert preview["ok"]
+    assert {f["path"] for f in preview["files"]} == {"a.txt"}
+
+    res = svc.adopt_snapshot(info1["assistant_id"])
+    assert res["ok"] and res["adopted_commit"] and res["previous_commit"]
+    assert {f["path"] for f in res["files"]} == {"a.txt"}
+    assert open(target).read() == "v1\n"
+    md = svc.store.get(info1["assistant_id"]).metadata
+    assert md["adopted_commit"] == res["adopted_commit"]
+    assert md["previous_commit"] == res["previous_commit"]
+
+    undo = svc.undo_adopt(res["previous_commit"])
+    assert undo["ok"]
+    assert open(target).read() == "v2\n"
+
+    # The other branch's files are untouched by all of this.
+    assert open(target).read() == svc.agent_file(
+        info2["assistant_id"], "a.txt")["content"]
+
+
+@git_required
 def test_compare_marks_binary_files(svc):
     """Binary files appear in the file list flagged binary (no text diff)."""
     info1, _e1, _c1 = run_turn(svc, [
