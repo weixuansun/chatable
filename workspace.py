@@ -109,14 +109,21 @@ class ShadowGit:
             return
         if not os.path.isdir(self.git_dir):
             self._git("init")
-            # Never track (or delete on clean) any .git inside the workspace.
+            # Never track (or delete on clean) any .git inside the workspace,
+            # build/cache noise, or orchestrator handoff files (.chatable/).
             info = os.path.join(self.git_dir, "info")
             os.makedirs(info, exist_ok=True)
-            with open(os.path.join(info, "exclude"), "a", encoding="utf-8") as fh:
-                # Plus build/cache noise: never snapshotted, never deleted on
-                # restore (git clean -fd leaves ignored files alone).
-                fh.write(".git\n__pycache__/\n*.pyc\n.pytest_cache/\n"
-                         ".mypy_cache/\nnode_modules/\n.venv/\nvenv/\n")
+            exclude = os.path.join(info, "exclude")
+            wanted = (".git", "__pycache__/", "*.pyc", ".pytest_cache/",
+                      ".mypy_cache/", "node_modules/", ".venv/", "venv/", ".chatable/")
+            existing = ""
+            if os.path.isfile(exclude):
+                with open(exclude, encoding="utf-8") as fh:
+                    existing = fh.read()
+            with open(exclude, "a", encoding="utf-8") as fh:
+                for line in wanted:
+                    if line not in existing.splitlines():
+                        fh.write(line + "\n")
         self._initialized = True
 
     # ------------------------------------------------------------------ #

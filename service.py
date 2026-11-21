@@ -2295,7 +2295,8 @@ class ChatService:
 
     def start_turn(self, content: str, parent_id: Optional[str] = None,
                    attachments: Optional[list[dict]] = None,
-                   agent: bool = False) -> dict:
+                   agent: bool = False,
+                   agent_overrides: Optional[dict] = None) -> dict:
         """Create the user+assistant nodes and start generating in the background.
 
         Returns immediately with the new node ids. Generation proceeds in a
@@ -2370,7 +2371,8 @@ class ChatService:
             turn.append({"type": "assistant_node", "id": assistant_node.id, "parent_id": user_node.id})
 
             thread = threading.Thread(
-                target=self._run_turn, args=(turn, user_node, assistant_node, agent_mode),
+                target=self._run_turn,
+                args=(turn, user_node, assistant_node, agent, agent_overrides),
                 daemon=True,
             )
             thread.start()
@@ -2428,10 +2430,11 @@ class ChatService:
             yield from sub
 
     def _run_turn(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
-                  agent: bool = False) -> None:
+                  agent: bool = False,
+                  agent_overrides: Optional[dict] = None) -> None:
         """Background generation body: push events into ``turn`` until done."""
         try:
-            self._generate(turn, user_node, assistant_node, agent)
+            self._generate(turn, user_node, assistant_node, agent, agent_overrides)
         except Exception as e:  # noqa: BLE001 - last-resort guard for the thread
             turn.append({"type": "error", "message": f"{type(e).__name__}: {e}", "id": assistant_node.id})
         finally:
@@ -2447,9 +2450,10 @@ class ChatService:
             timer.start()
 
     def _generate(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
-                  agent: bool = False) -> None:
+                  agent: bool = False,
+                  agent_overrides: Optional[dict] = None) -> None:
         if agent:
-            return self._generate_agent(turn, user_node, assistant_node)
+            return self._generate_agent(turn, user_node, assistant_node, agent_overrides)
         if TOOL_DECISION_MODE in ("native", "openai"):
             return self._generate_unified(turn, user_node, assistant_node)
         return self._generate_legacy(turn, user_node, assistant_node)
@@ -2504,7 +2508,8 @@ class ChatService:
         # Grants walk the branch: the position is the previous step (or
         # the turn's user node for the first step).
         approval_anchor = state.get("last_step_id") or state.get("anchor_id", "")
-        if refused is None and spec is not None and not spec.read_only and \
+        if refused is None and not state.get("auto_approve") \
+                and spec is not None and not spec.read_only and \
                 self._needs_approval(name, approval_anchor):
             preview = preview_change(ws, name, args) if name in WRITE_TOOLS else ""
             self.store.update_metadata(step.id, {"status": "pending_approval"})
@@ -2677,17 +2682,21 @@ class ChatService:
         )
         return "\n".join(lines)
 
-    def _generate_agent(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node) -> None:
+    def _generate_agent(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
+                        overrides: Optional[dict] = None) -> None:
         """Agent-mode tool loop.
 
         Same streaming shape as ``_generate_unified``, but with the workspace
         tool set, higher limits (AGENT_MAX_ROUNDS rounds / per-round call
         cap), no cross-round call dedupe (re-reading a file after editing it
         is legitimate), and a persisted step node per executed call.
+        ``overrides`` (used by the orchestrator's builtin executor) can point
+        the loop at a different workspace/shadow and force auto-approve.
         """
+        overrides = overrides or {}
         emit = turn.append
-        ws = self.workspace()
-        shadow = self.shadow_git()
+        ws = overrides.get("workspace") or self.workspace()
+        shadow = overrides.get("shadow") or self.shadow_git()
         tool_results: list[dict] = []
         context = self._live_context(user_node.id, tool_results)
         loop_messages = list(context["messages"])
@@ -2744,6 +2753,7 @@ class ChatService:
         state = {"last_step_id": None, "last_commit": base_commit,
                  "base_commit": base_commit, "anchor_id": user_node.id,
                  "trunk_id": trunk_id, "plan": None, "shell_runs": [],
+                 "auto_approve": bool(overrides.get("auto_approve")),
                  "ctx": agent_ctx}
 
         while True:

@@ -124,3 +124,46 @@ v1 = kimi + builtin exercised live; claude/codex adapters implemented and unit-t
 against recorded/mock streams (the box has no claude/codex CLI or keys). Demo:
 more-itertools, three different instructions in parallel from the root (fix a bug from an
 issue description, add a function, improve docs) → merge → tests green → adopt.
+
+## 9. API (phase o1)
+
+All endpoints require `CHATTABLE_AUTH_TOKEN` (same middleware as the rest).
+Events stream over SSE: `run_started`, `run_event`, `run_finished`,
+`node_created` (plus `_ping` keepalives; replay via `?from_index=`).
+
+| Endpoint | Body / query | Description |
+|---|---|---|
+| `GET /api/orch/state` | — | `{project: {id, workspace, test_cmd, root}, nodes: [...], runs: [...], executors: {id: {available, reason}}, limits}` |
+| `POST /api/orch/runs` | `{from_node, items: [{instruction, agents: [...], after?: run_id}]}` | Queue runs; returns `{runs: [run_id]}`. `after` waits for the dependency run and rebases onto its result node. |
+| `POST /api/orch/runs/{id}/cancel` | — | Queued → cancelled; running → kill the executor's process group. |
+| `GET /api/orch/node/{id}` | — | One node with its frozen event transcript. |
+| `GET /api/orch/compare?a=&b=` | — | `{ok, a_commit, b_commit, diff, files:[{path,status,additions,deletions,binary}]}` between two nodes' snapshots. |
+| `POST /api/orch/adopt` | `{node_id}` | Snapshot the workspace first (undoable), restore the node's snapshot, mark the node adopted. Returns `{ok, adopted_commit, previous_commit, files}`. |
+| `POST /api/orch/undo-adopt` | `{previous_commit}` | Restore the pre-adopt snapshot. |
+| `GET /api/orch/stream` | `?from_index=` | SSE of all orchestrator events. |
+
+Run/node model, executors, and environment:
+
+- Node fields: `id, root?, snapshot, instruction, parents[], agent, model,
+  status (ok|failed|cancelled), adopted, conclusion {done, decisions,
+  not_done, next}, facts {files:[{path,added,removed}], test?: {cmd,ok,
+  summary}, exit_code, duration_s, usage, error?, killed?}, session_id,
+  events[]`. Runs: `id, from_node, instruction, agent, after?, status
+  (queued|running|ok|failed|cancelled), node_id, events[], error`.
+- Executors: `kimi` (`kimi --output-format stream-json -p`, resume `-S`),
+  `claude` (`claude -p --output-format stream-json --verbose
+  --permission-mode acceptEdits`, resume `--resume`), `codex`
+  (`codex exec --json --full-auto`, resume `codex exec resume`),
+  `builtin` (the in-process DeepSeek agent loop, confined to the run
+  worktree with auto-approve). Binaries: `CHATTABLE_KIMI_BIN` /
+  `CHATTABLE_CLAUDE_BIN` / `CHATTABLE_CODEX_BIN`, else PATH conventions.
+  `available()` checks the binary (plus an auth hint for claude/codex).
+  Other providers' API keys are scrubbed from each executor's env.
+- Limits: `CHATTABLE_ORCH_LIMITS` (default `kimi=2,claude=2,codex=2,
+  builtin=3`). Run timeout `CHATTABLE_ORCH_RUN_TIMEOUT_S` (default 1800);
+  post-run test timeout `CHATTABLE_ORCH_TEST_TIMEOUT_S` (default 300).
+- Each run: worktree from the parent snapshot → `.chatable/CONTEXT.md`
+  (project/path/task layers) → executor → snapshot back into the shadow
+  repo → post-run test command (auto-detected) → node with conclusion +
+  facts. Failed/cancelled runs still produce a node.
+- Merge: phase o2 (hook: `parents` is already a list).

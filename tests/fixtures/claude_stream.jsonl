@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","cwd":"/tmp/proj","session_id":"sess-claude-1111","tools":["Read","Edit","Bash"],"model":"claude-sonnet-4-5"}
+{"type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"I'll fix that file."},{"type":"tool_use","id":"toolu_01","name":"Edit","input":{"file_path":"a.py","old_string":"x = 1","new_string":"x = 2"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"The file a.py has been updated."}]}}
+{"type":"assistant","message":{"id":"msg_02","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"python3 a.py"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_02","content":[{"type":"text","text":"2"}]}]}}
+{"type":"assistant","message":{"id":"msg_03","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Changed x to 2; verified by running the file.\n\n## Conclusion\n### Done\nChanged a.py x=1 to x=2.\n### Key decisions\nNone.\n### Not done\nNothing.\n### Next steps\nNone."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":4100,"session_id":"sess-claude-1111","total_cost_usd":0.0042,"usage":{"input_tokens":5200,"output_tokens":210},"result":"Changed a.py x=1 to x=2, verified by running.\n\n## Conclusion\n### Done\nChanged a.py x=1 to x=2."}

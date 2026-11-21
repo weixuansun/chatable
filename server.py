@@ -45,6 +45,7 @@ from service import ChatService
 from store import NodeNotFoundError, resolve_db_path, TreeStore
 from bookmark_store import BookmarkStore, resolve_bookmarks_path, BookmarkNotFoundError
 from workspace import WorkspaceError
+from orch.service import OrchService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
@@ -58,6 +59,9 @@ _env_data_dir = os.environ.get("CHATTABLE_DATA_DIR") or llm.load_persisted_data_
 service = ChatService(TreeStore(db_path=resolve_db_path(_env_data_dir)))
 # Resolve vision support from the settings cache (or background-probe it).
 llm.init_vision_flag()
+
+# The orchestrator (external coding agents over the snapshot DAG).
+orch = OrchService(service)
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +754,94 @@ def api_agent_file(node: str, path: str) -> dict:
         return service.agent_file(node, path)
     except WorkspaceError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator (external coding agents over a snapshot DAG)
+# ---------------------------------------------------------------------------
+
+class OrchRunsBody(BaseModel):
+    from_node: str
+    items: list[dict]
+
+
+class OrchAdoptBody(BaseModel):
+    node_id: str
+
+
+class OrchUndoBody(BaseModel):
+    previous_commit: str
+
+
+@app.get("/api/orch/state")
+def api_orch_state() -> dict:
+    """DAG nodes, runs, executor availability, limits for this project."""
+    _require_agent()
+    return orch.state()
+
+
+@app.post("/api/orch/runs")
+def api_orch_runs(body: OrchRunsBody) -> dict:
+    """Queue runs: each item is {instruction, agents: [...], after?: run_id}."""
+    _require_agent()
+    try:
+        return {"runs": orch.submit_runs(body.from_node, body.items)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"node not found: {body.from_node}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/orch/runs/{run_id}/cancel")
+def api_orch_cancel(run_id: str) -> dict:
+    _require_agent()
+    if not orch.cancel_run(run_id):
+        raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    return {"ok": True}
+
+
+@app.get("/api/orch/node/{node_id}")
+def api_orch_node(node_id: str) -> dict:
+    _require_agent()
+    try:
+        return orch.node_detail(node_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+
+
+@app.get("/api/orch/compare")
+def api_orch_compare(a: str, b: str) -> dict:
+    """Diff two orchestrator nodes' snapshots."""
+    _require_agent()
+    return orch.compare(a, b)
+
+
+@app.post("/api/orch/adopt")
+def api_orch_adopt(body: OrchAdoptBody) -> dict:
+    """Adopt an orchestrator node's snapshot into the workspace (undoable)."""
+    _require_agent()
+    try:
+        return orch.adopt(body.node_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"node not found: {body.node_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/orch/undo-adopt")
+def api_orch_undo_adopt(body: OrchUndoBody) -> dict:
+    _require_agent()
+    try:
+        return orch.undo_adopt(body.previous_commit)
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/orch/stream")
+def api_orch_stream(from_index: int = 0) -> StreamingResponse:
+    """SSE: run_started / run_event / run_finished / node_created."""
+    _require_agent()
+    return _sse(orch.subscribe(from_index))
 
 
 @app.get("/api/fs/list")
