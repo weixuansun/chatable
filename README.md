@@ -162,6 +162,25 @@ Shell commands run through two safety layers:
   `CHATTABLE_AGENT_SHELL_DENYLIST=off` disables it — note the sandbox, not
   the deny-list, is the real protection.
 
+### Orchestrator (prototype, optional)
+
+The orchestrator turns chatable into a dispatcher over external coding
+agents (Kimi Code, Claude Code, Codex) plus the built-in DeepSeek agent:
+each instruction runs in an isolated git worktree from a snapshot of your
+workspace, producing a DAG of snapshot nodes you can compare, merge
+(3-way, with an auto-dispatched resolver run on conflicts or red tests),
+and adopt into the workspace. Open it from the workflow icon above the
+conversation list. See [docs/orchestrator-design.md](docs/orchestrator-design.md)
+for the model and API.
+
+- Executors are auto-detected (`CHATTABLE_KIMI_BIN` / `CHATTABLE_CLAUDE_BIN`
+  / `CHATTABLE_CODEX_BIN` to override); unavailable ones show greyed out.
+- Per-agent concurrency: `CHATTABLE_ORCH_LIMITS` (default
+  `kimi=2,claude=2,codex=2,builtin=3`). Run/test timeouts:
+  `CHATTABLE_ORCH_RUN_TIMEOUT_S` (1800), `CHATTABLE_ORCH_TEST_TIMEOUT_S` (300).
+- Requires `CHATTABLE_AUTH_TOKEN` like agent mode.
+
+
 
 
 

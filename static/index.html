@@ -193,6 +193,7 @@ try {
       </template>
       <div class="section-head">
         <span>Conversations</span>
+        <button class="icon-btn ghost sm" @click="openOrch()" title="Orchestrator (external coding agents)"><i data-lucide="workflow"></i></button>
         <button class="icon-btn ghost sm" @click="collapseAll()" title="Collapse all nodes"><i data-lucide="chevrons-down-up"></i></button>
         <button class="icon-btn ghost sm" @click="expandAll()" title="Expand all nodes"><i data-lucide="chevrons-up-down"></i></button>
       </div>
@@ -1249,6 +1250,316 @@ try {
       </div>
     </div>
   </template>
+  <!-- FULLSCREEN: orchestrator overlay (external coding agents over a snapshot DAG) -->
+  <template x-if="orch.open">
+    <div class="orch-backdrop">
+      <div class="mindmap-head">
+        <h3><i data-lucide="workflow"></i> Orchestrator
+          <span class="mm-title" x-text="orch.project.workspace"></span></h3>
+        <template x-for="(ex, id) in orch.executors" :key="id">
+          <span class="orch-exec-badge" :class="{off: !ex.available}"
+                :title="ex.available ? id + ' available' : ex.reason">
+            <i :data-lucide="orchAgentIcon(id)"></i><span x-text="id"></span>
+          </span>
+        </template>
+        <template x-for="(c, agent) in orchQueueCounts" :key="'q-' + agent">
+          <span class="count" x-text="agent + ': ' + (c.running ? c.running + ' running' : '') + (c.queued ? ' · ' + c.queued + ' queued' : '')"></span>
+        </template>
+        <div class="btn-group">
+          <button class="icon-btn ghost" @click="orchFit()" title="Fit the DAG to the screen"><i data-lucide="maximize"></i></button>
+          <button class="icon-btn ghost" @click="orchZoom(0.8)" title="Zoom out"><i data-lucide="minus"></i></button>
+          <span class="count zoom-pct" x-text="Math.round(orchView.scale * 100) + '%'"></span>
+          <button class="icon-btn ghost" @click="orchZoom(1.25)" title="Zoom in"><i data-lucide="plus"></i></button>
+        </div>
+        <button class="icon-btn" @click="closeOrch()" title="Close (Esc)"><i data-lucide="x"></i></button>
+      </div>
+
+      <!-- project bar -->
+      <details class="orch-project">
+        <summary><i data-lucide="settings-2"></i> Project notes &amp; test command</summary>
+        <div class="orch-project-body">
+          <textarea x-model="orch.project.notes" rows="2" spellcheck="false"
+                    placeholder="Project notes for every run's context (API constraints, conventions…)"></textarea>
+          <div class="orch-project-row">
+            <input type="text" x-model="orch.project.test_cmd" spellcheck="false"
+                   :placeholder="'test command (detected: ' + (orch.project.detected_test_cmd || 'none') + ')'" />
+            <button class="btn-ghost btn-sm" @click="orchSaveProject()"><i data-lucide="save"></i> Save</button>
+          </div>
+        </div>
+      </details>
+
+      <!-- new-instructions composer -->
+      <div class="orch-composer">
+        <div class="orch-composer-head">
+          <span>New instructions from <b x-text="'#' + (orch.selected || '').slice(0, 6)"></b></span>
+          <button class="btn-ghost btn-sm" @click="orchAddRow()"><i data-lucide="plus"></i> Add row</button>
+          <button class="btn-primary btn-sm" @click="orchSubmitRuns()"
+                  :disabled="!orch.composer.some(r => r.instruction.trim() && r.agents.length)">
+            <i data-lucide="send"></i> Dispatch
+          </button>
+        </div>
+        <template x-if="!orch.composer.length">
+          <p class="hint">Select a node, add a row, and dispatch several instructions in parallel.</p>
+        </template>
+        <template x-for="(row, ri) in orch.composer" :key="ri">
+          <div class="orch-row">
+            <textarea x-model="row.instruction" rows="2" spellcheck="false"
+                      placeholder="Instruction…"></textarea>
+            <div class="orch-row-side">
+              <div class="orch-agent-chips">
+                <template x-for="(ex, id) in orch.executors" :key="id">
+                  <button class="orch-chip" :class="{on: row.agents.includes(id), off: !ex.available}"
+                          :disabled="!ex.available" :title="ex.available ? id : ex.reason"
+                          @click="orchToggleAgent(row, id)">
+                    <i :data-lucide="orchAgentIcon(id)"></i><span x-text="id"></span>
+                  </button>
+                </template>
+              </div>
+              <input type="text" x-model="row.after" placeholder="after run-id (optional)" spellcheck="false" />
+              <button class="icon-btn ghost" @click="orchRemoveRow(ri)" title="Remove row"><i data-lucide="trash-2"></i></button>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- merge bar -->
+      <div class="orch-mergebar" x-show="orchMergeCandidates.length >= 2">
+        <span x-text="orchMergeCandidates.length + ' nodes selected'"></span>
+        <select x-model="orch.mergeAgent">
+          <template x-for="(ex, id) in orch.executors" :key="id">
+            <option :value="id" :disabled="!ex.available" x-text="id"></option>
+          </template>
+        </select>
+        <button class="btn-primary btn-sm" @click="orchDoMerge()"><i data-lucide="git-merge"></i> Merge</button>
+      </div>
+
+      <div class="orch-main">
+        <!-- DAG canvas -->
+        <div class="orch-canvas" x-ref="orchCanvas"
+             :class="{dragging: orchView.dragging}"
+             @pointerdown="orchPointerDown($event)"
+             @wheel.prevent="orchWheel($event)">
+          <div class="orch-world"
+               :style="`width:${orchLayout.w}px; height:${orchLayout.h}px; transform: translate(${orchView.tx}px, ${orchView.ty}px) scale(${orchView.scale});`">
+            <svg class="map-edges" :width="orchLayout.w" :height="orchLayout.h">
+              <path class="map-edge" :d="orchLayout.edgesD"></path>
+            </svg>
+            <template x-for="(pos, id) in orchLayout.positions" :key="id">
+              <div class="orch-card"
+                   :class="{
+                     ['st-' + (pos.card.status || 'ok')]: true,
+                     selected: orch.selected === id,
+                     merging: !!orch.mergeSel[id],
+                     root: !!pos.card.root,
+                     run: !!pos.card.isRun}"
+                   :style="`left:${pos.x}px; top:${pos.y}px; width:${pos.w}px; height:${pos.h}px;`"
+                   :title="pos.card.instruction || 'root'"
+                   @click.stop="if (!orchView._suppress) orchSelect(id)">
+                <div class="orch-card-top">
+                  <i :data-lucide="orchAgentIcon(pos.card.agent)"></i>
+                  <span class="orch-card-instr" x-text="pos.card.root ? 'root snapshot' : pos.card.instruction"></span>
+                  <input type="checkbox" class="orch-sel" :checked="!!orch.mergeSel[id]"
+                         @click.stop="orchToggleMerge(id)" title="Select for merge" />
+                </div>
+                <div class="orch-card-meta">
+                  <span class="step-badge" :class="pos.card.status === 'tests_failed' ? 'error' : pos.card.status"
+                        x-text="orchStatusLabel(pos.card.status)"></span>
+                  <template x-if="pos.card.adopted"><span class="orch-adopted">adopted</span></template>
+                  <template x-if="pos.card.facts && pos.card.facts.duration_s">
+                    <span class="tool-ms" x-text="pos.card.facts.duration_s + 's'"></span>
+                  </template>
+                </div>
+                <div class="orch-card-facts">
+                  <template x-if="orchFileSums(pos.card).add || orchFileSums(pos.card).del">
+                    <span class="orch-pm">
+                      <b class="add" x-text="'+' + orchFileSums(pos.card).add"></b>
+                      <b class="del" x-text="'-' + orchFileSums(pos.card).del"></b>
+                    </span>
+                  </template>
+                  <template x-if="orchTestChip(pos.card)">
+                    <span class="orch-test" :class="{bad: !orchTestChip(pos.card).ok}"
+                          :title="orchTestChip(pos.card).summary" x-text="orchTestChip(pos.card).text"></span>
+                  </template>
+                </div>
+                <template x-if="pos.card.isRun && orch.lastEvent[id]">
+                  <div class="orch-live" x-text="orch.lastEvent[id]"></div>
+                </template>
+                <template x-if="pos.card.isRun">
+                  <button class="orch-cancel" @click.stop="orchCancelRun(id)" title="Cancel run">
+                    <i data-lucide="square"></i>
+                  </button>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- node panel -->
+        <div class="orch-panel" x-show="orchSelectedNode">
+          <template x-if="orchSelectedNode">
+            <div class="orch-panel-inner">
+              <div class="orch-panel-head">
+                <b x-text="'#' + orchSelectedNode.id.slice(0, 6)"></b>
+                <span class="step-badge" :class="orchSelectedNode.status === 'tests_failed' ? 'error' : orchSelectedNode.status"
+                      x-text="orchStatusLabel(orchSelectedNode.status)"></span>
+                <template x-if="orchSelectedNode.adopted"><span class="orch-adopted">adopted</span></template>
+              </div>
+              <div class="orch-panel-section">
+                <h4>Instruction</h4>
+                <p x-text="orchSelectedNode.instruction || '(root snapshot)'"></p>
+              </div>
+              <template x-if="orchSelectedNode.conclusion && (orchSelectedNode.conclusion.done || orchSelectedNode.conclusion.decisions || orchSelectedNode.conclusion.not_done || orchSelectedNode.conclusion.next)">
+                <div class="orch-panel-section">
+                  <h4>Conclusion</h4>
+                  <template x-if="orchSelectedNode.conclusion.done"><p><b>Done:</b> <span x-text="orchSelectedNode.conclusion.done"></span></p></template>
+                  <template x-if="orchSelectedNode.conclusion.decisions"><p><b>Key decisions:</b> <span x-text="orchSelectedNode.conclusion.decisions"></span></p></template>
+                  <template x-if="orchSelectedNode.conclusion.not_done"><p><b>Not done:</b> <span x-text="orchSelectedNode.conclusion.not_done"></span></p></template>
+                  <template x-if="orchSelectedNode.conclusion.next"><p><b>Next steps:</b> <span x-text="orchSelectedNode.conclusion.next"></span></p></template>
+                </div>
+              </template>
+              <div class="orch-panel-section" x-show="(orchSelectedNode.facts && (orchSelectedNode.facts.files || []).length)">
+                <h4>Files</h4>
+                <template x-for="f in (orchSelectedNode.facts ? orchSelectedNode.facts.files : [])" :key="f.path">
+                  <div class="compare-file">
+                    <span class="file-path" :title="f.path" x-text="f.path"></span>
+                    <span class="file-stat add" x-text="'+' + (f.added ?? f.additions ?? 0)"></span>
+                    <span class="file-stat del" x-text="'-' + (f.removed ?? f.deletions ?? 0)"></span>
+                  </div>
+                </template>
+              </div>
+              <div class="orch-panel-section" x-show="orchSelectedNode.facts && (orchSelectedNode.facts.test || orchSelectedNode.facts.exit_code !== undefined)">
+                <h4>Facts</h4>
+                <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test">
+                  <p><b>Test:</b> <code x-text="orchSelectedNode.facts.test.cmd"></code>
+                    → <span :class="orchSelectedNode.facts.test.ok ? 'add' : 'del'"
+                            x-text="orchSelectedNode.facts.test.ok ? 'ok' : 'failed'"></span></p>
+                </template>
+                <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test && orchSelectedNode.facts.test.summary">
+                  <pre class="tool-out" x-text="orchSelectedNode.facts.test.summary"></pre>
+                </template>
+                <p x-show="orchSelectedNode.facts">
+                  <b>Exit:</b> <span x-text="orchSelectedNode.facts.exit_code"></span> ·
+                  <b>Duration:</b> <span x-text="(orchSelectedNode.facts.duration_s || 0) + 's'"></span>
+                </p>
+              </div>
+              <details class="orch-panel-section" x-show="(orchSelectedNode.events || []).length">
+                <summary><h4 style="display:inline">Transcript (<span x-text="(orchSelectedNode.events || []).length"></span>)</h4></summary>
+                <template x-for="(ev, ei) in (orchSelectedNode.events || [])" :key="ei">
+                  <div class="orch-ev" :class="'ev-' + ev.type">
+                    <template x-if="ev.type === 'tool_call'">
+                      <div><b x-text="ev.name"></b> <code x-text="JSON.stringify(ev.arguments || {}).slice(0, 200)"></code></div>
+                    </template>
+                    <template x-if="ev.type === 'tool_result'">
+                      <pre class="tool-out" x-text="String(ev.output || '').slice(0, 600)"></pre>
+                    </template>
+                    <template x-if="ev.type === 'meta'">
+                      <div class="orch-ev-meta" x-text="ev.text || ev.kind || ''"></div>
+                    </template>
+                    <template x-if="ev.type === 'error'">
+                      <div class="orch-ev-err" x-text="ev.text || 'error'"></div>
+                    </template>
+                  </div>
+                </template>
+              </details>
+              <div class="orch-panel-actions">
+                <button class="btn-ghost btn-sm" @click="orchOpenCompare(orchSelectedNode.id)"><i data-lucide="git-compare"></i> Compare…</button>
+                <button class="btn-ghost btn-sm" @click="orchAdopt(orchSelectedNode.id)"><i data-lucide="git-merge"></i> Adopt</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- orchestrator compare modal -->
+      <template x-if="orch.compare.open">
+        <div class="modal-backdrop" @click.self="orch.compare.open = false">
+          <div class="modal compare-modal" @keydown="trapModalTab($event)">
+            <div class="modal-head">
+              <h2><i data-lucide="git-compare"></i><span>Compare nodes</span></h2>
+              <button class="icon-btn" @click="orch.compare.open = false" title="Close (Esc)"><i data-lucide="x"></i></button>
+            </div>
+            <div class="modal-body">
+              <div class="compare-picker">
+                <span class="compare-node" x-text="'#' + (orch.compare.a || '').slice(0, 6)"></span>
+                <i data-lucide="arrow-right"></i>
+                <select x-model="orch.compare.b" @change="orchFetchCompare()">
+                  <template x-for="n in orch.nodes.filter(n => n.id !== orch.compare.a && n.snapshot)" :key="n.id">
+                    <option :value="n.id" x-text="'#' + n.id.slice(0, 6) + ' ' + (n.instruction || 'root').slice(0, 40)"></option>
+                  </template>
+                </select>
+              </div>
+              <template x-if="orch.compare.loading"><div class="planning"><span class="spin"></span><span>comparing…</span></div></template>
+              <template x-if="orch.compare.error"><div class="modal-err" x-text="orch.compare.error"></div></template>
+              <template x-if="orch.compare.data">
+                <div class="compare-result">
+                  <div class="compare-files" x-show="orch.compare.data.files.length">
+                    <template x-for="f in orch.compare.data.files" :key="f.path">
+                      <div class="compare-file">
+                        <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
+                        <span class="file-path" :title="f.path" x-text="f.path"></span>
+                        <span class="file-stat binary" x-show="f.binary">binary</span>
+                        <template x-if="!f.binary">
+                          <span class="compare-stats">
+                            <span class="file-stat add" x-text="'+' + f.additions"></span>
+                            <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                          </span>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                  <template x-if="orch.compare.data.diff">
+                    <div class="diff-view" x-html="renderDiff(orch.compare.data.diff)"></div>
+                  </template>
+                  <p class="hint" x-show="!orch.compare.data.diff">No file changes between these snapshots.</p>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- orchestrator adopt confirm -->
+      <template x-if="orch.adopt.open">
+        <div class="modal-backdrop" @click.self="orch.adopt.open = false">
+          <div class="modal" @keydown="trapModalTab($event)">
+            <div class="modal-head">
+              <h2><i data-lucide="git-merge"></i><span x-text="'Adopt #' + (orch.adopt.nodeId || '').slice(0, 6) + ' into the workspace'"></span></h2>
+              <button class="icon-btn" @click="orch.adopt.open = false" title="Close (Esc)"><i data-lucide="x"></i></button>
+            </div>
+            <div class="modal-body">
+              <p class="hint">The workspace is restored to that node's snapshot. Your current state is snapshotted first — undo is one click after.</p>
+              <template x-if="orch.adopt.loading"><div class="planning"><span class="spin"></span><span>computing changes…</span></div></template>
+              <template x-if="orch.adopt.error"><div class="modal-err" x-text="orch.adopt.error"></div></template>
+              <template x-if="orch.adopt.files">
+                <div class="compare-files" x-show="orch.adopt.files.length">
+                  <template x-for="f in orch.adopt.files" :key="f.path">
+                    <div class="compare-file">
+                      <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
+                      <span class="file-path" :title="f.path" x-text="f.path"></span>
+                      <span class="file-stat binary" x-show="f.binary">binary</span>
+                      <template x-if="!f.binary">
+                        <span class="compare-stats">
+                          <span class="file-stat add" x-text="'+' + f.additions"></span>
+                          <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                        </span>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <p class="hint" x-show="orch.adopt.files && !orch.adopt.files.length && !orch.adopt.loading">No file changes — the workspace already matches.</p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn-ghost" @click="orch.adopt.open = false">Cancel</button>
+              <button class="btn-primary" :disabled="orch.adopt.loading || !!orch.adopt.error"
+                      @click="orchConfirmAdopt()"><i data-lucide="git-merge"></i> Adopt</button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+
 </div>
 
 <script>
@@ -1559,6 +1870,15 @@ function chatable() {
     // Adopt-branch confirm dialog (file-level preview vs current workspace).
     adoptModal: {open: false, nodeId: null, loading: false, error: '', files: null},
 
+    // Orchestrator overlay (external coding agents over a snapshot DAG).
+    orch: {open: false, nodes: [], runs: [], executors: {}, limits: {},
+           project: {notes: '', test_cmd: '', workspace: ''},
+           selected: null, mergeSel: {}, mergeAgent: 'builtin',
+           composer: [], lastEvent: {}, sseAbort: null, panelTab: 'detail',
+           compare: {open: false, a: null, b: null, loading: false, error: '', data: null},
+           adopt: {open: false, nodeId: null, loading: false, error: '', files: null}},
+    orchView: {tx: 0, ty: 0, scale: 1, dragging: false, _suppress: false},
+
     // True when any reply is streaming. Derived; never a send gate.
     get anyStreaming() { return Object.keys(this.streams).length > 0; },
 
@@ -1615,6 +1935,9 @@ function chatable() {
         if (this.compareModal.open) { this.compareModal.open = false; return; }
         if (this.filesModal.open) { this.filesModal.open = false; return; }
         if (this.adoptModal.open) { this.adoptModal.open = false; return; }
+        if (this.orch.adopt.open) { this.orch.adopt.open = false; return; }
+        if (this.orch.compare.open) { this.orch.compare.open = false; return; }
+        if (this.orch.open) { this.closeOrch(); return; }
         if (this.report.open) { this.closeReport(); return; }
         if (this.bmDetail) { this.bmDetail = null; return; }
         if (this.mindmap.open) {
@@ -2509,6 +2832,409 @@ function chatable() {
       this.syncAgentApprovals();  // grants are branch-scoped; refresh the pill
       this.refreshIcons();
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // ---- orchestrator view (external agents over a snapshot DAG) ----------
+
+    // Open/close the overlay; start/stop the SSE subscription.
+    async openOrch() {
+      this.orch.open = true;
+      this.drawerOpen = false;
+      this.bookmarksOpen = false;
+      await this.refreshOrch();
+      if (!this.orch.composer.length) this.orchAddRow();
+      // SSE: runs/nodes refresh the board, run events feed the live lines.
+      const ctrl = new AbortController();
+      this.orch.sseAbort = ctrl;
+      this._orchSse(ctrl.signal).catch(() => {});
+      this.refreshIcons();
+    },
+
+    closeOrch() {
+      this.orch.open = false;
+      if (this.orch.sseAbort) this.orch.sseAbort.abort();
+    },
+
+    async refreshOrch() {
+      try {
+        const [state, project] = await Promise.all([
+          (await fetch('/api/orch/state')).json(),
+          (await fetch('/api/orch/project')).json(),
+        ]);
+        this.orch.nodes = state.nodes || [];
+        this.orch.runs = state.runs || [];
+        this.orch.executors = state.executors || {};
+        this.orch.limits = state.limits || {};
+        this.orch.project = {...this.orch.project, ...project};
+        if (!this.orch.selected && state.project && state.project.root) {
+          this.orch.selected = state.project.root;
+        }
+      } catch (e) {
+        toast('Orchestrator: ' + (e && e.message ? e.message : e), 'error');
+      }
+      this.refreshIcons();
+    },
+
+    async _orchSse(signal) {
+      const resp = await fetch('/api/orch/stream', {signal});
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          const evt = JSON.parse(line.slice(5).trim());
+          if (evt.type === 'run_event' && evt.event) {
+            const e = evt.event;
+            const text = e.name || e.output || e.text || e.kind || e.type;
+            this.orch.lastEvent = {...this.orch.lastEvent,
+              [evt.run_id]: (e.type === 'tool_call' ? '▸ ' : '') + String(text).slice(0, 120)};
+          } else if (['run_started', 'run_finished', 'node_created',
+                      'merge_started', 'merge_finished'].includes(evt.type)) {
+            this.refreshOrch();
+          }
+        }
+      }
+    },
+
+    // Cards = nodes + active runs (as placeholders under their from_node).
+    get orchCards() {
+      const cards = this.orch.nodes.map(n => ({...n, isRun: false}));
+      for (const r of this.orch.runs) {
+        if (r.status !== 'queued' && r.status !== 'running') continue;
+        cards.push({
+          id: r.id, isRun: true, instruction: r.instruction, agent: r.agent,
+          status: r.status, parents: [r.from_node], facts: {},
+          created_at: r.created_at,
+        });
+      }
+      return cards;
+    },
+
+    // Layered DAG layout: depth = longest path from root; siblings side by side.
+    get orchLayout() {
+      const NW = 216, NH = 108, GX = 28, GY = 64;
+      const cards = this.orchCards;
+      const byId = Object.fromEntries(cards.map(c => [c.id, c]));
+      const depth = {};
+      const computeDepth = (c, seen) => {
+        if (depth[c.id] !== undefined) return depth[c.id];
+        if (seen.has(c.id)) return 0;
+        seen.add(c.id);
+        const parents = (c.parents || []).filter(p => byId[p]);
+        depth[c.id] = parents.length
+          ? 1 + Math.max(...parents.map(p => computeDepth(byId[p], seen)))
+          : 0;
+        return depth[c.id];
+      };
+      cards.forEach(c => computeDepth(c, new Set()));
+      const slots = {};
+      const ordered = [...cards].sort((a, b) =>
+        (depth[a.id] - depth[b.id]) || ((a.created_at || 0) - (b.created_at || 0)));
+      const positions = {};
+      for (const c of ordered) {
+        const d = depth[c.id];
+        const slot = slots[d] || 0;
+        slots[d] = slot + 1;
+        positions[c.id] = {card: c, x: slot * (NW + GX), y: d * (NH + GY), w: NW, h: NH};
+      }
+      const edgesD = [];
+      for (const c of cards) {
+        const to = positions[c.id];
+        for (const p of (c.parents || [])) {
+          const from = positions[p];
+          if (!from) continue;
+          const x1 = from.x + NW / 2, y1 = from.y + NH;
+          const x2 = to.x + NW / 2, y2 = to.y;
+          const my = (y1 + y2) / 2;
+          edgesD.push(`M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`);
+        }
+      }
+      const w = Math.max(0, ...Object.values(positions).map(p => p.x + NW)) + 80;
+      const h = Math.max(0, ...Object.values(positions).map(p => p.y + NH)) + 80;
+      return {positions, edgesD: edgesD.join(' '), w, h};
+    },
+
+    orchCardAt(id) {
+      return this.orchCards.find(c => c.id === id) || null;
+    },
+
+    orchSelect(id) {
+      this.orch.selected = id;
+      this.orch.panelTab = 'detail';
+      this.refreshIcons();
+    },
+
+    get orchSelectedNode() {
+      return this.orch.nodes.find(n => n.id === this.orch.selected) || null;
+    },
+
+    orchStatusLabel(s) {
+      return {queued: 'queued', running: 'running', ok: 'ok', failed: 'failed',
+              cancelled: 'cancelled', conflict: 'conflict',
+              tests_failed: 'tests failed', merge: 'merged'}[s] || s;
+    },
+
+    orchAgentIcon(agent) {
+      return {kimi: 'bot', claude: 'sparkles', codex: 'terminal',
+              builtin: 'cpu', merge: 'git-merge', fake: 'bug'}[agent] || 'bot';
+    },
+
+    orchFileSums(node) {
+      const files = (node.facts && node.facts.files) || [];
+      return {
+        add: files.reduce((s, f) => s + (f.added || f.additions || 0), 0),
+        del: files.reduce((s, f) => s + (f.removed || f.deletions || 0), 0),
+      };
+    },
+
+    orchTestChip(node) {
+      const t = node.facts && node.facts.test;
+      if (!t) return null;
+      return {ok: t.ok, text: t.ok ? '✓ tests' : '✗ tests', summary: t.summary || ''};
+    },
+
+    // ---- new instructions composer ----
+
+    orchAddRow() {
+      const available = Object.keys(this.orch.executors)
+        .filter(id => this.orch.executors[id].available);
+      // Prefer the in-process builtin executor (free); fall back to the first
+      // available external CLI.
+      const preferred = available.includes('builtin') ? ['builtin'] : available.slice(0, 1);
+      this.orch.composer.push({instruction: '', agents: preferred, after: ''});
+    },
+
+    orchRemoveRow(i) {
+      this.orch.composer.splice(i, 1);
+    },
+
+    orchToggleAgent(row, id) {
+      const i = row.agents.indexOf(id);
+      if (i === -1) row.agents.push(id);
+      else row.agents.splice(i, 1);
+    },
+
+    async orchSubmitRuns() {
+      const nodeId = this.orch.selected;
+      if (!nodeId) return;
+      const items = this.orch.composer
+        .filter(r => r.instruction.trim() && r.agents.length)
+        .map(r => ({instruction: r.instruction.trim(), agents: r.agents,
+                    ...(r.after ? {after: r.after} : {})}));
+      if (!items.length) return;
+      try {
+        const r = await fetch('/api/orch/runs', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({from_node: nodeId, items}),
+        });
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        this.orch.composer = [];
+        this.orchAddRow();
+        await this.refreshOrch();
+      } catch (e) {
+        toast('Dispatch failed: ' + (e && e.message ? e.message : e), 'error');
+      }
+    },
+
+    orchCancelRun(runId) {
+      fetch('/api/orch/runs/' + encodeURIComponent(runId) + '/cancel',
+            {method: 'POST'}).then(() => this.refreshOrch()).catch(() => {});
+    },
+
+    // ---- merge ----
+
+    orchToggleMerge(id) {
+      const s = {...this.orch.mergeSel};
+      if (s[id]) delete s[id];
+      else s[id] = true;
+      this.orch.mergeSel = s;
+    },
+
+    get orchMergeCandidates() {
+      return this.orch.nodes.filter(n => this.orch.mergeSel[n.id]);
+    },
+
+    async orchDoMerge() {
+      const ids = this.orchMergeCandidates.map(n => n.id);
+      if (ids.length < 2 || !this.orch.mergeAgent) return;
+      try {
+        const r = await fetch('/api/orch/merge', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({nodes: ids, agent: this.orch.mergeAgent, test: true}),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+        this.orch.mergeSel = {};
+        await this.refreshOrch();
+        this.orch.selected = data.node_id;
+        if (data.run_id) toast('Merge dispatched a resolver run', 'info');
+      } catch (e) {
+        toast('Merge failed: ' + (e && e.message ? e.message : e), 'error');
+      }
+    },
+
+    // ---- compare / adopt ----
+
+    async orchOpenCompare(aId) {
+      this.orch.compare = {open: true, a: aId, b: null, loading: false, error: '', data: null};
+      const others = this.orch.nodes.filter(n => n.id !== aId && n.snapshot);
+      if (others.length) {
+        this.orch.compare.b = others[others.length - 1].id;
+        await this.orchFetchCompare();
+      }
+    },
+
+    async orchFetchCompare() {
+      const {a, b} = this.orch.compare;
+      if (!a || !b) return;
+      this.orch.compare.loading = true;
+      this.orch.compare.error = '';
+      try {
+        const r = await fetch('/api/orch/compare?a=' + encodeURIComponent(a) +
+                              '&b=' + encodeURIComponent(b));
+        const data = await r.json();
+        if (!data.ok) throw new Error(data.reason || ('HTTP ' + r.status));
+        this.orch.compare.data = data;
+      } catch (e) {
+        this.orch.compare.error = e && e.message ? e.message : String(e);
+      } finally {
+        this.orch.compare.loading = false;
+      }
+    },
+
+    async orchAdopt(nodeId) {
+      this.orch.adopt = {open: true, nodeId, loading: true, error: '', files: null};
+      try {
+        const r = await fetch('/api/orch/compare?a=workspace&b=' + encodeURIComponent(nodeId));
+        const data = await r.json();
+        if (!data.ok) throw new Error(data.reason || ('HTTP ' + r.status));
+        this.orch.adopt.files = data.files || [];
+      } catch (e) {
+        this.orch.adopt.error = e && e.message ? e.message : String(e);
+      } finally {
+        this.orch.adopt.loading = false;
+      }
+    },
+
+    async orchConfirmAdopt() {
+      const nodeId = this.orch.adopt.nodeId;
+      this.orch.adopt.loading = true;
+      try {
+        const r = await fetch('/api/orch/adopt', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({node_id: nodeId}),
+        });
+        const data = await r.json();
+        if (!r.ok || data.ok === false) throw new Error(data.detail || data.reason || ('HTTP ' + r.status));
+        this.orch.adopt.open = false;
+        const n = (data.files || []).length;
+        this.toastUndo(`Adopted #${nodeId.slice(0, 6)} · ${n} file${n === 1 ? '' : 's'} changed`,
+          'Undo', async () => {
+            const ur = await fetch('/api/orch/undo-adopt', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({previous_commit: data.previous_commit}),
+            });
+            if (!ur.ok) throw new Error(await this.errDetail(ur));
+            toast('Workspace restored to the pre-adopt state', 'success');
+          });
+        await this.refreshOrch();
+      } catch (e) {
+        this.orch.adopt.error = e && e.message ? e.message : String(e);
+        this.orch.adopt.loading = false;
+      }
+    },
+
+    // ---- project bar ----
+
+    async orchSaveProject() {
+      try {
+        const r = await fetch('/api/orch/project', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({notes: this.orch.project.notes || '',
+                                test_cmd: this.orch.project.test_cmd || ''}),
+        });
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        toast('Project saved', 'success');
+      } catch (e) {
+        toast('Save failed: ' + (e && e.message ? e.message : e), 'error');
+      }
+    },
+
+    get orchQueueCounts() {
+      const counts = {};
+      for (const r of this.orch.runs) {
+        if (r.status !== 'queued' && r.status !== 'running') continue;
+        counts[r.agent] = counts[r.agent] || {queued: 0, running: 0};
+        counts[r.agent][r.status] += 1;
+      }
+      return counts;
+    },
+
+    // Canvas pan/zoom (same interaction as the mind map).
+    orchPointerDown(e) {
+      if (e.button !== 0) return;
+      const sx = e.clientX, sy = e.clientY, tx0 = this.orchView.tx, ty0 = this.orchView.ty;
+      let moved = false;
+      const move = (ev) => {
+        if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) <= 4) return;
+        moved = true;
+        this.orchView.dragging = true;
+        this.orchView.tx = tx0 + (ev.clientX - sx);
+        this.orchView.ty = ty0 + (ev.clientY - sy);
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        this.orchView.dragging = false;
+        this.orchView._suppress = moved;
+        if (moved) setTimeout(() => { this.orchView._suppress = false; }, 0);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    },
+
+    orchWheel(e) {
+      const cv = this.$refs.orchCanvas;
+      if (!cv) return;
+      const rect = cv.getBoundingClientRect();
+      const px = e.clientX - rect.left, py = e.clientY - rect.top;
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      this.orchZoomTo(this.orchView.scale * factor, px, py);
+    },
+
+    orchZoom(factor) {
+      const cv = this.$refs.orchCanvas;
+      if (!cv) return;
+      this.orchZoomTo(this.orchView.scale * factor, cv.clientWidth / 2, cv.clientHeight / 2);
+    },
+
+    orchZoomTo(scale, px, py) {
+      const s0 = this.orchView.scale;
+      const s1 = Math.min(2.5, Math.max(0.15, scale));
+      const wx = (px - this.orchView.tx) / s0, wy = (py - this.orchView.ty) / s0;
+      this.orchView.tx = px - wx * s1;
+      this.orchView.ty = py - wy * s1;
+      this.orchView.scale = s1;
+    },
+
+    orchFit() {
+      const cv = this.$refs.orchCanvas;
+      const layout = this.orchLayout;
+      if (!cv || !layout.w) return;
+      const PAD = 30;
+      const s = Math.min(1, Math.max(0.15,
+        Math.min((cv.clientWidth - PAD * 2) / layout.w,
+                 (cv.clientHeight - PAD * 2) / layout.h)));
+      this.orchView.scale = s;
+      this.orchView.tx = (cv.clientWidth - layout.w * s) / 2;
+      this.orchView.ty = (cv.clientHeight - layout.h * s) / 2;
     },
 
     // The round-limit affordance on an incomplete agent reply: continue the

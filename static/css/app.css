@@ -1409,9 +1409,6 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 
 /* fork pill "start new conversation" */
 .pill-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
-        margin-left: 2px; padding: 0; background: transparent; border: 0; border-radius: 50
-/* fork pill "start new conversation" */
-.pill-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
         margin-left: 2px; padding: 0; background: transparent; border: 0; border-radius: 50%;
         color: var(--dim-2); cursor: pointer; }
 .pill-x:hover { color: var(--fail); background: var(--fail-soft); }
@@ -1420,3 +1417,121 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 /* round-limit stop notice + Continue */
 .limit-notice { margin: 4px 0 8px; }
 .limit-notice .fork-btn { margin-left: auto; }
+
+/* ---------------------------------------------------------------------------
+ * Orchestrator overlay
+ * ------------------------------------------------------------------------- */
+.orch-backdrop { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column;
+                 background: var(--bg); }
+.orch-exec-badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px;
+                   border-radius: 999px; font-size: 11px; font-weight: 600;
+                   color: var(--ok); background: var(--ok-soft); }
+.orch-exec-badge.off { color: var(--dim-2); background: var(--panel-2); }
+.orch-exec-badge .lucide { width: 11px; height: 11px; }
+
+.orch-project { border-bottom: 1px solid var(--border); background: var(--panel); }
+.orch-project > summary { cursor: pointer; list-style: none; user-select: none;
+                          display: flex; align-items: center; gap: 6px; padding: 6px 16px;
+                          font-size: 12px; color: var(--dim-2); }
+.orch-project > summary:hover { color: var(--fg); }
+.orch-project > summary::-webkit-details-marker { display: none; }
+.orch-project > summary .lucide { width: 13px; height: 13px; }
+.orch-project-body { padding: 4px 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+.orch-project-body textarea { width: 100%; background: var(--panel-2); color: var(--fg);
+                              border: 1px solid var(--border-2); border-radius: 8px;
+                              padding: 7px 10px; font-size: 12.5px; resize: vertical; }
+.orch-project-row { display: flex; gap: 8px; }
+.orch-project-row input { flex: 1; background: var(--panel-2); color: var(--fg);
+                          border: 1px solid var(--border-2); border-radius: 8px;
+                          padding: 5px 10px; font-size: 12px; font-family: var(--font-mono); }
+
+.orch-composer { border-bottom: 1px solid var(--border); background: var(--panel);
+                 padding: 8px 16px 10px; }
+.orch-composer-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+                      font-size: 12.5px; color: var(--dim); }
+.orch-composer-head > :first-child { flex: 1; }
+.orch-composer .hint { margin: 2px 0 4px; font-size: 11.5px; color: var(--dim-2); }
+.orch-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.orch-row textarea { flex: 1; background: var(--panel-2); color: var(--fg);
+                     border: 1px solid var(--border-2); border-radius: 8px;
+                     padding: 7px 10px; font-size: 12.5px; resize: vertical; }
+.orch-row-side { display: flex; flex-direction: column; gap: 6px; width: 300px; flex: none; }
+.orch-row-side input { background: var(--panel-2); color: var(--fg);
+                       border: 1px solid var(--border); border-radius: 6px;
+                       padding: 4px 8px; font-size: 11px; font-family: var(--font-mono); }
+.orch-agent-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.orch-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px;
+             border-radius: 999px; border: 1px solid var(--border-2);
+             background: var(--panel-2); color: var(--dim); font-size: 11px; cursor: pointer; }
+.orch-chip.on { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-ring); }
+.orch-chip.off { opacity: .45; cursor: not-allowed; }
+.orch-chip .lucide { width: 11px; height: 11px; }
+
+.orch-mergebar { display: flex; align-items: center; gap: 10px; padding: 6px 16px;
+                 border-bottom: 1px solid var(--border); background: var(--accent-softer);
+                 font-size: 12.5px; }
+.orch-mergebar select { background: var(--panel-2); color: var(--fg);
+                        border: 1px solid var(--border-2); border-radius: 8px;
+                        padding: 4px 8px; font-size: 12px; }
+
+.orch-main { flex: 1; display: flex; min-height: 0; }
+.orch-canvas { flex: 1; overflow: hidden; position: relative; cursor: grab;
+               background-image: radial-gradient(color-mix(in srgb, var(--dim-2) 30%, transparent) 1px, transparent 1px);
+               background-size: 22px 22px; }
+.orch-canvas.dragging { cursor: grabbing; }
+.orch-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+
+.orch-card { position: absolute; display: flex; flex-direction: column; gap: 4px;
+             background: var(--card); border: 1px solid var(--border-2);
+             border-radius: 12px; padding: 8px 10px; cursor: pointer;
+             box-shadow: var(--shadow-sm); transition: border-color .15s, box-shadow .15s; }
+.orch-card:hover { border-color: var(--accent-ring); box-shadow: var(--shadow-md); }
+.orch-card.selected { border-color: var(--accent);
+                      box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-md); }
+.orch-card.merging { border-color: var(--branch);
+                     box-shadow: 0 0 0 3px var(--branch-soft), var(--shadow-md); }
+.orch-card.run { border-style: dashed; }
+.orch-card.root { background: var(--panel-2); }
+.orch-card-top { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.orch-card-top > .lucide { width: 13px; height: 13px; flex: none; margin-top: 2px; color: var(--accent); }
+.orch-card-instr { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; line-height: 1.35;
+                   color: var(--fg); overflow: hidden; display: -webkit-box;
+                   -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.orch-sel { flex: none; margin: 2px 0 0; accent-color: var(--accent); }
+.orch-card-meta { display: flex; align-items: center; gap: 6px; }
+.orch-card-facts { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.orch-pm b { font-family: var(--font-mono); font-weight: 600; margin-right: 5px; }
+.orch-pm .add { color: var(--ok); }
+.orch-pm .del { color: var(--fail); }
+.orch-test { color: var(--ok); background: var(--ok-soft); border-radius: 999px;
+             padding: 0 7px; font-size: 10.5px; font-weight: 600; line-height: 16px; }
+.orch-test.bad { color: var(--fail); background: var(--fail-soft); }
+.orch-adopted { color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent);
+                border-radius: 999px; padding: 0 7px; font-size: 10.5px; font-weight: 600; line-height: 16px; }
+.orch-live { font-family: var(--font-mono); font-size: 10px; color: var(--dim-2);
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.orch-cancel { position: absolute; right: 6px; bottom: 6px; background: transparent; border: 0;
+               color: var(--dim-2); cursor: pointer; padding: 2px; border-radius: 5px; }
+.orch-cancel:hover { color: var(--fail); background: var(--fail-soft); }
+.orch-cancel .lucide { width: 12px; height: 12px; }
+
+.orch-panel { width: 380px; flex: none; border-left: 1px solid var(--border);
+              background: var(--panel); overflow-y: auto; }
+.orch-panel-inner { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.orch-panel-head { display: flex; align-items: center; gap: 8px; }
+.orch-panel-section h4 { margin: 0 0 5px; font-size: 11px; font-weight: 600;
+                         text-transform: uppercase; letter-spacing: .4px; color: var(--dim-2); }
+.orch-panel-section p { margin: 0 0 6px; font-size: 12.5px; line-height: 1.55; color: var(--dim); }
+.orch-panel-section p b { color: var(--fg); }
+.orch-panel-section .add { color: var(--ok); }
+.orch-panel-section .del { color: var(--fail); }
+.orch-panel-section summary { cursor: pointer; list-style: none; }
+.orch-panel-section summary::-webkit-details-marker { display: none; }
+.orch-ev { margin-bottom: 6px; font-size: 11.5px; }
+.orch-ev code { font-family: var(--font-mono); font-size: 10.5px; color: var(--dim-2);
+                overflow-wrap: anywhere; }
+.orch-ev .tool-out { margin: 4px 0 0; max-height: 140px; font-size: 10.5px; }
+.orch-ev-meta { color: var(--dim); }
+.orch-ev-err { color: var(--fail); }
+.orch-panel-actions { display: flex; gap: 8px; }
+.map-edges { pointer-events: none; }

@@ -113,12 +113,27 @@ Keys stay in each agent's own env; the builtin executor never sees others' keys.
 Sandbox: the external CLIs need network to their APIs, so v1 runs them confined by
 working directory (bwrap with network where feasible is a v2 item).
 
-## 6. UI
+## 6. UI — implemented in o3
 
-* Mind map of **snapshot cards**: instruction, agent icon, status, +/- lines, tests.
-* On a node: **New instructions** — several rows, each with instruction text + agent(s).
-* Running edges show the live event stream; a node's panel shows the transcript.
-* Compare any two nodes; select siblings → **Merge**; **Adopt** / Undo.
+Full-screen overlay (workflow icon above the conversation list):
+
+* DAG canvas of snapshot cards (layered by depth, pan/zoom/fit): instruction,
+  agent icon, status chip (queued/running/ok/failed/cancelled/conflict/
+  tests_failed, adopted badge), +/- lines, test chip, duration. Edges
+  parent→child; merge nodes draw an edge from every parent. Queued/running
+  runs render as dashed placeholder cards with a live last-event line (SSE).
+* Node panel: instruction, structured conclusion, facts (files +/-, test
+  summary, exit code, duration, tokens), collapsible event transcript, and
+  Compare / Adopt actions.
+* New-instructions composer on the selected node: multiple rows, each with
+  instruction + agent multi-select (unavailable executors greyed with the
+  reason) + optional "after". Runs appear immediately via SSE.
+* Merge: checkbox-select ≥2 cards → agent picker → merge; conflict or red
+  tests auto-dispatch the resolver run.
+* Compare modal (file list + colored diff), Adopt confirm with file preview
+  and Undo toast (same patterns as the agent UI).
+* Project bar: workspace, executor availability badges, queue counts,
+  editable project notes + test command (GET/PUT /api/orch/project).
 
 ## 7. Reuse vs new
 
