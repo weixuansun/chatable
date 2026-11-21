@@ -132,6 +132,31 @@ range is allowed by default so fetches keep working. Override with
 `CHATTABLE_FETCH_ALLOW_NETS` (comma-separated CIDRs, e.g. to allow an
 intranet range; set it empty to disable the default).
 
+### Agent mode (prototype, optional)
+
+Agent mode lets the model work autonomously in a dedicated workspace
+(workspace file tools + shell, per-step tree nodes, shadow-git snapshots,
+approvals). It is **off by default** and only available when
+`CHATTABLE_AUTH_TOKEN` is set — the toggle lives in the composer. See
+[docs/agent-api.md](docs/agent-api.md) for the full API.
+
+Shell commands run through two safety layers:
+
+- **Sandbox (real boundary).** When `bwrap` (bubblewrap) is installed,
+  `run_shell` commands execute confined: read-only system dirs, the workspace
+  read-write at its real path, private `/tmp`, hidden home and data
+  directories, a synthetic `HOME`, no network by default. PATH directories
+  (including a venv outside the workspace) stay available read-only.
+  - `CHATTABLE_AGENT_SANDBOX=auto|bwrap|off` (default `auto`: bwrap when
+    available; `/api/agent/status` and the composer badge warn when not).
+  - `CHATTABLE_AGENT_SHELL_NET=1` allows network access inside the sandbox.
+- **Deny-list (advisory tripwire).** Obviously destructive commands
+  (`rm -rf /`, `sudo`, `curl | sh`, `dd of=/dev/…`, `mkfs`, fork bombs,
+  `git push --force`, writes to `~/.ssh`…) are refused outright.
+  `CHATTABLE_AGENT_SHELL_DENYLIST=off` disables it — note the sandbox, not
+  the deny-list, is the real protection.
+
+
 
 
 ## License

@@ -38,6 +38,41 @@ it is required for these routes like any other.
 | `GET /api/agent/compare?a=&b=` | — | Branch compare: `{ok, a_commit, b_commit, diff, files: [{path, status, additions, deletions}]}` between the snapshots nearest the two nodes. |
 | `GET /api/agent/files?node=` | — | `{ok, commit, files: [path…]}` — files tracked in the snapshot nearest the node. |
 | `GET /api/agent/file?node=&path=` | — | `{ok, commit, path, content, truncated}` — one file at that snapshot (200KB cap, path confined). |
+| `POST /api/agent/adopt` | `{node_id}` | Adopt the node's snapshot into the workspace: snapshots the current state first, restores, records `adopted_at`/`adopted_commit`/`previous_commit` on the node. Returns `{ok, adopted_commit, previous_commit, files}`. |
+| `POST /api/agent/undo-adopt` | `{previous_commit}` | Restore the pre-adopt snapshot (commit must exist in the shadow repo). |
+
+`GET /api/agent/compare?a=&b=` also accepts `a=workspace` (current workspace
+state, snapshotted on the spot) — used by the adopt dialog's preview.
+
+## Shell safety
+
+`run_shell` is the dangerous one; it has two layers:
+
+1. **Sandbox (the real boundary).** With `bwrap` installed and
+   `CHATTABLE_AGENT_SANDBOX=auto` (default), commands run confined:
+   read-only `/usr`/`/bin`/`lib*`/`/etc`/`/opt`, workspace read-write at the
+   same path, private tmpfs `/tmp`, tmpfs over `/home` and `/root`, the
+   chatable data dir hidden, synthetic `HOME` (`/tmp/agent-home`),
+   `--unshare-pid/ipc/uts`, `--die-with-parent`, and **no network** unless
+   `CHATTABLE_AGENT_SHELL_NET=1`. PATH directories (and a venv's root when a
+   PATH entry is `<venv>/bin`) are re-mounted read-only, so an existing
+   toolchain outside the workspace keeps working. `CHATTABLE_AGENT_SANDBOX=
+   off` disables; when auto can't find bwrap, `/api/agent/status` reports
+   `sandbox: "off"` plus a loud `sandbox_warning` (the composer shows a red
+   "no sandbox" badge).
+2. **Deny-list (advisory).** `rm -rf /|~`, `sudo`, `curl|sh`, recursive
+   `chmod 777` on `/`/`~`, `dd of=/dev/…`, `mkfs`, fork bombs,
+   `git push --force`, and writes into `.ssh`/`.aws`/`.gnupg` are refused
+   outright (before any approval prompt). `CHATTABLE_AGENT_SHELL_DENYLIST=off`
+   disables it. It is a tripwire, not a boundary — the sandbox is.
+
+Every shell runs with a scrubbed environment: credentials
+(`*_API_KEY`, `*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_CREDENTIAL(S)`,
+`*_AUTH`, `AWS_*`, `GH_*`/`GITHUB_*`, `OPENAI_*`, `DEEPSEEK_*`,
+`ANTHROPIC_*`, `CHATTABLE_AUTH_TOKEN`) are dropped.
+
+`/api/agent/status` gains `{sandbox, sandbox_warning, shell_network,
+shell_denylist}`.
 
 Existing tree endpoints (`GET /api/tree`, `GET /api/node/{id}`,
 `GET /api/path/{id}`) return step nodes like any other node, so the mind map
@@ -124,7 +159,7 @@ that point.
 | `grep(pattern, path?, glob?, ignore_case?, context?)` | yes | auto | pure-Python regex; `path:line: text` output (context lines use `-`), capped with a "N more matches" note |
 | `write_file(path, content)` | no | ask | creates parents, ≤1MB, returns unified diff |
 | `edit_file(path, old_string, new_string, replace_all?, expected_replacements?)` | no | ask | not-found errors show the most similar region with line numbers; non-unique errors list occurrence line numbers; returns unified diff |
-| `run_shell(command, timeout?)` | no | ask | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, `*_API_KEY`/`*_TOKEN`/`*_SECRET` env vars scrubbed |
+| `run_shell(command, timeout?)` | no | ask | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, credentials env vars scrubbed, **bwrap-sandboxed when available** (no network by default), deny-list refuses destructive commands outright |
 | `update_plan(items)` | yes | auto | TodoWrite-style plan checklist; latest plan emitted as `plan` SSE and persisted on the assistant node |
 
 All paths are confined to the workspace: real paths must stay under the
@@ -158,6 +193,9 @@ affected; persisted step results stay full.
 | `CHATTABLE_AGENT_MAX_CALLS_PER_ROUND` | `8` | Agent loop per-round tool-call cap. |
 | `CHATTABLE_AGENT_APPROVAL_TIMEOUT_S` | `600` | Approval wait before treating as denied. |
 | `CHATTABLE_AGENT_CTX_BUDGET_TOKENS` | `60000` | Estimated-token budget before old tool results are shrunk. |
+| `CHATTABLE_AGENT_SANDBOX` | `auto` | `auto` (bwrap if available) / `bwrap` / `off`. |
+| `CHATTABLE_AGENT_SHELL_NET` | (unset) | `1` allows network inside the shell sandbox. |
+| `CHATTABLE_AGENT_SHELL_DENYLIST` | (unset) | `off` disables the advisory command deny-list. |
 
 ## Shadow git snapshots
 

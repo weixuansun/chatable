@@ -467,18 +467,24 @@ try {
                                         <i data-lucide="file-diff"></i> View diff
                                       </button>
                                       <template x-if="s.ws_commit">
-                                        <button class="fork-btn" @click="restoreWorkspace(s.id)"
-                                                title="Reset the workspace to this step's snapshot">
-                                          <i data-lucide="history"></i> Restore workspace here
-                                        </button>
-                                        <button class="fork-btn" @click="openCompare(s.id)"
-                                                title="Compare this snapshot with another node">
-                                          <i data-lucide="git-compare"></i> Compare…
-                                        </button>
-                                        <button class="fork-btn" @click="openFiles(s.id)"
-                                                title="Browse files at this snapshot">
-                                          <i data-lucide="folder-open"></i> Files
-                                        </button>
+                                        <span class="btn-cluster">
+                                          <button class="fork-btn" @click="restoreWorkspace(s.id)"
+                                                  title="Reset the workspace to this step's snapshot">
+                                            <i data-lucide="history"></i> Restore workspace here
+                                          </button>
+                                          <button class="fork-btn" @click="openCompare(s.id)"
+                                                  title="Compare this snapshot with another node">
+                                            <i data-lucide="git-compare"></i> Compare…
+                                          </button>
+                                          <button class="fork-btn" @click="openFiles(s.id)"
+                                                  title="Browse files at this snapshot">
+                                            <i data-lucide="folder-open"></i> Files
+                                          </button>
+                                          <button class="fork-btn" @click="adoptBranch(s.id)"
+                                                  title="Adopt this snapshot into the workspace (undoable)">
+                                            <i data-lucide="git-merge"></i> Adopt
+                                          </button>
+                                        </span>
                                       </template>
                                       <button class="fork-btn" @click="forkFromHere(s.id)"
                                               title="Fork the conversation from this step (agent mode restores its workspace snapshot on send)">
@@ -535,18 +541,24 @@ try {
                     </button>
                   </template>
                   <template x-if="m.role === 'assistant' && m.ws_commit">
-                    <button class="fork-btn" @click="restoreWorkspace(m.id)"
-                            title="恢复工作区到这条回复结束时的快照">
-                      <i data-lucide="history"></i>恢复工作区
-                    </button>
-                    <button class="fork-btn" @click="openCompare(m.id)"
-                            title="对比这条回复与其他节点的工作区快照">
-                      <i data-lucide="git-compare"></i>对比
-                    </button>
-                    <button class="fork-btn" @click="openFiles(m.id)"
-                            title="查看这条回复结束时工作区的文件">
-                      <i data-lucide="folder-open"></i>文件
-                    </button>
+                    <span class="btn-cluster">
+                      <button class="fork-btn" @click="restoreWorkspace(m.id)"
+                              title="恢复工作区到这条回复结束时的快照">
+                        <i data-lucide="history"></i>恢复工作区
+                      </button>
+                      <button class="fork-btn" @click="openCompare(m.id)"
+                              title="对比这条回复与其他节点的工作区快照">
+                        <i data-lucide="git-compare"></i>对比
+                      </button>
+                      <button class="fork-btn" @click="openFiles(m.id)"
+                              title="查看这条回复结束时工作区的文件">
+                        <i data-lucide="folder-open"></i>文件
+                      </button>
+                      <button class="fork-btn" @click="adoptBranch(m.id)"
+                              title="把这条回复的文件状态采用到当前工作区（可撤销）">
+                        <i data-lucide="git-merge"></i>采用
+                      </button>
+                    </span>
                   </template>
                   <button class="fork-btn" @click="copyMessage(m)"
                           :title="copiedMsgId === m.id ? '已复制' : '复制内容'">
@@ -613,6 +625,13 @@ try {
         </button>
         <span x-show="agentMode && agent.workspace" class="agent-ws" :title="agent.workspace"
               x-text="agent.workspace"></span>
+        <!-- shell sandbox status: shield when confined, red warning otherwise -->
+        <span class="sandbox-badge" x-show="agentMode"
+              :class="agent.sandbox === 'bwrap' ? 'ok' : 'warn'"
+              :title="agent.sandbox === 'bwrap'
+                ? 'shell commands run in a bubblewrap sandbox · network ' + (agent.shell_network ? 'ON' : 'OFF')
+                : (agent.sandbox_warning || 'shell commands are NOT sandboxed')"
+              x-text="agent.sandbox === 'bwrap' ? ('sandbox: bwrap' + (agent.shell_network ? '' : ' · no net')) : 'no sandbox'"></span>
         <!-- session auto-approvals for this conversation; click to reset -->
         <button class="ctx-map-btn auto-approve-pill" x-show="agentMode && sessionAutoApprove.length"
                 @click="resetAutoApprove()"
@@ -925,6 +944,12 @@ try {
             </div>
           </template>
         </div>
+        <div class="modal-foot" x-show="compareModal.data && compareModal.b">
+          <button class="btn-primary" @click="adoptBranch(compareModal.b)"
+                  :title="'Restore the workspace to #' + (compareModal.b || '').slice(0, 6) + '’s snapshot (undoable)'">
+            <i data-lucide="git-merge"></i> <span x-text="'Adopt #' + (compareModal.b || '').slice(0, 6)"></span>
+          </button>
+        </div>
       </div>
     </div>
   </template>
@@ -959,6 +984,52 @@ try {
           <template x-if="filesModal.content">
             <pre class="tool-out files-content" x-text="filesModal.content"></pre>
           </template>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- adopt-branch confirm: file-level preview vs the current workspace -->
+  <template x-if="adoptModal.open">
+    <div class="modal-backdrop" @click.self="adoptModal.open = false">
+      <div class="modal" @keydown="trapModalTab($event)">
+        <div class="modal-head">
+          <h2><i data-lucide="git-merge"></i><span x-text="'Adopt #' + (adoptModal.nodeId || '').slice(0, 6) + ' into the workspace'"></span></h2>
+          <button class="icon-btn" @click="adoptModal.open = false" title="Close (Esc)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <p class="hint">The workspace is restored to that node's snapshot. Your current
+             workspace state is snapshotted first — you can undo right after.</p>
+          <template x-if="adoptModal.loading">
+            <div class="planning"><span class="spin"></span><span>computing changes…</span></div>
+          </template>
+          <template x-if="adoptModal.error">
+            <div class="modal-err" x-text="adoptModal.error"></div>
+          </template>
+          <template x-if="adoptModal.files">
+            <div class="compare-files" x-show="adoptModal.files.length">
+              <template x-for="f in adoptModal.files" :key="f.path">
+                <div class="compare-file">
+                  <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
+                  <span class="file-path" :title="f.path" x-text="f.path"></span>
+                  <span class="file-stat binary" x-show="f.binary">binary</span>
+                  <template x-if="!f.binary">
+                    <span class="compare-stats">
+                      <span class="file-stat add" x-text="'+' + f.additions"></span>
+                      <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                    </span>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+          <p class="hint" x-show="adoptModal.files && !adoptModal.files.length && !adoptModal.loading">
+            No file changes — the workspace already matches that snapshot.</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn-ghost" @click="adoptModal.open = false">Cancel</button>
+          <button class="btn-primary" :disabled="adoptModal.loading || !!adoptModal.error"
+                  @click="confirmAdopt()"><i data-lucide="git-merge"></i> Adopt this branch's files</button>
         </div>
       </div>
     </div>
@@ -1094,17 +1165,27 @@ try {
                             title="恢复工作区到此快照">
                       <i data-lucide="history"></i>
                     </button>
+                    <button class="map-del-btn" x-show="mn.wsCommit" @click.stop="adoptBranch(mn.id)"
+                            title="采用此快照到当前工作区（可撤销）">
+                      <i data-lucide="git-merge"></i>
+                    </button>
                   </span>
                 </template>
                 <template x-if="!mn.isStep && mn.wsCommit">
-                  <button class="map-del-btn" @click.stop="restoreWorkspace(mn.replyId || mn.id)"
-                          title="恢复工作区到此快照">
-                    <i data-lucide="history"></i>
-                  </button>
-                  <button class="map-del-btn" @click.stop="openCompare(mn.replyId || mn.id)"
-                          title="对比此快照与其他节点">
-                    <i data-lucide="git-compare"></i>
-                  </button>
+                  <span class="btn-cluster">
+                    <button class="map-del-btn" @click.stop="restoreWorkspace(mn.replyId || mn.id)"
+                            title="恢复工作区到此快照">
+                      <i data-lucide="history"></i>
+                    </button>
+                    <button class="map-del-btn" @click.stop="openCompare(mn.replyId || mn.id)"
+                            title="对比此快照与其他节点">
+                      <i data-lucide="git-compare"></i>
+                    </button>
+                    <button class="map-del-btn" @click.stop="adoptBranch(mn.replyId || mn.id)"
+                            title="采用此分支的文件状态（可撤销）">
+                      <i data-lucide="git-merge"></i>
+                    </button>
+                  </span>
                 </template>
               </div>
             </div>
@@ -1457,6 +1538,8 @@ function chatable() {
     compareModal: {open: false, a: null, b: null, loading: false, error: '', data: null},
     filesModal: {open: false, nodeId: null, commit: '', files: [], loading: false,
                  error: '', current: '', content: '', contentLoading: false},
+    // Adopt-branch confirm dialog (file-level preview vs current workspace).
+    adoptModal: {open: false, nodeId: null, loading: false, error: '', files: null},
 
     // True when any reply is streaming. Derived; never a send gate.
     get anyStreaming() { return Object.keys(this.streams).length > 0; },
@@ -1513,6 +1596,7 @@ function chatable() {
         if (this.stepModal.open) { this.stepModal.open = false; return; }
         if (this.compareModal.open) { this.compareModal.open = false; return; }
         if (this.filesModal.open) { this.filesModal.open = false; return; }
+        if (this.adoptModal.open) { this.adoptModal.open = false; return; }
         if (this.report.open) { this.closeReport(); return; }
         if (this.bmDetail) { this.bmDetail = null; return; }
         if (this.mindmap.open) {
@@ -2672,7 +2756,78 @@ function chatable() {
       this.select(id);
     },
 
-    // ---- branch compare + snapshot file browser ----------------------------
+    // ---- adopt branch ("use this node's files") ----------------------------
+
+    // Open the confirm dialog with the file-level preview of what adopting
+    // would change vs the CURRENT workspace.
+    async adoptBranch(nodeId) {
+      this.compareModal.open = false;
+      this.mindmap.open = false;
+      this.adoptModal = {open: true, nodeId, loading: true, error: '', files: null};
+      this.refreshIcons();
+      try {
+        const r = await fetch('/api/agent/compare?a=workspace&b=' + encodeURIComponent(nodeId));
+        const data = await r.json();
+        if (!r.ok || data.ok === false) throw new Error(data.detail || data.reason || ('HTTP ' + r.status));
+        this.adoptModal.files = data.files || [];
+      } catch (e) {
+        this.adoptModal.error = e && e.message ? e.message : String(e);
+      } finally {
+        this.adoptModal.loading = false;
+      }
+    },
+
+    async confirmAdopt() {
+      const nodeId = this.adoptModal.nodeId;
+      this.adoptModal.loading = true;
+      try {
+        const r = await fetch('/api/agent/adopt', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({node_id: nodeId}),
+        });
+        const data = await r.json();
+        if (!r.ok || data.ok === false) throw new Error(data.detail || data.reason || ('HTTP ' + r.status));
+        this.adoptModal.open = false;
+        const n = (data.files || []).length;
+        this.toastUndo(
+          `Adopted #${nodeId.slice(0, 6)} · ${n} file${n === 1 ? '' : 's'} changed`,
+          'Undo',
+          async () => {
+            const ur = await fetch('/api/agent/undo-adopt', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({previous_commit: data.previous_commit}),
+            });
+            if (!ur.ok) throw new Error(await this.errDetail(ur));
+            toast('Workspace restored to the pre-adopt state', 'success');
+          });
+      } catch (e) {
+        this.adoptModal.error = e && e.message ? e.message : String(e);
+        this.adoptModal.loading = false;
+      }
+    },
+
+    // A toast with an action button (e.g. Undo after adopt).
+    toastUndo(message, label, onUndo) {
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      const el = document.createElement('div');
+      el.className = 'toast toast-success toast-action';
+      const span = document.createElement('span');
+      span.textContent = message;
+      const btn = document.createElement('button');
+      btn.className = 'toast-btn';
+      btn.textContent = label;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try { await onUndo(); } catch (e) { toast('Undo failed: ' + (e && e.message ? e.message : e), 'error'); }
+        el.remove();
+      });
+      el.appendChild(span);
+      el.appendChild(btn);
+      container.appendChild(el);
+      requestAnimationFrame(() => el.classList.add('show'));
+      setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 10000);
+    },
 
     // Nodes of the current tree that carry a workspace snapshot (candidates
     // for the "compare with" dropdown).

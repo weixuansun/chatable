@@ -1391,3 +1391,18 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .auto-approve-pill:hover { color: var(--fail); background: var(--fail-soft); }
 .compare-stats { display: inline-flex; gap: 6px; flex: none; }
 .file-stat.binary { color: var(--dim-2); font-style: italic; }
+
+/* agent v5: sandbox badge, adopt toast action */
+.sandbox-badge { display: inline-flex; align-items: center; padding: 1px 8px;
+                 border-radius: 999px; font-size: 10.5px; font-weight: 600; line-height: 18px; }
+.sandbox-badge.ok { color: var(--ok); background: var(--ok-soft); }
+.sandbox-badge.warn { color: var(--fail); background: var(--fail-soft); }
+.toast-action { display: flex; align-items: center; gap: 10px; }
+.toast-btn { background: transparent; border: 1px solid currentColor; color: inherit;
+             border-radius: 6px; padding: 2px 10px; font-size: 11px; font-weight: 600;
+             cursor: pointer; }
+.toast-btn:hover { background: rgba(255,255,255,.12); }
+.toast-btn:disabled { opacity: .5; cursor: default; }
+
+/* single-root wrapper for multi-button template blocks */
+.btn-cluster { display: contents; }
