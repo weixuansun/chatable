@@ -142,7 +142,10 @@ reply becomes a **node** with exactly one workspace snapshot and five
 actions: **View diff** (改动, the whole task's change), **Compare** (对比),
 **Files** (文件), **Adopt** (采用 — make the workspace match this node,
 backed up and undoable) and **Fork from here** (从此分叉 — continuing from an
-older node restores its files first). It is **off by default** and only available when
+older node restores its files first). The mind map and the sidebar tree show only
+these nodes (question + reply, with status and files-changed count); the
+individual steps appear only in the main chat, and branches hang off the
+reply node. It is **off by default** and only available when
 `CHATTABLE_AUTH_TOKEN` is set — the toggle lives in the composer. See
 [docs/agent-api.md](docs/agent-api.md) for the full API. After an agent
 reply, typing again continues the same branch by default (the ✕ on the

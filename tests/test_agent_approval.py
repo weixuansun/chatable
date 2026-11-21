@@ -261,3 +261,20 @@ def test_denylisted_command_refused_before_approval(svc):
     (step,) = step_nodes(svc)
     assert step.metadata["status"] == "error"
     assert "deny-list" in step.metadata["error"]
+
+
+def test_grants_carry_across_several_reply_parented_turns(svc):
+    """Follow-ups hang off reply nodes, yet a grant made on turn 1's step
+    still covers turn 3 two replies later (same branch)."""
+    info1, ap1, _ = drive(svc, [
+        tool_call("write_file", path="a.txt", content="one\n"), ANSWER,
+    ], lambda s, ev: s.resolve_approval(ev["step_id"], "approve", always=True))
+    assert len(ap1) == 1
+    info2, ap2, _ = drive(svc, [ANSWER], lambda s, ev: None,
+                          parent_id=info1["assistant_id"])
+    assert svc.store.get(info2["user_id"]).parent_id == info1["assistant_id"]
+    _i3, ap3, _ = drive(svc, [
+        tool_call("write_file", path="b.txt", content="two\n"), ANSWER,
+    ], lambda s, ev: None, parent_id=info2["assistant_id"])
+    assert ap3 == []
+    assert svc.session_approvals(info2["assistant_id"])["always"] == ["write_file"]

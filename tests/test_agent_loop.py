@@ -750,9 +750,9 @@ def test_fork_from_step_truncates_context(svc):
 
 @git_required
 def test_followup_continues_the_step_chain_with_full_context(svc):
-    """A plain follow-up from an agent reply attaches at the step-chain tail
-    and keeps the turn's WHOLE context (full replay + final answer) — only a
-    mid-turn fork truncates."""
+    """A plain follow-up from an agent reply hangs off the REPLY node (node
+    granularity) and keeps the turn's WHOLE context (full replay + final
+    answer) — only a mid-turn fork truncates."""
     info1, _e1, _c1 = run_turn(svc, [
         tool_call("write_file", path="a.txt", content="v1\n"),
         tool_call("read_file", path="a.txt"),
@@ -762,7 +762,8 @@ def test_followup_continues_the_step_chain_with_full_context(svc):
     _i2, _e2, calls2 = run_turn(svc, [ANSWER], content="continue please",
                                 parent_id=info1["assistant_id"])
     u2 = svc.store.get(_i2["user_id"])
-    assert u2.parent_id == steps1[-1].id  # attached at the trajectory tail
+    assert u2.parent_id == info1["assistant_id"]  # child of the reply node
+    assert steps1  # the turn's steps exist, but are display-only
     sent = calls2[0]["messages"]
     # Full replay kept (both calls) AND the final answer is in context.
     assert [m["tool_call_id"] for m in sent if m.get("role") == "tool"] == [
@@ -791,3 +792,52 @@ def test_shell_step_lists_touched_files_without_snapshot(svc):
     assert {f["path"] for f in done["touched_files"]} == {"s.txt", "keep.txt"}
     msgs = svc.path_messages(info["assistant_id"])
     assert msgs[-1]["step"]["touched_files"]
+
+
+@git_required
+def test_legacy_followup_under_step_tail_still_works(svc):
+    """Old data: follow-ups were stored under the last step. Continuing from
+    such a node keeps full context and restores the right files."""
+    info1, _e1, _c1 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"), ANSWER])
+    (s1,) = step_nodes(svc)
+    # A legacy-shaped follow-up: parent = step tail.
+    info2, _e2, calls2 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v2\n"), ANSWER],
+        content="more", parent_id=s1.id)
+    assert svc.store.get(info2["user_id"]).parent_id == s1.id
+    sent = calls2[0]["messages"]
+    assert any(m.get("role") == "assistant" and m.get("content") == "all done" for m in sent)
+    # Its reply resolves to its own node snapshot (v2), the turn-1 reply to v1.
+    target = os.path.join(svc.workspace().root, "a.txt")
+    svc.adopt_snapshot(info1["assistant_id"])
+    assert open(target).read() == "v1\n"
+    svc.adopt_snapshot(info2["assistant_id"])
+    assert open(target).read() == "v2\n"
+    # path_messages shows turn-1 steps once, then turn 2.
+    roles = [m["role"] for m in svc.path_messages(info2["assistant_id"])]
+    assert roles == ["user", "assistant", "step", "user", "assistant", "step"]
+
+
+@git_required
+def test_reply_node_status_fields_for_the_map(svc):
+    info, _e, _c = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="1\n"),
+        tool_call("write_file", path="b.txt", content="2\n"),
+        ANSWER,
+    ])
+    md = svc.store.get(info["assistant_id"]).metadata
+    assert md["files_changed"] == 2
+    # Tree payload: the reply carries agent status; steps stay in the tree
+    # (the UI lifts them out of the sidebar and the map).
+    def find(n, nid):
+        if n.get("id") == nid:
+            return n
+        for c in n.get("children", []):
+            r = find(c, nid)
+            if r:
+                return r
+    tree = svc.tree()
+    reply = find(tree, info["assistant_id"])
+    assert reply["agent"] is True and reply["files_changed"] == 2
+    assert reply["stop_reason"] is None

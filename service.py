@@ -789,17 +789,45 @@ class ChatService:
         md = path[0].metadata
         return bool(isinstance(md, dict) and md.get("agent_mode"))
 
+    def _grant_holder_ids(self, anchor_id: str) -> list[str]:
+        """Node ids whose "always allow" grants apply at *anchor_id*: its
+        ancestors-or-self, plus — for every earlier agent turn on the path
+        that the path leaves through its reply node (a follow-up/fork hangs
+        off the reply, not the last step) — that turn's whole step chain,
+        since grants are recorded on steps."""
+        try:
+            path = self.store.path_to_root(anchor_id)
+        except NodeNotFoundError:
+            return []
+        ids: list[str] = []
+        cmap = None
+        for i, n in enumerate(path):
+            ids.append(n.id)
+            if n.role != "assistant" or not self._grant_nodes:
+                continue
+            nxt = path[i + 1] if i + 1 < len(path) else None
+            if nxt is not None and nxt.role == "step":
+                continue  # the path walks the chain itself
+            if cmap is None:
+                cmap = self.store.children_map()
+            cur = n.id
+            while True:
+                kids = [c for c in cmap.get(cur, []) if self.store.get(c).role == "step"]
+                if len(kids) != 1:
+                    break
+                cur = kids[0]
+                ids.append(cur)
+        return ids
+
     def _needs_approval(self, name: str, anchor_id: str = "") -> bool:
         # Grants apply only along the current branch: the grant must have been
-        # made on an ancestor-or-self of the position being approved.
+        # made on an ancestor-or-self of the position being approved (or on
+        # an earlier turn's steps whose reply is on the path).
         if anchor_id:
-            try:
-                for n in self.store.path_to_root(anchor_id):
-                    grant = self._grant_nodes.get(n.id)
-                    if grant and name in grant:
-                        return False
-            except NodeNotFoundError:
-                pass
+            for nid in self._grant_holder_ids(anchor_id):
+                grant = self._grant_nodes.get(nid)
+                if grant and name in grant:
+                    return False
         auto = _agent_auto_approve()
         if "all" in auto:
             return False
@@ -956,10 +984,10 @@ class ChatService:
         grants: list[dict] = []
         effective: set[str] = set()
         if anchor:
-            for n in self.store.path_to_root(anchor):
-                grant = self._grant_nodes.get(n.id)
+            for nid in self._grant_holder_ids(anchor):
+                grant = self._grant_nodes.get(nid)
                 if grant:
-                    grants.append({"node_id": n.id, "tools": sorted(grant)})
+                    grants.append({"node_id": nid, "tools": sorted(grant)})
                     effective |= grant
         return {"always": sorted(effective), "grants": grants}
 
@@ -967,8 +995,8 @@ class ChatService:
         """Clear grants made along *node_id*'s current branch."""
         anchor = self._approval_anchor(node_id)
         if anchor:
-            for n in self.store.path_to_root(anchor):
-                self._grant_nodes.pop(n.id, None)
+            for nid in self._grant_holder_ids(anchor):
+                self._grant_nodes.pop(nid, None)
         return {"ok": True}
 
     def restore_workspace(self, node_id: str) -> dict:
@@ -1131,6 +1159,12 @@ class ChatService:
             self.node_ws_commit(node.id) if node.role == "assistant" and md.get("agent") else None)
         if wsc:
             data["ws_commit"] = wsc
+        if node.role == "assistant" and md.get("agent"):
+            # Mind-map / sidebar node status (steps themselves are not drawn).
+            data["agent"] = True
+            data["stop_reason"] = md.get("stop_reason")
+            if "files_changed" in md:
+                data["files_changed"] = md.get("files_changed")
         if node.role == "step":
             data["step_status"] = md.get("status")
         if isinstance(md.get("plan"), list):
@@ -2387,14 +2421,12 @@ class ChatService:
                 commit = self.nearest_ws_commit(parent_id)
                 if commit:
                     self.shadow_git().restore(commit)
+            # A follow-up / fork from an agent reply hangs off the REPLY node
+            # (node granularity: steps are display-only). The full turn replay
+            # stays in context (_expand_path) and grants made on its steps
+            # still apply (_grant_holder_ids). Older data may have follow-ups
+            # under the step-chain tail; both shapes are read correctly.
             parent = self.store.get(parent_id)
-            if agent_mode and parent.role == "assistant":
-                # Attach a follow-up at the END of the turn's step trajectory:
-                # approval grants made along it then apply to the new turn, and
-                # the full turn (replay + final answer) stays in context.
-                tail = self._step_chain_tail(parent.id)
-                if tail != parent.id:
-                    parent = self.store.get(tail)
 
             user_node = Node.new(role="user", content=content, parent_id=parent.id)
             if agent_mode:
@@ -2729,6 +2761,13 @@ class ChatService:
             out["ws_commit"] = final
         if base_commit:
             out["ws_parent_commit"] = base_commit
+        files = 0
+        if final and base_commit and final != base_commit:
+            try:
+                files = len(shadow.diff_numstat(base_commit, final))
+            except Exception:  # noqa: BLE001 - the count is cosmetic
+                files = 0
+        out["files_changed"] = files
         return out
 
     def _agent_wrap_up_nudge(self, state: dict, shadow: ShadowGit) -> str:
@@ -3015,6 +3054,8 @@ class ChatService:
             # The turn did not finish on its own — the UI offers Continue.
             extra["stop_reason"] = "round_limit"
             extra["incomplete"] = True
+        elif turn.stop_requested:
+            extra["stop_reason"] = "stopped"
         self._finalize_turn(
             turn, user_node, assistant_node,
             context=context, full_text=full_text, usage=usage,

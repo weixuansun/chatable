@@ -1102,25 +1102,10 @@ try {
             <path class="map-edge" :d="mindmap.edgesD"></path>
           </svg>
           <template x-for="mn in mindmap.nodes" :key="mn.id">
-            <div class="map-node" :class="{center: mn.isCenter, 'map-step-node': mn.isStep, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
+            <div class="map-node" :class="{center: mn.isCenter, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
                  :style="`left:${mn.x}px; top:${mn.y}px; width:${mn.w}px; height:${mn.h}px;`"
                  :title="mn.q || mn.a"
                  @click.stop="mapNodeClick(mn)">
-              <!-- collapsed step-chain group: click to expand/collapse in place -->
-              <div class="map-step map-step-group" x-show="mn.isStepGroup"
-                   title="Click to expand / collapse this agent run">
-                <i data-lucide="bot"></i>
-                <span class="map-step-name">agent run</span>
-                <span class="map-step-args" x-text="mn.count + ' steps'"></span>
-                <i :data-lucide="mmExpandedGroups.has(mn.groupOf) ? 'chevron-up' : 'chevron-down'"></i>
-              </div>
-              <!-- agent step card: status dot + tool icon + name + short args -->
-              <div class="map-step" x-show="mn.isStep" :class="'st-' + (mn.stepStatus || 'ok')">
-                <span class="map-step-dot" :class="mn.stepStatus" :title="stepStatusLabel(mn.stepStatus)"></span>
-                <i :data-lucide="stepIcon(mn.tool)"></i>
-                <span class="map-step-name" x-text="mn.tool"></span>
-                <span class="map-step-args" x-text="stepArgsShort(mn)"></span>
-              </div>
               <div class="map-q" x-show="mn.isPair">
                 <span class="role-dot role-user" :class="{'streaming': !!(streams[mn.id] || (mn.replyId && streams[mn.replyId]))}"></span>
                 <span class="map-q-text" x-text="mn.q"></span>
@@ -1129,10 +1114,18 @@ try {
                         x-text="'◐ ' + mn.plan.done + '/' + mn.plan.total"></span>
                 </template>
               </div>
+              <!-- node status (agent replies / live turns); steps are NOT drawn in the map -->
+              <template x-if="mapNodeStatus(mn)">
+                <div class="map-status" :class="'ms-' + mapNodeStatus(mn).cls">
+                  <span class="map-status-dot"></span>
+                  <span x-text="mapNodeStatus(mn).label"></span>
+                  <template x-if="mn.filesChanged"><span class="map-status-files" x-text="'· ' + mn.filesChanged + ' 个文件改动'"></span></template>
+                </div>
+              </template>
               <div class="map-a" x-show="mn.a">
                 <span class="role-dot role-assistant" x-show="!mn.isPair"></span><span x-text="mn.a"></span>
               </div>
-              <div class="map-node-foot" x-show="!mn.isStepGroup">
+              <div class="map-node-foot">
                 <button class="map-del-btn" x-show="mn.isTrunk" @click.stop="exportTree(mn.id)"
                         title="导出整棵对话树为 Markdown">
                   <i data-lucide="download"></i>
@@ -1146,18 +1139,10 @@ try {
                   <i data-lucide="trash-2"></i>
                 </button>
                 <template x-if="mn.kidCount > 1"><span class="branch-badge" x-text="mn.kidCount + ' 分支'"></span></template>
-                <button class="map-detail-btn" x-show="!mn.isStep" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
+                <button class="map-detail-btn" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
                   <i data-lucide="message-square"></i>查看细节
                 </button>
-                <!-- step cards: icon-only actions so the compact card stays tidy -->
-                <template x-if="mn.isStep">
-                  <span class="map-step-actions">
-                    <button class="map-del-btn" @click.stop="mapShowDetail(mn.id)" title="查看细节">
-                      <i data-lucide="message-square"></i>
-                    </button>
-                  </span>
-                </template>
-                <template x-if="!mn.isStep && mn.wsCommit">
+                <template x-if="mn.wsCommit">
                   <span class="btn-cluster">
                     <button class="map-del-btn" @click.stop="viewNodeDiff(mn.replyId || mn.id)"
                             title="View diff：这一轮任务的改动">
@@ -1843,7 +1828,6 @@ function chatable() {
     // Expanded read-only step groups in the chat timeline (group id → true).
     expandedGroups: {},
     // Mind-map step chains expanded past the >6 auto-collapse (reply ids).
-    mmExpandedGroups: new Set(),
     // Branch compare + snapshot file browser modals.
     compareModal: {open: false, a: null, b: null, loading: false, error: '', data: null},
     filesModal: {open: false, nodeId: null, commit: '', files: [], loading: false,
@@ -1868,7 +1852,7 @@ function chatable() {
     // Mind map overlay: a layout snapshot (nodes/edges in px) plus the canvas
     // view transform. Snapshot is taken on open and not re-laid-out while the
     // map is open, so background tree changes can't shift the user's view.
-    MAP_NW: 220, MAP_NH: 112, MAP_GX: 32, MAP_GY: 90,
+    MAP_NW: 220, MAP_NH: 128, MAP_GX: 32, MAP_GY: 90,
     mindmap: { open: false, rootId: null, centerTitle: '', nodes: [], edgesD: '', w: 0, h: 0 },
     galleryOpen: false,
     gallerySearch: '',
@@ -3336,12 +3320,6 @@ function chatable() {
     stepStatusLabel(status) { return stepStatusLabel(status); },
     renderDiff(diff) { return renderUnifiedDiff(diff); },
 
-    // Map cards show the args without the redundant leading tool name
-    // ("write_file hello.py" → "hello.py"); shell commands stay as-is.
-    stepArgsShort(mn) {
-      return shortArgs(mn.tool, mn.q);
-    },
-
     // ---- agent run grouping (chat timeline) --------------------------------
 
     planFor(m) {
@@ -3461,30 +3439,6 @@ function chatable() {
       } finally { this.stepModal.loading = false; }
     },
 
-    // Mind-map step click: recenter (handled by mapNodeClick) + open details.
-    async mapStepDetail(mn) {
-      this.stepModal = {open: true, title: (mn.tool || 'step'), diff: '', result: '',
-                        ws_commit: mn.wsCommit || null, nodeId: mn.id, loading: true};
-      try {
-        const r = await fetch('/api/node/' + encodeURIComponent(mn.id));
-        if (r.ok) {
-          const d = await r.json();
-          const md = d.metadata || {};
-          this.stepModal.title = (md.tool || mn.tool || 'step') +
-            (md.args_summary ? ' · ' + shortArgs(md.tool || mn.tool, md.args_summary) : '');
-          this.stepModal.diff = md.diff || '';
-          this.stepModal.result = stripDiffFromResult(md.result, md.diff);
-          this.stepModal.ws_commit = md.ws_commit || this.stepModal.ws_commit;
-        }
-      } catch (e) { /* fall through to the diff endpoint */ }
-      if (!this.stepModal.diff) {
-        try {
-          const r = await fetch('/api/agent/step/' + encodeURIComponent(mn.id) + '/diff');
-          if (r.ok) this.stepModal.diff = (await r.json()).diff || '';
-        } catch (e) { /* no diff available */ }
-      }
-      this.stepModal.loading = false;
-    },
 
     // Mind-map "fork from here" on a step: the chat view switches to the
     // step's branch and the composer forks from it (an agent send restores
@@ -4146,11 +4100,7 @@ function chatable() {
       if (!trunk) return null;
       const pairRoot = this.buildPairTree(trunk);
       const NW = this.MAP_NW, NH = this.MAP_NH, GX = this.MAP_GX, GY = this.MAP_GY;
-      // Agent step cards are compact: half height, a bit narrower, and a
-      // tighter vertical gap so a long trajectory reads as one chain.
-      const STEP_W = 176, STEP_H = 54, STEP_GY = 40;
-      const dims = (n) => (n.isStep || n.isStepGroup) ? {w: STEP_W, h: STEP_H, gy: STEP_GY}
-                                                      : {w: NW, h: NH, gy: GY};
+      const dims = () => ({w: NW, h: NH, gy: GY});
       const nodes = [], edgePairs = [];
       let cursor = 0;
       const placeSubtree = (node, y, emit) => {
@@ -4174,14 +4124,14 @@ function chatable() {
         }
         if (!emit) return { x, w: d.w };
         const pos = { id: node.id, replyId: node.replyId, isPair: node.isPair,
-                      isStep: !!node.isStep, tool: node.tool || '',
-                      isStepGroup: !!node.isStepGroup, groupOf: node.groupOf || '',
-                      count: node.count || 0, plan: node.plan || null,
-                      stepStatus: node.stepStatus || '', wsCommit: node.wsCommit || null,
+                      plan: node.plan || null, wsCommit: node.wsCommit || null,
+                      agent: !!node.agent, stopReason: node.stopReason || null,
+                      filesChanged: node.filesChanged || 0,
                       q: node.q, a: node.a, kidCount: kids.length,
                       x, y, w: d.w, h: d.h,
                       isTrunk: y === 0,
-                      isCenter: node.id === rootId || node.replyId === rootId };
+                      isCenter: node.id === rootId || node.replyId === rootId ||
+                                (node.ownedIds ? node.ownedIds.has(rootId) : false) };
         nodes.push(pos);
         childPos.forEach(cp => edgePairs.push([pos, cp]));
         return pos;
@@ -4205,101 +4155,33 @@ function chatable() {
     // Merge each turn (a user node + its latest assistant reply) into one
     // card node for the mind map. Extra replies beside the chosen one (rare)
     // become assistant-only cards so no branch information is lost.
-    // The single-child step lineage below a reply (this turn's trajectory).
-    _collectStepChain(node) {
-      const chain = [];
-      let cur = node;
-      while (true) {
-        const stepKids = (cur.children || []).filter(c => c.role === 'step');
-        if (stepKids.length !== 1) break;
-        chain.push(stepKids[0]);
-        cur = stepKids[0];
-      }
-      return chain;
-    },
-
-    // A step card for the map; children are pre-built.
-    _stepCard(node, children) {
-      return {
-        id: node.id, replyId: null, isPair: false, isStep: true,
-        tool: node.tool || 'tool', stepStatus: node.step_status || 'ok',
-        wsCommit: node.ws_commit || null, q: node.preview || node.title || '',
-        a: '', children,
+    // Agent steps are never drawn in the map (they live in the chat only).
+    // Children of step nodes — e.g. follow-ups stored under a turn's last
+    // step by older versions — are lifted to the owning reply card, so
+    // branches always hang off reply nodes. `owned` collects the lifted
+    // step ids (selecting a step centers its reply's card).
+    _liftMapKids(kids, owned) {
+      const out = [];
+      const visit = (c) => {
+        if (c.role === 'step') { if (owned) owned.add(c.id); (c.children || []).forEach(visit); }
+        else out.push(c);
       };
-    },
-
-    // Cards for an assistant reply's step chain. Long chains (> 6 steps)
-    // collapse maximal fork-free runs into "agent run · N steps" group nodes,
-    // while steps with a fork hanging off them stay visible as branch points.
-    _buildChainCards(chain, reply) {
-      const longChain = chain.length > 6;
-      const expanded = this.mmExpandedGroups;
-      const chainIds = new Set(chain.map(s => s.id));
-      const sideKids = (s) => (s.children || []).filter(c => !chainIds.has(c.id));
-      // Any side child (a user fork or a divergent agent turn) makes the step
-      // a branch point that must stay visible.
-      const hasFork = (s) => sideKids(s).length > 0;
-      // Segment into visible forked steps and fork-free runs (head → tail).
-      const segs = [];
-      let run = [];
-      for (const s of chain) {
-        if (hasFork(s)) {
-          if (run.length) { segs.push({run}); run = []; }
-          segs.push({step: s});
-        } else {
-          run.push(s);
-        }
-      }
-      if (run.length) segs.push({run});
-      // Build cards tail → head so children are ready when parents are built.
-      // (The tail's own side children are attached by its segment below —
-      // seeding them here too drew every follow-up twice.)
-      let next = [];
-      for (let i = segs.length - 1; i >= 0; i--) {
-        const seg = segs[i];
-        if (seg.step) {
-          const s = seg.step;
-          next = [this._stepCard(s, [...sideKids(s).map(c => this.buildPairTree(c)), ...next])];
-          continue;
-        }
-        const arr = seg.run;
-        const gid = 'grp-' + arr[0].id;
-        if (longChain && arr.length > 1 && !expanded.has(gid)) {
-          next = [{
-            id: gid, replyId: reply.id, isStepGroup: true, groupOf: gid,
-            count: arr.length, q: '', a: '',
-            wsCommit: arr[arr.length - 1].ws_commit || null,
-            children: next,
-          }];
-        } else {
-          for (let j = arr.length - 1; j >= 0; j--) {
-            const s = arr[j];
-            next = [this._stepCard(s, [...sideKids(s).map(c => this.buildPairTree(c)), ...next])];
-          }
-        }
-      }
-      return next;
+      (kids || []).forEach(visit);
+      return out;
     },
 
     buildPairTree(node) {
-      // Agent step node: a compact, visually distinct card chained under its
-      // assistant reply — never merged into a Q/A pair.
-      if (node.role === 'step') {
-        return this._stepCard(node, (node.children || []).map(c => this.buildPairTree(c)));
-      }
+      const owned = new Set();
       if (node.role === 'user') {
-        const kids = node.children || [];
+        const kids = this._liftMapKids(node.children || [], owned);
         const replies = kids.filter(c => c.role === 'assistant');
         const reply = replies.length ? replies[replies.length - 1] : null;
         const children = [];
+        // Users that hang directly under the user node (rare) stay children.
+        for (const c of kids) if (c.role !== 'assistant') children.push(this.buildPairTree(c));
         if (reply) {
-          // The turn's step trajectory (grouped when long); a user forked
-          // directly off the reply lands beside the chain.
-          const chain = this._collectStepChain(reply);
-          const chained = new Set(chain.map(s => s.id));
-          if (chain.length) children.push(...this._buildChainCards(chain, reply));
-          for (const c of (reply.children || [])) {
-            if (!chained.has(c.id)) children.push(this.buildPairTree(c));
+          for (const c of this._liftMapKids(reply.children || [], owned)) {
+            children.push(this.buildPairTree(c));
           }
         }
         for (const c of replies.slice(0, -1)) children.push(this.buildPairTree(c));
@@ -4309,6 +4191,10 @@ function chatable() {
           isPair: true,
           wsCommit: (reply && reply.ws_commit) || null,
           plan: (reply && reply.plan) || null,
+          agent: !!(reply && reply.agent),
+          stopReason: (reply && reply.stop_reason) || null,
+          filesChanged: (reply && reply.files_changed) || 0,
+          ownedIds: owned,
           q: node.title || node.preview || '(untitled)',
           a: reply ? (reply.summary || reply.title || reply.reply_preview || reply.preview || '') : '',
           children,
@@ -4317,13 +4203,28 @@ function chatable() {
       // Unpaired assistant card (an extra reply beside the chosen one).
       return {
         id: node.id,
-        replyId: node.id,
+        replyId: node.role === 'assistant' ? node.id : null,
         isPair: false,
         wsCommit: node.ws_commit || null,
+        agent: !!node.agent, stopReason: node.stop_reason || null,
+        filesChanged: node.files_changed || 0,
+        ownedIds: owned,
         q: '',
         a: node.summary || node.title || node.reply_preview || node.preview || '(empty)',
-        children: (node.children || []).map(c => this.buildPairTree(c)),
+        children: this._liftMapKids(node.children || [], owned).map(c => this.buildPairTree(c)),
       };
+    },
+
+    // Status chip for a map card: live turns and agent replies only.
+    mapNodeStatus(mn) {
+      const live = !!(this.streams[mn.id] || (mn.replyId && this.streams[mn.replyId]));
+      if (live) return {cls: 'running', label: '运行中'};
+      if (!mn.agent) return null;
+      const r = mn.stopReason;
+      if (r === 'error') return {cls: 'error', label: '出错'};
+      if (r === 'stopped') return {cls: 'stopped', label: '已停止'};
+      if (r === 'round_limit') return {cls: 'stopped', label: '未完成（轮数上限）'};
+      return {cls: 'done', label: '完成'};
     },
 
     // Vertical S-curve between two laid-out cards (works in both directions).
@@ -4352,22 +4253,7 @@ function chatable() {
     mapNodeClick(mn) {
       // A drag ending on a node shouldn't recenter — treat it as panning.
       if (this._mapSuppressClick) { this._mapSuppressClick = false; return; }
-      // A collapsed step-chain group toggles open/closed in place.
-      if (mn.isStepGroup) { this.toggleStepGroupNode(mn); return; }
       this.centerOnNode(mn.id, true);
-      // Step cards open their detail/diff modal; Q/A cards just recenter.
-      if (mn.isStep) this.mapStepDetail(mn);
-    },
-
-    toggleStepGroupNode(mn) {
-      if (this.mmExpandedGroups.has(mn.groupOf)) this.mmExpandedGroups.delete(mn.groupOf);
-      else this.mmExpandedGroups.add(mn.groupOf);
-      const layout = this.layoutMindmap(this.mindmap.rootId);
-      if (!layout) return;
-      this.mindmap = {...this.mindmap, ...layout};
-      // Keep the group in view — or, once expanded, its reply card.
-      const target = layout.nodes.some(n => n.id === mn.id) ? mn.id : mn.replyId;
-      this.$nextTick(() => { this.centerOnNode(target, true); this.refreshIcons(); });
     },
 
     mapShowDetail(id) {
