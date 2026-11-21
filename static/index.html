@@ -613,6 +613,12 @@ try {
         </button>
         <span x-show="agentMode && agent.workspace" class="agent-ws" :title="agent.workspace"
               x-text="agent.workspace"></span>
+        <!-- session auto-approvals for this conversation; click to reset -->
+        <button class="ctx-map-btn auto-approve-pill" x-show="agentMode && sessionAutoApprove.length"
+                @click="resetAutoApprove()"
+                :title="'Auto-approving in this conversation: ' + sessionAutoApprove.join(', ') + ' — click to reset'">
+          <i data-lucide="zap"></i><span x-text="'auto: ' + sessionAutoApprove.join(', ')"></span><i data-lucide="x"></i>
+        </button>
       </div>
       <!-- attachments -->
       <template x-if="attachments.length">
@@ -902,8 +908,13 @@ try {
                   <div class="compare-file">
                     <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
                     <span class="file-path" :title="f.path" x-text="f.path"></span>
-                    <span class="file-stat add" x-text="'+' + f.additions"></span>
-                    <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                    <span class="file-stat binary" x-show="f.binary">binary</span>
+                    <template x-if="!f.binary">
+                      <span class="compare-stats">
+                        <span class="file-stat add" x-text="'+' + f.additions"></span>
+                        <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                      </span>
+                    </template>
                   </div>
                 </template>
               </div>
@@ -1433,6 +1444,8 @@ function chatable() {
     // current conversation (mirrored to the server for existing conversations).
     agent: {available: false, reason: '', workspace: '', auto_approve: []},
     agentMode: false,
+    // Tools auto-approved ("always") for the current conversation's session.
+    sessionAutoApprove: [],
     // Step detail/diff modal (chat timeline "View diff", mind-map step detail).
     stepModal: {open: false, title: '', diff: '', result: '', ws_commit: null,
                 nodeId: null, loading: false},
@@ -2433,10 +2446,31 @@ function chatable() {
     // Reflect the conversation's persisted agent_mode after switching branches.
     async syncAgentMode() {
       if (!this.messages.length) return;
+      const trunkId = this.messages[0].id;
       try {
-        const d = await (await fetch('/api/node/' + encodeURIComponent(this.messages[0].id))).json();
+        const d = await (await fetch('/api/node/' + encodeURIComponent(trunkId))).json();
         this.agentMode = !!(d.metadata && d.metadata.agent_mode);
       } catch (e) { /* best-effort; keep the current toggle */ }
+      try {
+        const a = await (await fetch('/api/agent/approvals?node=' + encodeURIComponent(trunkId))).json();
+        this.sessionAutoApprove = a.always || [];
+      } catch (e) { this.sessionAutoApprove = []; }
+    },
+
+    async resetAutoApprove() {
+      const trunkId = this.messages.length ? this.messages[0].id : null;
+      if (!trunkId) return;
+      try {
+        const r = await fetch('/api/agent/approvals/reset', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({node_id: trunkId}),
+        });
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        this.sessionAutoApprove = [];
+        toast('Auto-approvals cleared for this conversation', 'success');
+      } catch (e) {
+        toast('Reset failed: ' + (e && e.message ? e.message : e), 'error');
+      }
     },
 
     // The step timeline of an assistant row: live steps while streaming, else
@@ -2552,6 +2586,10 @@ function chatable() {
         if (!r.ok) throw new Error(await this.errDetail(r));
         // The SSE approval_resolved/step_done events confirm the final state.
         s.status = decision === 'approve' ? 'approved' : 'denied';
+        if (always) {
+          const tools = scope === 'writes' ? ['write_file', 'edit_file'] : [s.tool];
+          this.sessionAutoApprove = [...new Set([...this.sessionAutoApprove, ...tools])].sort();
+        }
       } catch (e) {
         toast('Approval failed: ' + (e && e.message ? e.message : e), 'error');
       } finally {
@@ -3287,22 +3325,72 @@ function chatable() {
       return chain;
     },
 
+    // A step card for the map; children are pre-built.
+    _stepCard(node, children) {
+      return {
+        id: node.id, replyId: null, isPair: false, isStep: true,
+        tool: node.tool || 'tool', stepStatus: node.step_status || 'ok',
+        wsCommit: node.ws_commit || null, q: node.preview || node.title || '',
+        a: '', children,
+      };
+    },
+
+    // Cards for an assistant reply's step chain. Long chains (> 6 steps)
+    // collapse maximal fork-free runs into "agent run · N steps" group nodes,
+    // while steps with a fork hanging off them stay visible as branch points.
+    _buildChainCards(chain, reply) {
+      const longChain = chain.length > 6;
+      const expanded = this.mmExpandedGroups;
+      const chainIds = new Set(chain.map(s => s.id));
+      const sideKids = (s) => (s.children || []).filter(c => !chainIds.has(c.id));
+      // Any side child (a user fork or a divergent agent turn) makes the step
+      // a branch point that must stay visible.
+      const hasFork = (s) => sideKids(s).length > 0;
+      // Segment into visible forked steps and fork-free runs (head → tail).
+      const segs = [];
+      let run = [];
+      for (const s of chain) {
+        if (hasFork(s)) {
+          if (run.length) { segs.push({run}); run = []; }
+          segs.push({step: s});
+        } else {
+          run.push(s);
+        }
+      }
+      if (run.length) segs.push({run});
+      // Build cards tail → head so children are ready when parents are built.
+      let next = sideKids(chain[chain.length - 1]).map(c => this.buildPairTree(c));
+      for (let i = segs.length - 1; i >= 0; i--) {
+        const seg = segs[i];
+        if (seg.step) {
+          const s = seg.step;
+          next = [this._stepCard(s, [...sideKids(s).map(c => this.buildPairTree(c)), ...next])];
+          continue;
+        }
+        const arr = seg.run;
+        const gid = 'grp-' + arr[0].id;
+        if (longChain && arr.length > 1 && !expanded.has(gid)) {
+          next = [{
+            id: gid, replyId: reply.id, isStepGroup: true, groupOf: gid,
+            count: arr.length, q: '', a: '',
+            wsCommit: arr[arr.length - 1].ws_commit || null,
+            children: next,
+          }];
+        } else {
+          for (let j = arr.length - 1; j >= 0; j--) {
+            const s = arr[j];
+            next = [this._stepCard(s, [...sideKids(s).map(c => this.buildPairTree(c)), ...next])];
+          }
+        }
+      }
+      return next;
+    },
+
     buildPairTree(node) {
       // Agent step node: a compact, visually distinct card chained under its
       // assistant reply — never merged into a Q/A pair.
       if (node.role === 'step') {
-        return {
-          id: node.id,
-          replyId: null,
-          isPair: false,
-          isStep: true,
-          tool: node.tool || 'tool',
-          stepStatus: node.step_status || 'ok',
-          wsCommit: node.ws_commit || null,
-          q: node.preview || node.title || '',
-          a: '',
-          children: (node.children || []).map(c => this.buildPairTree(c)),
-        };
+        return this._stepCard(node, (node.children || []).map(c => this.buildPairTree(c)));
       }
       if (node.role === 'user') {
         const kids = node.children || [];
@@ -3310,29 +3398,13 @@ function chatable() {
         const reply = replies.length ? replies[replies.length - 1] : null;
         const children = [];
         if (reply) {
-          // Long step chains collapse into one group node — unless the user
-          // expanded this reply, or a fork hangs off a step mid-chain (those
-          // steps must stay visible as branch points).
+          // The turn's step trajectory (grouped when long); a user forked
+          // directly off the reply lands beside the chain.
           const chain = this._collectStepChain(reply);
-          const chainHasFork = chain.some(s =>
-            (s.children || []).some(c => c.role !== 'step'));
-          if (chain.length > 6 && !chainHasFork && !this.mmExpandedGroups.has(reply.id)) {
-            const tail = chain[chain.length - 1];
-            children.push({
-              id: 'grp-' + reply.id,
-              replyId: reply.id,
-              isStepGroup: true,
-              groupOf: reply.id,
-              count: chain.length,
-              q: '',
-              a: '',
-              wsCommit: tail.ws_commit || null,
-              children: (tail.children || [])
-                .filter(c => c.role !== 'step')
-                .map(c => this.buildPairTree(c)),
-            });
-          } else {
-            for (const c of (reply.children || [])) children.push(this.buildPairTree(c));
+          const chained = new Set(chain.map(s => s.id));
+          if (chain.length) children.push(...this._buildChainCards(chain, reply));
+          for (const c of (reply.children || [])) {
+            if (!chained.has(c.id)) children.push(this.buildPairTree(c));
           }
         }
         for (const c of replies.slice(0, -1)) children.push(this.buildPairTree(c));
@@ -3398,8 +3470,8 @@ function chatable() {
       const layout = this.layoutMindmap(this.mindmap.rootId);
       if (!layout) return;
       this.mindmap = {...this.mindmap, ...layout};
-      // Keep the group (or, now expanded, its reply card) in view.
-      const target = layout.nodes.some(n => n.id === mn.id) ? mn.id : mn.groupOf;
+      // Keep the group in view — or, once expanded, its reply card.
+      const target = layout.nodes.some(n => n.id === mn.id) ? mn.id : mn.replyId;
       this.$nextTick(() => { this.centerOnNode(target, true); this.refreshIcons(); });
     },
 

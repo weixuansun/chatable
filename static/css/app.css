@@ -1384,3 +1384,10 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .plan-badge { flex: none; font-size: 10px; line-height: 15px; padding: 0 6px;
               border-radius: 999px; color: var(--accent-2);
               background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+
+/* agent v4: session auto-approve pill, binary compare rows */
+.auto-approve-pill { color: var(--branch); background: var(--branch-soft);
+                     border-color: transparent; }
+.auto-approve-pill:hover { color: var(--fail); background: var(--fail-soft); }
+.compare-stats { display: inline-flex; gap: 6px; flex: none; }
+.file-stat.binary { color: var(--dim-2); font-style: italic; }
