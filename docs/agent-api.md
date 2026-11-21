@@ -29,10 +29,10 @@ it is required for these routes like any other.
 |---|---|---|
 | `GET /api/agent/status` | — | `{available, reason, workspace, auto_approve, git}` — `available=false` (with `reason`) when no token is set; `workspace` is the resolved workspace root (created on demand); `git` reports shadow-snapshot availability. |
 | `POST /api/agent/mode` | `{node_id, enabled}` | Toggle agent mode for the conversation owning `node_id`. Returns `{ok, trunk_id, agent_mode}`. |
-| `POST /api/send` | `{content, parent_id?, attachments?, agent?}` | Unchanged, plus the `agent` flag. Agent turns stream the extra SSE events below. **Sending from a node in agent mode first restores the workspace to that node's nearest snapshot** (restore-on-checkout), so files always match the branch being continued. |
-| `POST /api/agent/approve` | `{step_id, decision, always?, scope?}` | `decision`: `"approve"` \| `"deny"`. `always: true` (with approve) remembers the choice **for the current conversation** (in-memory per trunk): `scope: "tool"` (default) auto-approves this tool, `scope: "writes"` auto-approves write_file+edit_file. `404` when no approval is pending for `step_id` (e.g. it timed out or the turn was stopped — a stop resolves pending approvals as denied). |
-| `GET /api/agent/approvals?node=` | — | `{always: [tool…]}` — this conversation's session auto-approvals (for the composer pill). |
-| `POST /api/agent/approvals/reset` | `{node_id}` | Clear them. |
+| `POST /api/send` | `{content, parent_id?, attachments?, agent?}` | Unchanged, plus the `agent` flag. Agent turns stream the extra SSE events below. **Sending from a node in agent mode first restores the workspace to that node's nearest snapshot** (restore-on-checkout), so files always match the branch being continued. **Follow-ups continue the trajectory:** when the parent is an assistant node with steps, the new user node attaches to the step-chain tail (so the full turn — replay plus final answer — stays in context and branch-scoped approval grants carry over); restoring still uses the assistant node's own snapshot, i.e. the turn's final workspace state. |
+| `POST /api/agent/approve` | `{step_id, decision, always?, scope?}` | `decision`: `"approve"` \| `"deny"`. `always: true` records the grant **on that step node** (in-memory): `scope: "tool"` (default) auto-approves this tool, `scope: "writes"` auto-approves write_file+edit_file. Grants are branch-scoped — a call needs approval unless a matching grant exists on an ancestor-or-self of the current position, so a fork from before the grant asks again. `404` when no approval is pending for `step_id` (e.g. it timed out or the turn was stopped — a stop resolves pending approvals as denied). |
+| `GET /api/agent/approvals?node=` | — | `{always: [tool…], grants: [{node_id, tools}]}` — the effective grants at that node (an assistant node resolves to its step-chain tail), with their origins. |
+| `POST /api/agent/approvals/reset` | `{node_id}` | Clear grants made along that node's current branch. |
 | `POST /api/agent/restore` | `{node_id}` | Reset the workspace to the snapshot of the nearest ancestor-or-self node with `ws_commit`. Files absent from the snapshot are deleted; any `.git` directory inside the workspace is left untouched. Returns `{ok, restored, commit}` or `{ok: false, restored: false, reason}` when the path has no snapshot. |
 | `GET /api/agent/step/{step_id}/diff` | — | `{id, tool, status, ws_commit, diff}` — the step's stored edit diff for write/edit, else the shadow-git diff between `ws_parent_commit..ws_commit`. |
 | `GET /api/agent/compare?a=&b=` | — | Branch compare: `{ok, a_commit, b_commit, diff, files: [{path, status, additions, deletions}]}` between the snapshots nearest the two nodes. |
@@ -150,7 +150,9 @@ nodes are on the fork's path are replayed (a round's `tool_calls` list is
 split when the fork lands mid-round; unanswered ids get a stub result), the
 turn's final answer is dropped (its work was rolled back), and a system note
 tells the model it is continuing from step k with the workspace restored to
-that point.
+that point. When the path covers the turn's WHOLE chain (a follow-up
+attached to the step-chain tail), the full replay and the final answer are
+kept — truncation only happens on mid-turn forks.
 
 ## Agent tools (model-facing, agent mode only)
 

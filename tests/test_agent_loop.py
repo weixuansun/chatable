@@ -573,3 +573,28 @@ def test_fork_from_step_truncates_context(svc):
                 ids = [c["id"] for c in m["tool_calls"]]
                 following = msgs[i + 1:i + 1 + len(ids)]
                 assert [t.get("tool_call_id") for t in following] == ids
+
+
+@git_required
+def test_followup_continues_the_step_chain_with_full_context(svc):
+    """A plain follow-up from an agent reply attaches at the step-chain tail
+    and keeps the turn's WHOLE context (full replay + final answer) — only a
+    mid-turn fork truncates."""
+    info1, _e1, _c1 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        tool_call("read_file", path="a.txt"),
+        ANSWER,
+    ])
+    steps1 = step_nodes(svc)
+    _i2, _e2, calls2 = run_turn(svc, [ANSWER], content="continue please",
+                                parent_id=info1["assistant_id"])
+    u2 = svc.store.get(_i2["user_id"])
+    assert u2.parent_id == steps1[-1].id  # attached at the trajectory tail
+    sent = calls2[0]["messages"]
+    # Full replay kept (both calls) AND the final answer is in context.
+    assert [m["tool_call_id"] for m in sent if m.get("role") == "tool"] == [
+        "c_write_file", "c_read_file"]
+    assert any(m.get("role") == "assistant" and m.get("content") == "all done"
+               for m in sent)
+    assert not any("continuing from step" in (m.get("content") or "")
+                   for m in sent)

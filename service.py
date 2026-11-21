@@ -680,10 +680,12 @@ class ChatService:
         # conversation it belongs to.
         self._report_lock = threading.Lock()
         # Agent mode: pending approval waits keyed by step node id; the
-        # "always allow" sets are per conversation (trunk id), in-memory.
+        # "always allow" grants are keyed by the NODE they were granted on
+        # (in-memory) and apply only to that node's descendants — a branch
+        # forked from before the grant asks again.
         self._approvals: dict[str, dict] = {}
         self._approvals_lock = threading.Lock()
-        self._always_approve: dict[str, set[str]] = {}
+        self._grant_nodes: dict[str, set[str]] = {}
         # Live shell processes of agent turns (assistant id → Popen), so the
         # stop button can kill the whole process group.
         self._agent_procs: dict[str, Any] = {}
@@ -777,9 +779,17 @@ class ChatService:
         md = path[0].metadata
         return bool(isinstance(md, dict) and md.get("agent_mode"))
 
-    def _needs_approval(self, name: str, trunk_id: str = "") -> bool:
-        if trunk_id and name in self._always_approve.get(trunk_id, ()):
-            return False
+    def _needs_approval(self, name: str, anchor_id: str = "") -> bool:
+        # Grants apply only along the current branch: the grant must have been
+        # made on an ancestor-or-self of the position being approved.
+        if anchor_id:
+            try:
+                for n in self.store.path_to_root(anchor_id):
+                    grant = self._grant_nodes.get(n.id)
+                    if grant and name in grant:
+                        return False
+            except NodeNotFoundError:
+                pass
         auto = _agent_auto_approve()
         if "all" in auto:
             return False
@@ -849,21 +859,54 @@ class ChatService:
                 return str(md["ws_commit"])
         return None
 
+    def _step_chain_tail(self, node_id: str) -> str:
+        """The end of the single-child step lineage below *node_id* (or
+        *node_id* itself when there is none / the chain diverges)."""
+        cmap = self.store.children_map()
+        cur = node_id
+        while True:
+            kids = [c for c in cmap.get(cur, [])
+                    if self.store.get(c).role == "step"]
+            if len(kids) != 1:
+                return cur
+            cur = kids[0]
+
     def _trunk_id_of(self, node_id: str) -> Optional[str]:
         if node_id == ROOT_ID or not self.store.exists(node_id):
             return None
         path = self.store.path_to_root(node_id)
         return path[0].id if path else None
 
+    def _approval_anchor(self, node_id: str) -> Optional[str]:
+        """Where "the current position" is for approval purposes: an assistant
+        node resolves to its step-chain tail, because grants are recorded on
+        the turn's steps (descendants of the assistant node)."""
+        if node_id == ROOT_ID or not self.store.exists(node_id):
+            return None
+        if self.store.get(node_id).role == "assistant":
+            return self._step_chain_tail(node_id)
+        return node_id
+
     def session_approvals(self, node_id: str) -> dict:
-        """Tools auto-approved for this conversation this session ("always")."""
-        trunk = self._trunk_id_of(node_id)
-        return {"always": sorted(self._always_approve.get(trunk or "", ()))}
+        """The effective auto-approve grants at *node_id* (grants made on
+        ancestors-or-self along its branch), plus where each came from."""
+        anchor = self._approval_anchor(node_id)
+        grants: list[dict] = []
+        effective: set[str] = set()
+        if anchor:
+            for n in self.store.path_to_root(anchor):
+                grant = self._grant_nodes.get(n.id)
+                if grant:
+                    grants.append({"node_id": n.id, "tools": sorted(grant)})
+                    effective |= grant
+        return {"always": sorted(effective), "grants": grants}
 
     def reset_session_approvals(self, node_id: str) -> dict:
-        trunk = self._trunk_id_of(node_id)
-        if trunk:
-            self._always_approve.pop(trunk, None)
+        """Clear grants made along *node_id*'s current branch."""
+        anchor = self._approval_anchor(node_id)
+        if anchor:
+            for n in self.store.path_to_root(anchor):
+                self._grant_nodes.pop(n.id, None)
         return {"ok": True}
 
     def restore_workspace(self, node_id: str) -> dict:
@@ -2060,7 +2103,8 @@ class ChatService:
             if n.role == "assistant" and isinstance(n.metadata, dict):
                 replay = n.metadata.get("tool_messages") if NATIVE_TOOL_HISTORY else None
                 nxt = path[i + 1] if i + 1 < len(path) else None
-                if replay and nxt is not None and nxt.role == "step":
+                if replay and nxt is not None and nxt.role == "step" \
+                        and not self._path_steps_cover_turn(path, i, replay):
                     out.extend(self._truncated_turn_replay(path, i))
                     continue  # the final answer is dropped on purpose
                 if replay:
@@ -2091,6 +2135,25 @@ class ChatService:
                         out.append(ephem)
             out.append(n)
         return out
+
+    @staticmethod
+    def _path_steps_cover_turn(path: list[Node], i: int, replay: list[dict]) -> bool:
+        """True when the path's step chain covers EVERY tool call of the turn —
+        i.e. this is a continuation past the turn's end (keep the full replay
+        and the final answer), not a mid-turn fork (truncate)."""
+        allowed: set[str] = set()
+        j = i + 1
+        while j < len(path) and path[j].role == "step":
+            cid = (path[j].metadata or {}).get("call_id")
+            if cid:
+                allowed.add(cid)
+            j += 1
+        for m in replay:
+            if m.get("role") == "assistant":
+                for c in (m.get("tool_calls") or []):
+                    if c.get("id") not in allowed:
+                        return False
+        return True
 
     def _truncated_turn_replay(self, path: list[Node], i: int) -> list[Node]:
         """Replay of an agent turn truncated at the last step on the path.
@@ -2248,10 +2311,21 @@ class ChatService:
                 if not agent_available():
                     raise ValueError(AGENT_TOKEN_MESSAGE)
                 # Restore-on-checkout: the workspace follows the fork point.
+                # (Computed BEFORE the tail redirect below: an assistant node's
+                # nearest snapshot is its turn's final state — exactly what a
+                # continuation needs; the redirect only moves the attachment
+                # point of the new user node to the end of the step chain.)
                 commit = self.nearest_ws_commit(parent_id)
                 if commit:
                     self.shadow_git().restore(commit)
             parent = self.store.get(parent_id)
+            if agent_mode and parent.role == "assistant":
+                # Attach a follow-up at the END of the turn's step trajectory:
+                # approval grants made along it then apply to the new turn, and
+                # the full turn (replay + final answer) stays in context.
+                tail = self._step_chain_tail(parent.id)
+                if tail != parent.id:
+                    parent = self.store.get(tail)
 
             user_node = Node.new(role="user", content=content, parent_id=parent.id)
             if agent_mode:
@@ -2417,8 +2491,11 @@ class ChatService:
             # — before any approval prompt (no point asking for a refusal).
             refused = denylist_reason(str(args.get("command") or "")) \
                 if name == "run_shell" else None
+            # Grants walk the branch: the position is the previous step (or
+            # the turn's user node for the first step).
+            approval_anchor = state.get("last_step_id") or state.get("anchor_id", "")
             if refused is None and spec is not None and not spec.read_only and \
-                    self._needs_approval(name, state.get("trunk_id", "")):
+                    self._needs_approval(name, approval_anchor):
                 preview = preview_change(ws, name, args) if name in WRITE_TOOLS else ""
                 self.store.update_metadata(step.id, {"status": "pending_approval"})
                 ap = self._register_approval(step.id)
@@ -2436,12 +2513,13 @@ class ChatService:
                     return ToolResult(call_id=call["_cid"], name=name, arguments=args,
                                       ok=False, output=output, error="denied by user")
                 if ap["always"]:
-                    approved = self._always_approve.setdefault(
-                        state.get("trunk_id") or "", set())
+                    # Record the grant on THIS step: it applies to its
+                    # descendants only — sibling branches ask again.
+                    grant = self._grant_nodes.setdefault(step.id, set())
                     if ap.get("scope") == "writes":
-                        approved.update(WRITE_TOOLS)
+                        grant.update(WRITE_TOOLS)
                     else:
-                        approved.add(name)
+                        grant.add(name)
 
             parent_commit = state["last_commit"] if mutating else None
 
@@ -2548,7 +2626,8 @@ class ChatService:
         round_no = 0
         t0 = time.monotonic()
         state = {"last_step_id": None, "last_commit": base_commit,
-                 "trunk_id": trunk_id, "plan": None, "ctx": agent_ctx}
+                 "anchor_id": user_node.id, "trunk_id": trunk_id,
+                 "plan": None, "ctx": agent_ctx}
 
         while True:
             if turn.stop_requested:

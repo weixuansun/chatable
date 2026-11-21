@@ -21,12 +21,12 @@ def svc(tmp_path, monkeypatch):
     return ChatService(TreeStore(str(tmp_path / "chat.jsonl")))
 
 
-def drive(svc, script, on_approval):
+def drive(svc, script, on_approval, **kwargs):
     """Run an agent turn, resolving each approval_required event via callback."""
     fake, calls = make_fake(script)
     approvals = []
     with patch.object(service_mod, "stream_backend", fake):
-        info = svc.start_turn("do it", None, agent=True)
+        info = svc.start_turn("do it", kwargs.get("parent_id"), agent=True)
         for ev in svc.subscribe(info["assistant_id"], 0):
             if ev["type"] == "approval_required":
                 approvals.append(ev)
@@ -142,7 +142,7 @@ def test_stop_denies_a_pending_approval(svc):
 
 
 def test_session_approvals_query_and_reset(svc):
-    """The composer pill reads/clears the conversation's always-approvals."""
+    """The composer pill reads/clears the effective grants of a position."""
 
     def approve_writes(svc, ev):
         svc.resolve_approval(ev["step_id"], "approve", always=True, scope="writes")
@@ -151,9 +151,12 @@ def test_session_approvals_query_and_reset(svc):
         tool_call("write_file", path="a.txt", content="one\n"),
         ANSWER,
     ], approve_writes)
-    assert svc.session_approvals(info["user_id"])["always"] == ["edit_file", "write_file"]
-    svc.reset_session_approvals(info["user_id"])
-    assert svc.session_approvals(info["user_id"])["always"] == []
+    # Anchored at the assistant node, the lookup sees grants on its steps.
+    res = svc.session_approvals(info["assistant_id"])
+    assert res["always"] == ["edit_file", "write_file"]
+    assert res["grants"][0]["node_id"] == step_nodes(svc)[0].id
+    svc.reset_session_approvals(info["assistant_id"])
+    assert svc.session_approvals(info["assistant_id"])["always"] == []
     # After the reset the same tool asks again.
     prompts = []
     drive(svc, [
@@ -161,6 +164,38 @@ def test_session_approvals_query_and_reset(svc):
         ANSWER,
     ], lambda s, ev: (prompts.append(ev), s.resolve_approval(ev["step_id"], "approve")))
     assert len(prompts) == 1
+
+
+def test_always_grant_is_scoped_to_the_branch(svc):
+    """A grant on a step applies to its descendants only."""
+    info1, ap1, _ = drive(svc, [
+        tool_call("write_file", path="a.txt", content="one\n"),
+        ANSWER,
+    ], lambda s, ev: s.resolve_approval(ev["step_id"], "approve", always=True))
+    assert len(ap1) == 1
+    grant_step = step_nodes(svc)[0]
+
+    # Continuing the SAME branch (follow-up from the reply): auto-approved.
+    _i2, ap2, _ = drive(svc, [
+        tool_call("write_file", path="b.txt", content="two\n"),
+        ANSWER,
+    ], lambda s, ev: None, parent_id=info1["assistant_id"])
+    assert ap2 == []
+
+    # Fork from BEFORE the grant (the turn's user node): asks again.
+    _i3, ap3, _ = drive(svc, [
+        tool_call("write_file", path="c.txt", content="three\n"),
+        ANSWER,
+    ], lambda s, ev: s.resolve_approval(ev["step_id"], "approve"),
+        parent_id=info1["user_id"])
+    assert len(ap3) == 1
+
+    # Fork from the grant step itself (after the grant): auto-approved.
+    _i4, ap4, _ = drive(svc, [
+        tool_call("write_file", path="d.txt", content="four\n"),
+        ANSWER,
+    ], lambda s, ev: None, parent_id=grant_step.id)
+    assert ap4 == []
 
 
 def test_shell_always_asks_by_default(svc):

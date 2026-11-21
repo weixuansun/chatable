@@ -138,7 +138,10 @@ Agent mode lets the model work autonomously in a dedicated workspace
 (workspace file tools + shell, per-step tree nodes, shadow-git snapshots,
 approvals). It is **off by default** and only available when
 `CHATTABLE_AUTH_TOKEN` is set — the toggle lives in the composer. See
-[docs/agent-api.md](docs/agent-api.md) for the full API.
+[docs/agent-api.md](docs/agent-api.md) for the full API. After an agent
+reply, typing again continues the same branch by default (the ✕ on the
+composer pill starts a new conversation); "always allow" approvals are
+scoped to the branch they were granted on.
 
 Shell commands run through two safety layers:
 

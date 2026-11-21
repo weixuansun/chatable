@@ -1406,3 +1406,13 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 
 /* single-root wrapper for multi-button template blocks */
 .btn-cluster { display: contents; }
+
+/* fork pill "start new conversation" */
+.pill-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+        margin-left: 2px; padding: 0; background: transparent; border: 0; border-radius: 50
+/* fork pill "start new conversation" */
+.pill-x { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+        margin-left: 2px; padding: 0; background: transparent; border: 0; border-radius: 50%;
+        color: var(--dim-2); cursor: pointer; }
+.pill-x:hover { color: var(--fail); background: var(--fail-soft); }
+.pill-x .lucide { width: 10px; height: 10px; }

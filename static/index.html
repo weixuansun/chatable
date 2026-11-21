@@ -609,7 +609,13 @@ try {
     <div id="composer">
      <div class="inner">
       <div class="ctx">
-        <template x-if="selectedId"><span class="ctx-pill fork-pill"><i data-lucide="git-branch"></i>Forking from <span class="fork" x-text="'#' + selectedId.slice(0,6)"></span></span></template>
+        <template x-if="selectedId">
+          <span class="ctx-pill fork-pill">
+            <i data-lucide="git-branch"></i><span x-text="agentMode ? 'Continuing' : 'Forking from'"></span>
+            <span class="fork" x-text="'#' + selectedId.slice(0,6)"></span>
+            <button class="pill-x" @click="newTrunk()" title="Start a new conversation instead"><i data-lucide="x"></i></button>
+          </span>
+        </template>
         <template x-if="!selectedId"><span class="ctx-pill"><i data-lucide="sprout"></i>New trunk · no fork point selected</span></template>
         <template x-if="selectedId || messages.length">
           <button class="ctx-map-btn" @click="openComposerMindmap()"
@@ -2432,6 +2438,7 @@ function chatable() {
       // Default scroll lands at the END of the node's reply (conversation bottom).
       const resolved = this.forkParentId(id);
       this.selectedId = resolved;
+      this.syncAgentApprovals();  // grants are branch-scoped; refresh the pill
       this.drawerOpen = false;
       await this.loadPath(resolved, scrollMode);
       // Reveal the selection inside the default-collapsed tree: expand its
@@ -2487,6 +2494,7 @@ function chatable() {
     newTrunk() { this.selectedId = null; this.messages = []; },
     forkFromHere(id) {
       this.selectedId = id;
+      this.syncAgentApprovals();  // grants are branch-scoped; refresh the pill
       this.refreshIcons();
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
     },
@@ -2535,23 +2543,33 @@ function chatable() {
         const d = await (await fetch('/api/node/' + encodeURIComponent(trunkId))).json();
         this.agentMode = !!(d.metadata && d.metadata.agent_mode);
       } catch (e) { /* best-effort; keep the current toggle */ }
+      await this.syncAgentApprovals();
+    },
+
+    // The effective session auto-approvals at the current fork point (they're
+    // branch-scoped server-side: grants walk the path from the fork point).
+    async syncAgentApprovals() {
+      const anchor = this.selectedId ||
+        (this.messages.length ? this.messages[this.messages.length - 1].id : null);
+      if (!this.agentMode || !anchor) { this.sessionAutoApprove = []; return; }
       try {
-        const a = await (await fetch('/api/agent/approvals?node=' + encodeURIComponent(trunkId))).json();
+        const a = await (await fetch('/api/agent/approvals?node=' + encodeURIComponent(anchor))).json();
         this.sessionAutoApprove = a.always || [];
       } catch (e) { this.sessionAutoApprove = []; }
     },
 
     async resetAutoApprove() {
-      const trunkId = this.messages.length ? this.messages[0].id : null;
-      if (!trunkId) return;
+      const anchor = this.selectedId ||
+        (this.messages.length ? this.messages[0].id : null);
+      if (!anchor) return;
       try {
         const r = await fetch('/api/agent/approvals/reset', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({node_id: trunkId}),
+          body: JSON.stringify({node_id: anchor}),
         });
         if (!r.ok) throw new Error(await this.errDetail(r));
         this.sessionAutoApprove = [];
-        toast('Auto-approvals cleared for this conversation', 'success');
+        toast('Auto-approvals cleared for this branch', 'success');
       } catch (e) {
         toast('Reset failed: ' + (e && e.message ? e.message : e), 'error');
       }
@@ -4136,6 +4154,14 @@ function chatable() {
         images: t.images || 0,
       }));
       const streamedUsage = st.usage;
+
+      // Agent mode: a finished turn becomes the composer's continuation point
+      // — typing again continues the same branch instead of silently starting
+      // a new conversation. (Only when the turn's branch is being viewed.)
+      if (st.agent && assistantId && onView && onView()) {
+        this.selectedId = assistantId;
+        this.syncAgentApprovals();
+      }
 
       if (assistantId) {
         const row = this.messages.find(m => m.id === assistantId);
