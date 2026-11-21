@@ -48,7 +48,8 @@ Homepage = "https://github.com/weixuansun/chatable"
 Repository = "https://github.com/weixuansun/chatable"
 
 [tool.setuptools]
-py-modules = ["bookmark_store", "bookmark_service", "jsonl_store", "main", "models", "report_store", "sqlite_to_jsonl", "store", "tools", "web_tools", "service", "server"]
+py-modules = ["bookmark_store", "bookmark_service", "jsonl_store", "main", "models", "report_store", "sqlite_to_jsonl", "store", "tools", "web_tools", "service", "server", "agent_tools", "shell_sandbox", "workspace"]
+packages = ["orch"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
