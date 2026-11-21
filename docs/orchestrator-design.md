@@ -192,4 +192,14 @@ Run/node model, executors, and environment:
   (project/path/task layers) → executor → snapshot back into the shadow
   repo → post-run test command (auto-detected) → node with conclusion +
   facts. Failed/cancelled runs still produce a node.
+- Test results are **baseline-relative** (o4): the parent's snapshot test
+  result is computed lazily once and cached per commit
+  (`OrchService._test_cache`); `facts.test = {cmd, ok, passed, failed,
+  failed_ids, baseline: {passed, failed}, new_failures, fixed, summary
+  (last ~15 lines)}`. `ok` means: executor exited 0 AND no NEW failures vs
+  the baseline — pre-existing failures (a bug being fixed on a sibling
+  branch) never turn a run red. pytest output is parsed into counts and
+  failing ids (`FAILED path::test`, `SUBFAILED(...) path::test`; other
+  runners fall back to counts/exit code). Merge: baseline = the merge
+  base's result; `tests_failed` only on new failures vs it.
 - Merge: phase o2 (hook: `parents` is already a list).

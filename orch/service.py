@@ -7,10 +7,10 @@ import threading
 import time
 from typing import Iterator, Optional
 
-from agent_tools import do_run_shell
 from orch.context import PROMPT_TEMPLATE, detect_test_cmd, parse_conclusion, write_context
 from orch.executors import RUN_TIMEOUT_S, default_executors
 from orch.store import OrchStore, new_id
+from orch.testrun import compare_to_baseline, run_test_cmd
 from orch.worktree import (
     commit_worktree_tree,
     facts_files,
@@ -20,7 +20,7 @@ from orch.worktree import (
     worktree_remove,
     worktree_snapshot,
 )
-from workspace import Workspace, WorkspaceError
+from workspace import WorkspaceError
 
 TEST_TIMEOUT_S = int(os.environ.get("CHATTABLE_ORCH_TEST_TIMEOUT_S", "300"))
 _EVENT_CAP_PER_RUN = 300
@@ -55,6 +55,9 @@ class OrchService:
         self._cond = threading.Condition()
         self._procs: dict = {}
         self._cancelled: set[str] = set()
+        # Test results cached per snapshot commit — one test run serves as
+        # the baseline for every sibling branching off that snapshot.
+        self._test_cache: dict[str, dict] = {}
         self._ensure_root()
         threading.Thread(target=self._queue_loop, daemon=True).start()
 
@@ -298,15 +301,15 @@ class OrchService:
         if result.get("killed"):
             facts["killed"] = result["killed"]
 
-        # Post-run test (green-check only; artifacts are excluded from snapshots).
+        # Post-run test, RELATIVE to the parent snapshot's baseline: a run is
+        # red only when it introduces NEW failures — pre-existing failures
+        # (e.g. a bug being fixed on a sibling branch) don't count.
         if status == "ok" and test_cmd and os.path.isdir(wt):
-            test_res = do_run_shell(Workspace(wt), test_cmd, timeout=TEST_TIMEOUT_S)
-            tail = test_res.output.strip().splitlines()
-            facts["test"] = {"cmd": test_cmd, "ok": test_res.ok,
-                             "summary": "\n".join(tail[-5:])[:800]}
-            if not test_res.ok:
+            fact = self._build_test_fact(wt, test_cmd, parent["snapshot"])
+            facts["test"] = fact
+            if not fact["ok"]:
                 status = "failed"
-                facts["error"] = "test command failed"
+                facts["error"] = "new test failures vs the parent baseline"
 
         conclusion = parse_conclusion(result.get("final_text") or error or "")
         node = {
@@ -383,6 +386,42 @@ class OrchService:
     # merge (DAG)
     # ------------------------------------------------------------------ #
 
+    def baseline_test_result(self, commit: str, test_cmd: str) -> dict:
+        """The test result for a snapshot, computed lazily once and reused
+        as the baseline for every run merging from / branching off it."""
+        cached = self._test_cache.get(commit)
+        if cached and cached.get("cmd") == test_cmd:
+            return cached
+        wt = os.path.join(self.runs_dir, f"baseline-{new_id()}", "wt")
+        worktree_create(self.shadow, commit, wt)
+        try:
+            result = run_test_cmd(wt, test_cmd, TEST_TIMEOUT_S)
+        finally:
+            worktree_remove(self.shadow, wt)
+        self._test_cache[commit] = result
+        return result
+
+    def _build_test_fact(self, wt: str, test_cmd: str,
+                         baseline_commit: Optional[str]) -> dict:
+        """Run tests in *wt* and shape facts.test, baseline-relative."""
+        result = run_test_cmd(wt, test_cmd, TEST_TIMEOUT_S)
+        baseline = (self.baseline_test_result(baseline_commit, test_cmd)
+                    if baseline_commit else
+                    {"passed": 0, "failed": 0, "failed_ids": []})
+        delta = compare_to_baseline(result, baseline)
+        return {
+            "cmd": test_cmd,
+            "ok": not delta["new_failures"],
+            "passed": result["passed"],
+            "failed": result["failed"],
+            "failed_ids": result["failed_ids"],
+            "baseline": {"passed": baseline.get("passed", 0),
+                         "failed": baseline.get("failed", 0)},
+            "new_failures": delta["new_failures"],
+            "fixed": delta["fixed"],
+            "summary": result["summary"],
+        }
+
     def merge(self, node_ids: list[str], agent: str, run_tests: bool = True) -> dict:
         """3-way merge of ≥2 nodes' snapshots in a throwaway worktree.
 
@@ -399,6 +438,7 @@ class OrchService:
         instruction = "Merge " + " + ".join(f"#{i[:6]}" for i in node_ids)
         self._emit({"type": "merge_started", "nodes": node_ids,
                     "instruction": instruction})
+        t0 = time.monotonic()
         wt = os.path.join(self.runs_dir, f"merge-{new_id()}", "wt")
         base = None
         conflict_files: list[str] = []
@@ -412,12 +452,9 @@ class OrchService:
                 test_cmd = (self.store.meta.get("test_cmd")
                             or detect_test_cmd(wt))
                 if test_cmd:
-                    test_res = do_run_shell(Workspace(wt), test_cmd,
-                                            timeout=TEST_TIMEOUT_S)
-                    tail = test_res.output.strip().splitlines()
-                    test_fact = {"cmd": test_cmd, "ok": test_res.ok,
-                                 "summary": "\n".join(tail[-5:])[:800]}
-                    if not test_res.ok:
+                    # Baseline = the merge base's result: red only on NEW failures.
+                    test_fact = self._build_test_fact(wt, test_cmd, base)
+                    if not test_fact["ok"]:
                         status = "tests_failed"
             merge_commit = commit_worktree_tree(
                 self.shadow, wt, commits,
@@ -425,9 +462,15 @@ class OrchService:
         finally:
             worktree_remove(self.shadow, wt)
 
+        instr_lines = ["- " + " ".join((n.get("instruction") or "?").split())[:80]
+                       for n in nodes]
+        suffix = (" with conflicts" if status == "conflict"
+                  else ", but tests fail" if status == "tests_failed"
+                  else " cleanly")
         facts = {"files": facts_files(self.shadow, base, merge_commit)
                  if base else [],
-                 "exit_code": 0, "duration_s": 0.0, "usage": {}}
+                 "exit_code": 0,
+                 "duration_s": round(time.monotonic() - t0, 1), "usage": {}}
         if conflict_files:
             facts["conflict_files"] = conflict_files
         if test_fact:
@@ -438,10 +481,7 @@ class OrchService:
             "agent": "merge", "model": None,
             "status": status, "adopted": False,
             "conclusion": {
-                "done": f"Merged {len(nodes)} branches" +
-                        (" with conflicts" if status == "conflict"
-                         else " cleanly" if status == "ok"
-                         else ", but tests fail"),
+                "done": f"Merged {len(nodes)} branches{suffix}:\n" + "\n".join(instr_lines),
                 "decisions": "", "not_done": "" if status == "ok" else status,
                 "next": "" if status == "ok" else "Resolve via the dispatched run",
             },

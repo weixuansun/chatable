@@ -1535,3 +1535,4 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .orch-ev-err { color: var(--fail); }
 .orch-panel-actions { display: flex; gap: 8px; }
 .map-edges { pointer-events: none; }
+.orch-test.warn { color: var(--branch); background: var(--branch-soft); }

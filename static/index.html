@@ -1377,7 +1377,7 @@ try {
                     </span>
                   </template>
                   <template x-if="orchTestChip(pos.card)">
-                    <span class="orch-test" :class="{bad: !orchTestChip(pos.card).ok}"
+                    <span class="orch-test" :class="orchTestChip(pos.card).cls"
                           :title="orchTestChip(pos.card).summary" x-text="orchTestChip(pos.card).text"></span>
                   </template>
                 </div>
@@ -1432,7 +1432,13 @@ try {
                 <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test">
                   <p><b>Test:</b> <code x-text="orchSelectedNode.facts.test.cmd"></code>
                     → <span :class="orchSelectedNode.facts.test.ok ? 'add' : 'del'"
-                            x-text="orchSelectedNode.facts.test.ok ? 'ok' : 'failed'"></span></p>
+                            x-text="(orchSelectedNode.facts.test.passed || 0) + ' passed, ' + (orchSelectedNode.facts.test.failed || 0) + ' failed (baseline ' + (orchSelectedNode.facts.test.baseline ? orchSelectedNode.facts.test.baseline.failed : 0) + ')'"></span></p>
+                </template>
+                <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test && (orchSelectedNode.facts.test.new_failures || []).length">
+                  <p><b>New failures:</b> <span class="del" x-text="orchSelectedNode.facts.test.new_failures.join(', ')"></span></p>
+                </template>
+                <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test && (orchSelectedNode.facts.test.fixed || []).length">
+                  <p><b>Fixed:</b> <span class="add" x-text="orchSelectedNode.facts.test.fixed.join(', ')"></span></p>
                 </template>
                 <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test && orchSelectedNode.facts.test.summary">
                   <pre class="tool-out" x-text="orchSelectedNode.facts.test.summary"></pre>
@@ -2997,7 +3003,17 @@ function chatable() {
     orchTestChip(node) {
       const t = node.facts && node.facts.test;
       if (!t) return null;
-      return {ok: t.ok, text: t.ok ? '✓ tests' : '✗ tests', summary: t.summary || ''};
+      const fresh = (t.new_failures || []).length;
+      if (fresh) {
+        return {cls: 'bad', text: '✗ ' + fresh + ' new failure' + (fresh > 1 ? 's' : ''),
+                summary: t.summary || ''};
+      }
+      if (t.failed > 0) {
+        return {cls: 'warn', text: '● ' + t.failed + ' failed (pre-existing)',
+                summary: t.summary || ''};
+      }
+      if (t.passed > 0) return {cls: '', text: '✓ ' + t.passed + ' passed', summary: t.summary || ''};
+      return {cls: t.ok ? '' : 'bad', text: t.ok ? '✓ tests' : '✗ tests', summary: t.summary || ''};
     },
 
     // ---- new instructions composer ----
