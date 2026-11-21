@@ -45,18 +45,26 @@ exists and then starts **from X's node**.
 
 The real project directory is only touched by **adopt** (existing adopt/undo).
 
-## 3. Merge (DAG)
+## 3. Merge (DAG) — implemented in o2
 
-User selects nodes N1..Nk (typically siblings) → **Merge**:
+`POST /api/orch/merge {nodes: [N1..Nk], agent, test?}`:
 
-* base = common ancestor (merge-base) of their snapshots; apply 3-way merges in order
-  (`git merge-tree` / `git merge` in a temp worktree);
-* clean merge → merge node M (parents N1..Nk), auto-run the project test command, store
-  result in facts;
-* conflict **or** red tests → automatically dispatch a run on M (agent chosen by the user,
-  default the first available) with a context that contains the parents' instructions and
-  conclusions, the conflicting files (with markers left in the worktree) and the failing
-  test output → its result is M′ (child of M).
+* Sequential 3-way merges in a throwaway worktree on the shadow repo
+  (`git merge --no-ff`, conflicts committed as intermediate merge commits with
+  markers left in the files); the final tree is committed with ALL input
+  snapshots as parents. `.chatable/` is never merged (repo exclude).
+* base = merge-base of the snapshots; `facts.files` = changed files vs base.
+* Clean merge → merge node M (`parents=[N1..Nk]`, `agent="merge"`,
+  `status="ok"`); the project test command runs when available
+  (`test: false` skips) → result in `facts.test`.
+* Conflict → M with `status="conflict"` (markers committed,
+  `facts.conflict_files`); red tests → `status="tests_failed"`. Both
+  AUTO-DISPATCH a resolver run from M: its CONTEXT.md gets a "Merge task"
+  section (each parent's instruction + conclusion, the conflicting file list,
+  capped failing test output) and the instruction to resolve while keeping
+  every parent's intent. Its result is M′ (child of M).
+* Context path layer below a merge walks ALL parents (dedupe, creation order).
+* SSE events: `merge_started`, `merge_finished`.
 
 ## 4. Context handoff (`.chatable/CONTEXT.md`)
 
@@ -140,6 +148,9 @@ Events stream over SSE: `run_started`, `run_event`, `run_finished`,
 | `GET /api/orch/compare?a=&b=` | — | `{ok, a_commit, b_commit, diff, files:[{path,status,additions,deletions,binary}]}` between two nodes' snapshots. |
 | `POST /api/orch/adopt` | `{node_id}` | Snapshot the workspace first (undoable), restore the node's snapshot, mark the node adopted. Returns `{ok, adopted_commit, previous_commit, files}`. |
 | `POST /api/orch/undo-adopt` | `{previous_commit}` | Restore the pre-adopt snapshot. |
+| `POST /api/orch/merge` | `{nodes: [...], agent, test?}` | 3-way merge (see §3); returns `{ok, node_id, status, run_id?}`. |
+| `GET /api/orch/project` | — | `{id, workspace, notes, test_cmd, detected_test_cmd}` |
+| `PUT /api/orch/project` | `{notes?, test_cmd?}` | Persist project notes (CONTEXT.md project layer) and a test-command override. |
 | `GET /api/orch/stream` | `?from_index=` | SSE of all orchestrator events. |
 
 Run/node model, executors, and environment:

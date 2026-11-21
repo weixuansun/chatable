@@ -12,7 +12,10 @@ from orch.context import PROMPT_TEMPLATE, detect_test_cmd, parse_conclusion, wri
 from orch.executors import RUN_TIMEOUT_S, default_executors
 from orch.store import OrchStore, new_id
 from orch.worktree import (
+    commit_worktree_tree,
     facts_files,
+    merge_base,
+    merge_into_worktree,
     worktree_create,
     worktree_remove,
     worktree_snapshot,
@@ -236,7 +239,9 @@ class OrchService:
             test_cmd = self.store.meta.get("test_cmd") or detect_test_cmd(wt)
             if test_cmd and not self.store.meta.get("test_cmd"):
                 self.store.set_meta(test_cmd=test_cmd)
-            write_context(self.store, parent, run["instruction"], test_cmd, wt)
+            write_context(self.store, parent, run["instruction"], test_cmd, wt,
+                          merge=run.get("merge"),
+                          parent_diff=self._parent_diff(parent))
             prompt = PROMPT_TEMPLATE.format(instruction=run["instruction"])
             executor = self.executors[run["agent"]]
             ok, reason = executor.available()
@@ -329,6 +334,35 @@ class OrchService:
     # compare / adopt
     # ------------------------------------------------------------------ #
 
+    def _parent_diff(self, node: dict) -> str:
+        """The diff that produced a node (vs its first parent's snapshot)."""
+        parents = node.get("parents") or []
+        if not parents or node.get("root"):
+            return ""
+        base = self.store.nodes.get(parents[0])
+        if not base or not base.get("snapshot") or not node.get("snapshot"):
+            return ""
+        try:
+            return self.shadow.diff(node["snapshot"], base["snapshot"])
+        except WorkspaceError:
+            return ""
+
+    def project_info(self) -> dict:
+        return {"id": self.project_id, "workspace": self.workspace.root,
+                "notes": self.store.meta.get("notes", ""),
+                "test_cmd": self.store.meta.get("test_cmd"),
+                "detected_test_cmd": self.store.meta.get("detected_test_cmd")}
+
+    def update_project(self, notes: Optional[str], test_cmd: Optional[str]) -> dict:
+        fields = {}
+        if notes is not None:
+            fields["notes"] = notes
+        if test_cmd is not None:
+            fields["test_cmd"] = test_cmd
+        if fields:
+            self.store.set_meta(**fields)
+        return self.project_info()
+
     def compare(self, a_id: str, b_id: str) -> dict:
         a = self.store.nodes.get(a_id)
         b = self.store.nodes.get(b_id)
@@ -338,6 +372,116 @@ class OrchService:
         return {"ok": True, "a_commit": ca, "b_commit": cb,
                 "diff": self.shadow.diff(cb, ca),
                 "files": self.shadow.diff_numstat(ca, cb)}
+
+    # ------------------------------------------------------------------ #
+    # merge (DAG)
+    # ------------------------------------------------------------------ #
+
+    def merge(self, node_ids: list[str], agent: str, run_tests: bool = True) -> dict:
+        """3-way merge of ≥2 nodes' snapshots in a throwaway worktree.
+
+        Clean + green → merge node M. Conflict or red tests → M with status
+        conflict/tests_failed (markers committed) and an auto-dispatched
+        resolver run from M with the full merge context.
+        """
+        nodes = [self.store.nodes.get(i) for i in node_ids]
+        if len(nodes) < 2 or any(n is None for n in nodes):
+            raise ValueError("merge needs at least two existing nodes")
+        if agent not in self.executors:
+            raise ValueError(f"unknown executor: {agent}")
+        commits = [n["snapshot"] for n in nodes]
+        instruction = "Merge " + " + ".join(f"#{i[:6]}" for i in node_ids)
+        self._emit({"type": "merge_started", "nodes": node_ids,
+                    "instruction": instruction})
+        wt = os.path.join(self.runs_dir, f"merge-{new_id()}", "wt")
+        base = None
+        conflict_files: list[str] = []
+        test_fact = None
+        try:
+            merged = merge_into_worktree(self.shadow, commits, wt)
+            base = merged["base"]
+            conflict_files = merged["conflict_files"]
+            status = "conflict" if conflict_files else "ok"
+            if run_tests and not conflict_files:
+                test_cmd = (self.store.meta.get("test_cmd")
+                            or detect_test_cmd(wt))
+                if test_cmd:
+                    test_res = do_run_shell(Workspace(wt), test_cmd,
+                                            timeout=TEST_TIMEOUT_S)
+                    tail = test_res.output.strip().splitlines()
+                    test_fact = {"cmd": test_cmd, "ok": test_res.ok,
+                                 "summary": "\n".join(tail[-5:])[:800]}
+                    if not test_res.ok:
+                        status = "tests_failed"
+            merge_commit = commit_worktree_tree(
+                self.shadow, wt, commits,
+                f"orchestrator merge of {len(commits)} nodes")
+        finally:
+            worktree_remove(self.shadow, wt)
+
+        facts = {"files": facts_files(self.shadow, base, merge_commit)
+                 if base else [],
+                 "exit_code": 0, "duration_s": 0.0, "usage": {}}
+        if conflict_files:
+            facts["conflict_files"] = conflict_files
+        if test_fact:
+            facts["test"] = test_fact
+        node = {
+            "id": new_id(), "snapshot": merge_commit,
+            "instruction": instruction, "parents": list(node_ids),
+            "agent": "merge", "model": None,
+            "status": status, "adopted": False,
+            "conclusion": {
+                "done": f"Merged {len(nodes)} branches" +
+                        (" with conflicts" if status == "conflict"
+                         else " cleanly" if status == "ok"
+                         else ", but tests fail"),
+                "decisions": "", "not_done": "" if status == "ok" else status,
+                "next": "" if status == "ok" else "Resolve via the dispatched run",
+            },
+            "facts": facts, "session_id": None, "events": [],
+            "created_at": time.time(),
+        }
+        self.store.add_node(node)
+        self._emit({"type": "merge_finished", "node_id": node["id"],
+                    "status": status})
+        self._emit({"type": "node_created", "node": node})
+
+        run_id = None
+        if status in ("conflict", "tests_failed"):
+            run_id = self._dispatch_merge_resolver(node, status, conflict_files,
+                                                   test_fact, agent)
+        return {"ok": True, "node_id": node["id"], "status": status,
+                "run_id": run_id}
+
+    def _dispatch_merge_resolver(self, node: dict, status: str,
+                                 conflict_files: list[str],
+                                 test_fact: Optional[dict], agent: str) -> str:
+        """Auto-dispatch a run that resolves the merge (conflicts or tests)."""
+        if status == "conflict":
+            instruction = ("Resolve the merge conflicts in the marked files, "
+                           "keeping the intent of every parent change. "
+                           "Run the tests afterwards if a test command is known.")
+        else:
+            instruction = ("The merged result fails the project tests. Make the "
+                           "tests pass while keeping the intent of every parent change.")
+        merge_ctx = {
+            "parents": [self.store.nodes[p] for p in node["parents"]],
+            "conflict_files": conflict_files,
+            "test_output": (test_fact or {}).get("summary", ""),
+        }
+        run = {
+            "id": new_id(), "from_node": node["id"],
+            "instruction": instruction, "agent": agent, "after": None,
+            "status": "queued", "created_at": time.time(),
+            "started_at": None, "finished_at": None,
+            "node_id": None, "events": [], "error": "",
+            "merge": merge_ctx,
+        }
+        self.store.add_run(run)
+        with self._cond:
+            self._cond.notify_all()
+        return run["id"]
 
     def adopt(self, node_id: str) -> dict:
         node = self.store.nodes.get(node_id)

@@ -773,6 +773,17 @@ class OrchUndoBody(BaseModel):
     previous_commit: str
 
 
+class OrchMergeBody(BaseModel):
+    nodes: list[str]
+    agent: str
+    test: bool = True
+
+
+class OrchProjectBody(BaseModel):
+    notes: Optional[str] = None
+    test_cmd: Optional[str] = None
+
+
 @app.get("/api/orch/state")
 def api_orch_state() -> dict:
     """DAG nodes, runs, executor availability, limits for this project."""
@@ -842,6 +853,29 @@ def api_orch_stream(from_index: int = 0) -> StreamingResponse:
     """SSE: run_started / run_event / run_finished / node_created."""
     _require_agent()
     return _sse(orch.subscribe(from_index))
+
+
+@app.post("/api/orch/merge")
+def api_orch_merge(body: OrchMergeBody) -> dict:
+    """3-way merge of ≥2 nodes; conflict/red tests auto-dispatch a resolver run."""
+    _require_agent()
+    try:
+        return orch.merge(body.nodes, body.agent, run_tests=body.test)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/orch/project")
+def api_orch_project_get() -> dict:
+    """Project notes + test command (used in CONTEXT.md)."""
+    _require_agent()
+    return orch.project_info()
+
+
+@app.put("/api/orch/project")
+def api_orch_project_put(body: OrchProjectBody) -> dict:
+    _require_agent()
+    return orch.update_project(body.notes, body.test_cmd)
 
 
 @app.get("/api/fs/list")

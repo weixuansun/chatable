@@ -66,3 +66,64 @@ def worktree_remove(shadow: ShadowGit, wt: str) -> None:
     """Remove a run worktree (best-effort; leftovers are deleted directly)."""
     _run(["git", f"--git-dir={shadow.git_dir}", "worktree", "remove", "--force", wt])
     shutil.rmtree(wt, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# Merge (3-way, sequential, in a throwaway worktree on the shadow repo)
+# --------------------------------------------------------------------------- #
+
+def merge_base(shadow: ShadowGit, commits: list[str]) -> Optional[str]:
+    """Best common ancestor of the commits (None when unrelated)."""
+    if not commits:
+        return None
+    base = commits[0]
+    for c in commits[1:]:
+        proc = _run(["git", f"--git-dir={shadow.git_dir}", "merge-base", base, c])
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        base = proc.stdout.strip()
+    return base
+
+
+def merge_into_worktree(shadow: ShadowGit, commits: list[str], wt: str) -> dict:
+    """Apply commits[1:] on top of commits[0] in the worktree *wt*.
+
+    Each input is merged with `git merge --no-ff`; conflicts are left in the
+    files as conflict markers and committed as intermediate merge commits, so
+    later inputs still apply cleanly on top. Returns {base, conflict_files}.
+    """
+    worktree_create(shadow, commits[0], wt)
+    base = merge_base(shadow, commits)
+    conflict_files: list[str] = []
+    idcfg = ["-c", "user.name=chatable-orchestrator",
+             "-c", "user.email=orchestrator@chatable.local"]
+    for commit in commits[1:]:
+        proc = _run(["git", "-C", wt] + idcfg +
+                    ["merge", "--no-commit", "--no-ff", commit])
+        if proc.returncode != 0:
+            names = _run(["git", "-C", wt, "diff", "--name-only",
+                          "--diff-filter=U"]).stdout.splitlines()
+            conflict_files.extend(n for n in names if n.strip())
+        _check(_run(["git", "-C", wt, "add", "-A"]), "git add")
+        _check(_run(["git", "-C", wt] + idcfg +
+                    ["commit", "--no-verify", "-m", f"merge {commit[:8]}"]),
+               "git merge commit")
+    seen: set[str] = set()
+    unique = [f for f in conflict_files if not (f in seen or seen.add(f))]
+    return {"base": base, "conflict_files": unique}
+
+
+def commit_worktree_tree(shadow: ShadowGit, wt: str, parents: list[str],
+                         message: str) -> str:
+    """Commit the worktree's current index as a commit with explicit parents."""
+    tree = _run(["git", "-C", wt, "write-tree"])
+    _check(tree, "git write-tree")
+    argv = ["git", f"--git-dir={shadow.git_dir}",
+            "-c", "user.name=chatable-orchestrator",
+            "-c", "user.email=orchestrator@chatable.local",
+            "commit-tree", tree.stdout.strip(), "-m", message]
+    for p in parents:
+        argv += ["-p", p]
+    proc = _run(argv)
+    _check(proc, "git commit-tree")
+    return proc.stdout.strip()

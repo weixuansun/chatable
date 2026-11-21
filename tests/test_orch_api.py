@@ -177,6 +177,84 @@ class OrchApiTests(unittest.TestCase):
         self.assertIn("run_finished", types)
         self.assertIn("node_created", types)
 
+    def test_project_notes_endpoints(self):
+        client = _client()
+        r = client.get("/api/orch/project", headers=AUTH)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["notes"], "")
+        r = client.put("/api/orch/project",
+                       json={"notes": "keep the API stable",
+                             "test_cmd": "pytest -q tests/unit"},
+                       headers={**ORIGIN, **AUTH, "Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["notes"], "keep the API stable")
+        self.assertEqual(body["test_cmd"], "pytest -q tests/unit")
+        r = client.get("/api/orch/project", headers=AUTH)
+        self.assertEqual(r.json()["notes"], "keep the API stable")
+        # Don't leak the override into later tests' post-run test commands.
+        client.put("/api/orch/project", json={"notes": "", "test_cmd": ""},
+                   headers={**ORIGIN, **AUTH, "Content-Type": "application/json"})
+
+    def test_merge_endpoint(self):
+        import time as _time
+        from orch.store import new_id
+        from orch.worktree import (worktree_create, worktree_remove,
+                                   worktree_snapshot)
+        client = _client()
+        orch = self.orch
+        root = orch.store.root_node()
+
+        def make(files, instruction):
+            wt = os.path.join(orch.runs_dir, f"m-{new_id()}", "wt")
+            worktree_create(orch.shadow, root["snapshot"], wt)
+            for path, content in files.items():
+                with open(os.path.join(wt, path), "w") as fh:
+                    fh.write(content)
+            commit = worktree_snapshot(orch.shadow, wt, instruction)
+            worktree_remove(orch.shadow, wt)
+            node = {"id": new_id(), "snapshot": commit, "instruction": instruction,
+                    "parents": [root["id"]], "agent": "fake", "model": None,
+                    "status": "ok", "adopted": False,
+                    "conclusion": {"done": instruction, "decisions": "",
+                                   "not_done": "", "next": ""},
+                    "facts": {"files": []}, "session_id": None, "events": [],
+                    "created_at": _time.time()}
+            orch.store.add_node(node)
+            return node
+
+        a = make({"a.txt": "A\n"}, "write A")
+        b = make({"b.txt": "B\n"}, "write B")
+        r = client.post("/api/orch/merge",
+                        json={"nodes": [a["id"], b["id"]], "agent": "fake",
+                              "test": False},
+                        headers={**ORIGIN, **AUTH})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["status"], "ok")
+        self.assertIsNone(body["run_id"])
+        merged = orch.store.nodes[body["node_id"]]
+        self.assertEqual(merged["parents"], [a["id"], b["id"]])
+
+        # Conflicting merge auto-dispatches the resolver run.
+        c = make({"a.txt": "A\n"}, "write A")
+        d = make({"a.txt": "B\n"}, "write B")
+        r = client.post("/api/orch/merge",
+                        json={"nodes": [c["id"], d["id"]], "agent": "fake",
+                              "test": False},
+                        headers={**ORIGIN, **AUTH})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["status"], "conflict")
+        self.assertIsNotNone(body["run_id"])
+        run = _wait(body["run_id"])
+        self.assertEqual(run["status"], "ok")
+
+        r = client.post("/api/orch/merge",
+                        json={"nodes": ["nope", a["id"]], "agent": "fake"},
+                        headers={**ORIGIN, **AUTH})
+        self.assertEqual(r.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -104,3 +104,20 @@ class OrchStore:
             cur = self.nodes.get(parents[0]) if parents else None
         out.reverse()
         return out
+
+    def ancestors_of(self, node_id: str) -> list[dict]:
+        """Every ancestor of the node, walking ALL parents (merge DAG),
+        deduplicated, oldest first by creation time."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        stack = [node_id]
+        while stack:
+            cur_id = stack.pop()
+            node = self.nodes.get(cur_id)
+            if node is None or cur_id in seen:
+                continue
+            seen.add(cur_id)
+            out.append(node)
+            stack.extend(node.get("parents") or [])
+        out.sort(key=lambda n: n.get("created_at", 0))
+        return out
