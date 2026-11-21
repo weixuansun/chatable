@@ -136,7 +136,13 @@ intranet range; set it empty to disable the default).
 
 Agent mode lets the model work autonomously in a dedicated workspace
 (workspace file tools + shell, per-step tree nodes, shadow-git snapshots,
-approvals). It is **off by default** and only available when
+approvals). Steps stream live with their own diff / output (shell steps also
+list the files they touched) but have no buttons; when the task finishes the
+reply becomes a **node** with exactly one workspace snapshot and five
+actions: **View diff** (改动, the whole task's change), **Compare** (对比),
+**Files** (文件), **Adopt** (采用 — make the workspace match this node,
+backed up and undoable) and **Fork from here** (从此分叉 — continuing from an
+older node restores its files first). It is **off by default** and only available when
 `CHATTABLE_AUTH_TOKEN` is set — the toggle lives in the composer. See
 [docs/agent-api.md](docs/agent-api.md) for the full API. After an agent
 reply, typing again continues the same branch by default (the ✕ on the

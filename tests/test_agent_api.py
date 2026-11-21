@@ -137,6 +137,10 @@ class AgentEndpointValidationTests(unittest.TestCase):
                            headers={**ORIGIN, **self.auth})
         self.assertEqual(r.status_code, 404)
 
+    def test_node_diff_unknown_404(self):
+        r = _client().get("/api/agent/node/nope/diff", headers=self.auth)
+        self.assertEqual(r.status_code, 404)
+
     def test_step_diff_unknown_404(self):
         r = _client().get("/api/agent/step/nope/diff", headers=self.auth)
         self.assertEqual(r.status_code, 404)

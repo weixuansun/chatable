@@ -714,6 +714,18 @@ def api_agent_restore(body: RestoreBody) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/agent/node/{node_id}/diff")
+def api_agent_node_diff(node_id: str) -> dict:
+    """View diff for a node: everything its agent turn changed (the node's
+    end-of-turn snapshot vs the workspace state the turn started from)."""
+    try:
+        return service.node_diff(node_id)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/agent/step/{step_id}/diff")
 def api_agent_step_diff(step_id: str) -> dict:
     """The diff produced by one step (its edit diff, else its snapshot diff)."""

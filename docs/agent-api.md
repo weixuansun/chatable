@@ -33,8 +33,9 @@ it is required for these routes like any other.
 | `POST /api/agent/approve` | `{step_id, decision, always?, scope?}` | `decision`: `"approve"` \| `"deny"`. `always: true` records the grant **on that step node** (in-memory): `scope: "tool"` (default) auto-approves this tool, `scope: "writes"` auto-approves write_file+edit_file. Grants are branch-scoped — a call needs approval unless a matching grant exists on an ancestor-or-self of the current position, so a fork from before the grant asks again. `404` when no approval is pending for `step_id` (e.g. it timed out or the turn was stopped — a stop resolves pending approvals as denied). |
 | `GET /api/agent/approvals?node=` | — | `{always: [tool…], grants: [{node_id, tools}]}` — the effective grants at that node (an assistant node resolves to its step-chain tail), with their origins. |
 | `POST /api/agent/approvals/reset` | `{node_id}` | Clear grants made along that node's current branch. |
-| `POST /api/agent/restore` | `{node_id}` | Reset the workspace to the snapshot of the nearest ancestor-or-self node with `ws_commit`. Files absent from the snapshot are deleted; any `.git` directory inside the workspace is left untouched. Returns `{ok, restored, commit}` or `{ok: false, restored: false, reason}` when the path has no snapshot. |
-| `GET /api/agent/step/{step_id}/diff` | — | `{id, tool, status, ws_commit, diff}` — the step's stored edit diff for write/edit, else the shadow-git diff between `ws_parent_commit..ws_commit`. |
+| `POST /api/agent/restore` | `{node_id}` | (API only — the UI uses Adopt, which also backs up first.) Reset the workspace to the snapshot of the nearest ancestor-or-self node with `ws_commit`. Files absent from the snapshot are deleted; any `.git` directory inside the workspace is left untouched. Returns `{ok, restored, commit}` or `{ok: false, restored: false, reason}` when the path has no snapshot. |
+| `GET /api/agent/node/{node_id}/diff` | — | Node **View diff**: `{ok, node_id, commit, base_commit, diff, files: [{path, status, additions, deletions}]}` — everything the agent turn changed: the node's end-of-turn snapshot vs `ws_parent_commit` (the workspace when the turn started). |
+| `GET /api/agent/step/{step_id}/diff` | — | Legacy: `{id, tool, status, ws_commit, diff}` — a step's stored edit diff, else (old conversations with per-step snapshots) the shadow-git diff `ws_parent_commit..ws_commit`. |
 | `GET /api/agent/compare?a=&b=` | — | Branch compare: `{ok, a_commit, b_commit, diff, files: [{path, status, additions, deletions}]}` between the snapshots nearest the two nodes. |
 | `GET /api/agent/files?node=` | — | `{ok, commit, files: [path…]}` — files tracked in the snapshot nearest the node. |
 | `GET /api/agent/file?node=&path=` | — | `{ok, commit, path, content, truncated}` — one file at that snapshot (200KB cap, path confined). |
@@ -100,7 +101,7 @@ are unchanged. `assistant_start` gains `agent: true` and `workspace`.
 {"type": "step_output", "step_id", "chunk"}
 {"type": "approval_required", "step_id", "tool", "args", "preview_diff"}
 {"type": "approval_resolved", "step_id", "decision"}
-{"type": "step_done", "id", "status", "tool", "ok", "duration_ms", "ws_commit"}
+{"type": "step_done", "id", "status", "tool", "ok", "duration_ms", "touched_files"}   // no per-step ws_commit (node-level snapshots)
 {"type": "plan", "step_id", "items": [{"content", "status"}]}
 {"type": "notice", "text"}
 ```
@@ -126,8 +127,9 @@ are unchanged. `assistant_start` gains `agent: true` and `workspace`.
 Each executed agent tool call is one persisted node, written **as it
 happens** and chained: first step's parent is the assistant node of the
 turn, each next step's parent is the previous step — the trajectory is a
-path in the tree (`user → assistant → step → step → …`). The turn's final
-`ws_commit` is also mirrored onto the assistant node's metadata.
+path in the tree (`user → assistant → step → step → …`). Steps carry no
+snapshot; the turn's single end-of-turn `ws_commit` (+ `ws_parent_commit` =
+the base) lives on the assistant node's metadata.
 
 ```json
 {
@@ -144,8 +146,8 @@ path in the tree (`user → assistant → step → step → …`). The turn's fi
     "error": "…only when status == error…",
     "diff": "…unified diff, write/edit only…",
     "duration_ms": 42,
-    "ws_commit": "<shadow git commit>",        // mutating steps that succeeded
-    "ws_parent_commit": "<commit before this step>"
+    "touched_files": [{"status": "A", "path": "out.txt"}]  // run_shell only, when any
+    // legacy conversations may also have "ws_commit"/"ws_parent_commit" here
   }
 }
 ```
@@ -225,15 +227,34 @@ affected; persisted step results stay full.
 Snapshots live in `<data_dir>/agent_shadow.git` and operate with
 `git --git-dir=<shadow> --work-tree=<workspace>` — a `.git` inside the
 workspace is never read, written, or cleaned (it is excluded from tracking,
-and `git clean` skips it). A **base snapshot** of the pre-turn workspace is
-committed at the start of every agent turn and recorded on the user node,
-then one commit after every successful write/edit/shell step (recorded as
-`ws_commit` on the step; the turn's final commit is mirrored onto the
-assistant node). A node's file state is the nearest ancestor-or-self
-`ws_commit` — where an assistant node's mirror counts only for the
-assistant node itself, not for its own steps (their nearest snapshot is the
-last earlier step, or the base). If git is not installed, snapshots degrade
-to no-ops (`ws_commit` absent) and restore/diff calls return a clear error.
+and `git clean` skips it). **Snapshots are node-granular.** A **base snapshot** of the pre-turn
+workspace is committed at the start of every agent turn and recorded on the
+user node (`ws_commit`). Steps do **not** snapshot: write/edit steps keep
+their inline `diff`, shell steps keep their output plus `touched_files`
+(`[{status: A|M|D, path}]`, computed by staging the shadow index around the
+command — no commit). When the turn ends — finished, stopped, round-capped
+or crashed — exactly **one** snapshot is committed and recorded on the
+assistant node as `ws_commit`, with `ws_parent_commit` = the turn's base.
+A turn that changed nothing reuses the existing HEAD (no empty commit).
+
+A node's file state is its own `ws_commit`, else the nearest
+ancestor-or-self one (a step resolves to its turn's base: the assistant
+node's end-of-turn commit is in its steps' future). **Backward
+compatibility:** conversations saved with per-step snapshots still load —
+an assistant node without `ws_commit` falls back to its last step's commit
+(also surfaced as `ws_commit` in `/api/path` and the mind-map data), and
+`/api/agent/step/{id}/diff` still serves old step snapshots. If git is not
+installed, snapshots degrade to no-ops (`ws_commit` absent) and
+restore/diff calls return a clear error.
+
+**UI.** Steps stream live with their inline diff / output but carry no
+buttons. Under a finished agent reply (and on its mind-map card) the node
+offers: **View diff** (改动 — the whole turn vs its base,
+`/api/agent/node/{id}/diff`), **Compare** (对比), **Files** (文件),
+**Adopt** (采用 — restore the workspace to this node, backed up first and
+undoable; this replaces the old separate "Restore workspace" button) and
+**Fork from here** (从此分叉 — sending from an older node restores its
+snapshot first).
 
 Shell commands can still cause effects outside the workspace (network,
 global installs); those are **not** rolled back by restores.

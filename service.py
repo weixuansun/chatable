@@ -858,6 +858,9 @@ class ChatService:
         """
         if node_id == ROOT_ID or not self.store.exists(node_id):
             return None
+        own = self.node_ws_commit(node_id)
+        if own:
+            return own
         crossed_step = False
         for n in reversed(self.store.path_to_root(node_id)):
             md = n.metadata if isinstance(n.metadata, dict) else {}
@@ -868,6 +871,55 @@ class ChatService:
             if md.get("ws_commit"):
                 return str(md["ws_commit"])
         return None
+
+    def node_ws_commit(self, node_id: str) -> Optional[str]:
+        """The snapshot recorded ON *node_id*. Agent assistant nodes store
+        the turn's single end-of-turn snapshot; conversations saved before
+        node-level snapshots only had per-step commits, so an assistant node
+        without one falls back to its last step's ws_commit."""
+        if node_id == ROOT_ID or not self.store.exists(node_id):
+            return None
+        node = self.store.get(node_id)
+        md = node.metadata if isinstance(node.metadata, dict) else {}
+        if md.get("ws_commit"):
+            return str(md["ws_commit"])
+        if node.role != "assistant":
+            return None
+        cmap = self.store.children_map()
+        cur, last = node_id, None
+        while True:
+            kids = [self.store.get(c) for c in cmap.get(cur, [])]
+            steps = [k for k in kids if k.role == "step"]
+            if len(steps) != 1:
+                break
+            cur = steps[0].id
+            smd = steps[0].metadata if isinstance(steps[0].metadata, dict) else {}
+            if smd.get("ws_commit"):
+                last = str(smd["ws_commit"])
+        return last
+
+    def node_diff(self, node_id: str) -> dict:
+        """View diff for a node: everything its turn changed — the node's
+        snapshot vs the workspace state the turn started from."""
+        if not self.store.exists(node_id):
+            raise NodeNotFoundError(node_id)
+        node = self.store.get(node_id)
+        md = node.metadata if isinstance(node.metadata, dict) else {}
+        head = self.nearest_ws_commit(node_id)
+        base = md.get("ws_parent_commit")
+        if not base and node.parent_id and node.parent_id != ROOT_ID:
+            # The turn's base snapshot lives on its user node.
+            base = self.nearest_ws_commit(node.parent_id) if node.role == "assistant" else None
+        if not head:
+            return {"ok": False, "reason": "no workspace snapshot on this node's path",
+                    "node_id": node_id}
+        shadow = self.shadow_git()
+        if not base or base == head:
+            return {"ok": True, "node_id": node_id, "commit": head, "base_commit": base,
+                    "diff": "", "files": []}
+        return {"ok": True, "node_id": node_id, "commit": head, "base_commit": str(base),
+                "diff": shadow.diff(head, str(base)),
+                "files": shadow.diff_numstat(str(base), head)}
 
     def _step_chain_tail(self, node_id: str) -> str:
         """The end of the single-child step lineage below *node_id* (or
@@ -1074,9 +1126,11 @@ class ChatService:
             "created_at": node.created_at,
             "tool": md.get("tool"),
         }
-        # Agent step/snapshot fields for the mind map and restore buttons.
-        if md.get("ws_commit"):
-            data["ws_commit"] = md["ws_commit"]
+        # Agent snapshot field for the mind map's node buttons.
+        wsc = md.get("ws_commit") or (
+            self.node_ws_commit(node.id) if node.role == "assistant" and md.get("agent") else None)
+        if wsc:
+            data["ws_commit"] = wsc
         if node.role == "step":
             data["step_status"] = md.get("status")
         if isinstance(md.get("plan"), list):
@@ -1192,14 +1246,16 @@ class ChatService:
                 # Agent fields: the turn's final snapshot (assistant nodes), the
                 # latest update_plan checklist, and the full step payload, so
                 # the UI can rebuild the timeline.
-                "ws_commit": meta.get("ws_commit"),
+                "ws_commit": meta.get("ws_commit") or (
+                    self.node_ws_commit(n.id)
+                    if n.role == "assistant" and meta.get("agent") else None),
                 "plan": meta.get("plan"),
                 "stop_reason": meta.get("stop_reason"),
                 "incomplete": bool(meta.get("incomplete")),
                 "step": (
                     {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
                                               "result", "error", "diff", "ws_commit",
-                                              "duration_ms")}
+                                              "touched_files", "duration_ms")}
                     if n.role == "step" else None
                 ),
             })
@@ -2539,8 +2595,15 @@ class ChatService:
                 else:
                     grant.add(name)
 
-        prep["parent_commit"] = state["last_commit"] if prep["mutating"] else None
         emit({"type": "tool_call", "name": name, "arguments": args})
+        if name == "run_shell" and refused is None:
+            # Baseline the shadow index so the step can list the files the
+            # command touched (staging only — no per-step snapshot commit).
+            try:
+                shadow.stage_changes()
+                prep["shell_baselined"] = True
+            except Exception:  # noqa: BLE001 - touched-files is best-effort
+                pass
         if refused is not None:
             prep["result"] = ToolResult(call_id=call["_cid"], name=name, arguments=args,
                                         ok=False, output=f"[{refused}]", error=refused)
@@ -2565,13 +2628,17 @@ class ChatService:
         diff = (result.metadata or {}).get("diff")
         if diff:
             update["diff"] = diff
+        if name == "run_shell" and prep.get("shell_baselined"):
+            try:
+                touched = shadow.stage_changes()
+            except Exception:  # noqa: BLE001 - best-effort
+                touched = []
+            if touched:
+                update["touched_files"] = touched
+        # No per-step workspace snapshot: the turn is snapshotted once, when
+        # it ends (node granularity). The step keeps its own inline diff.
         if prep["mutating"] and result.ok:
-            commit = shadow.snapshot(f"agent step: {step.metadata['args_summary']}")
-            if commit:
-                update["ws_commit"] = commit
-                if prep["parent_commit"]:
-                    update["ws_parent_commit"] = prep["parent_commit"]
-                state["last_commit"] = commit
+            state["dirty"] = True
         self.store.update_metadata(step.id, update)
         if name == "run_shell":
             state.setdefault("shell_runs", []).append(
@@ -2582,7 +2649,7 @@ class ChatService:
             emit({"type": "plan", "step_id": step.id, "items": items})
         emit({"type": "step_done", "id": step.id, "status": status, "tool": name,
               "ok": result.ok, "duration_ms": result.duration_ms,
-              "ws_commit": update.get("ws_commit")})
+              "touched_files": update.get("touched_files") or []})
         emit({"type": "tool_result", "name": name, "arguments": args,
               "ok": result.ok, "error": result.error,
               "duration_ms": result.duration_ms, "output": result.output})
@@ -2645,6 +2712,25 @@ class ChatService:
         return [self._finish_agent_step(turn, ws, shadow, p, r, state)
                 for p, r in zip(preps, results)]
 
+    @staticmethod
+    def _agent_node_snapshot(shadow: ShadowGit, assistant_id: str,
+                             base_commit: Optional[str]) -> dict:
+        """Snapshot the workspace at the end of an agent turn (finished,
+        stopped, round-capped or crashed) → node metadata fields."""
+        out: dict = {}
+        final = None
+        try:
+            if shadow.available:
+                final = shadow.snapshot(f"agent turn {assistant_id}")
+        except Exception:  # noqa: BLE001 - a failed snapshot must not lose the reply
+            final = None
+        final = final or base_commit
+        if final:
+            out["ws_commit"] = final
+        if base_commit:
+            out["ws_parent_commit"] = base_commit
+        return out
+
     def _agent_wrap_up_nudge(self, state: dict, shadow: ShadowGit) -> str:
         """The round-limit wrap-up prompt, with a server-computed factual
         record of what this turn ACTUALLY did — files changed (shadow-git
@@ -2684,6 +2770,24 @@ class ChatService:
 
     def _generate_agent(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
                         overrides: Optional[dict] = None) -> None:
+        """Run the agent loop; if it crashes, still take the turn's single
+        node snapshot so the files it changed stay reachable from the node."""
+        try:
+            return self._generate_agent_loop(turn, user_node, assistant_node, overrides)
+        except Exception:
+            try:
+                shadow = (overrides or {}).get("shadow") or self.shadow_git()
+                umd = self.store.get(user_node.id).metadata or {}
+                base = umd.get("ws_commit") if isinstance(umd, dict) else None
+                md = {"agent": True, "stop_reason": "error"}
+                md.update(self._agent_node_snapshot(shadow, assistant_node.id, base))
+                self.store.update_metadata(assistant_node.id, md)
+            except Exception:  # noqa: BLE001 - never mask the original error
+                pass
+            raise
+
+    def _generate_agent_loop(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node,
+                             overrides: Optional[dict] = None) -> None:
         """Agent-mode tool loop.
 
         Same streaming shape as ``_generate_unified``, but with the workspace
@@ -2750,7 +2854,7 @@ class ChatService:
         limit_notified = False
         round_no = 0
         t0 = time.monotonic()
-        state = {"last_step_id": None, "last_commit": base_commit,
+        state = {"last_step_id": None,
                  "base_commit": base_commit, "anchor_id": user_node.id,
                  "trunk_id": trunk_id, "plan": None, "shell_runs": [],
                  "auto_approve": bool(overrides.get("auto_approve")),
@@ -2816,7 +2920,14 @@ class ChatService:
                         continue
                     err = f"{type(e).__name__}: {e}"
                     self.store.append_content(assistant_node.id, f"[error: {err}]")
-                    emit({"type": "error", "message": err, "id": assistant_node.id})
+                    # The node still gets its one snapshot (files changed so
+                    # far stay reachable via View diff / Adopt / Fork).
+                    md_err = {"agent": True, "stop_reason": "error"}
+                    md_err.update(self._agent_node_snapshot(
+                        shadow, assistant_node.id, base_commit))
+                    self.store.update_metadata(assistant_node.id, md_err)
+                    emit({"type": "error", "message": err, "id": assistant_node.id,
+                          "ws_commit": md_err.get("ws_commit")})
                     return
 
             iter_text = "".join(text_parts)
@@ -2893,11 +3004,11 @@ class ChatService:
             round_no += 1
 
         full_text = _scrub_answer_text("\n\n".join(segments))
-        # The turn's final file state lives on its last step; mirror it onto
-        # the assistant node so "restore to this reply" resolves correctly.
+        # Node granularity: exactly one workspace snapshot per turn, taken
+        # now and attached to the assistant node (the node's file state);
+        # ws_parent_commit is the turn's base (the state it started from).
         extra = {"agent": True}
-        if state["last_commit"]:
-            extra["ws_commit"] = state["last_commit"]
+        extra.update(self._agent_node_snapshot(shadow, assistant_node.id, base_commit))
         if state.get("plan"):
             extra["plan"] = state["plan"]
         if limit_notified:

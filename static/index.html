@@ -463,35 +463,12 @@ try {
                                     <template x-if="s.result">
                                       <pre class="tool-out" x-text="s.result"></pre>
                                     </template>
-                                    <div class="step-actions">
-                                      <button class="fork-btn" @click="viewStepDiff(s)" title="Show this step's diff">
-                                        <i data-lucide="file-diff"></i> View diff
-                                      </button>
-                                      <template x-if="s.ws_commit">
-                                        <span class="btn-cluster">
-                                          <button class="fork-btn" @click="restoreWorkspace(s.id)"
-                                                  title="Reset the workspace to this step's snapshot">
-                                            <i data-lucide="history"></i> Restore workspace here
-                                          </button>
-                                          <button class="fork-btn" @click="openCompare(s.id)"
-                                                  title="Compare this snapshot with another node">
-                                            <i data-lucide="git-compare"></i> Compare…
-                                          </button>
-                                          <button class="fork-btn" @click="openFiles(s.id)"
-                                                  title="Browse files at this snapshot">
-                                            <i data-lucide="folder-open"></i> Files
-                                          </button>
-                                          <button class="fork-btn" @click="adoptBranch(s.id)"
-                                                  title="Adopt this snapshot into the workspace (undoable)">
-                                            <i data-lucide="git-merge"></i> Adopt
-                                          </button>
-                                        </span>
-                                      </template>
-                                      <button class="fork-btn" @click="forkFromHere(s.id)"
-                                              title="Fork the conversation from this step (agent mode restores its workspace snapshot on send)">
-                                        <i data-lucide="git-branch"></i> Fork from here
-                                      </button>
-                                    </div>
+                                    <template x-if="s.touched_files && s.touched_files.length">
+                                      <div class="step-touched">
+                                        <i data-lucide="files"></i>
+                                        <span x-text="'touched: ' + s.touched_files.map(f => f.status + ' ' + f.path).join(', ')"></span>
+                                      </div>
+                                    </template>
                                   </div>
                                 </details>
                               </div>
@@ -543,7 +520,7 @@ try {
                    Quiet until hovered, except on the latest assistant reply -->
               <template x-if="!streams[m.id]">
                 <div class="fork-actions" :class="{'last-reply': m.role === 'assistant' && m === messages[messages.length - 1]}">
-                  <template x-if="m.role === 'assistant'">
+                  <template x-if="m.role === 'assistant' && !m.ws_commit">
                     <button class="fork-btn" @click="forkFromHere(m.id)" title="从此回复分叉追问">
                       <i data-lucide="git-branch"></i>追问
                     </button>
@@ -553,23 +530,28 @@ try {
                       <i data-lucide="network"></i>思维图
                     </button>
                   </template>
+                  <!-- agent node actions: one snapshot per finished turn -->
                   <template x-if="m.role === 'assistant' && m.ws_commit">
-                    <span class="btn-cluster">
-                      <button class="fork-btn" @click="restoreWorkspace(m.id)"
-                              title="恢复工作区到这条回复结束时的快照">
-                        <i data-lucide="history"></i>恢复工作区
+                    <span class="btn-cluster node-actions">
+                      <button class="fork-btn" @click="viewNodeDiff(m.id)"
+                              title="View diff：这一轮任务改了什么（相对任务开始时的工作区）">
+                        <i data-lucide="file-diff"></i>改动
                       </button>
                       <button class="fork-btn" @click="openCompare(m.id)"
-                              title="对比这条回复与其他节点的工作区快照">
+                              title="Compare：对比这个节点与其他节点 / 当前工作区的快照">
                         <i data-lucide="git-compare"></i>对比
                       </button>
                       <button class="fork-btn" @click="openFiles(m.id)"
-                              title="查看这条回复结束时工作区的文件">
+                              title="Files：浏览这个节点结束时工作区的文件">
                         <i data-lucide="folder-open"></i>文件
                       </button>
                       <button class="fork-btn" @click="adoptBranch(m.id)"
-                              title="把这条回复的文件状态采用到当前工作区（可撤销）">
+                              title="Adopt：把工作区恢复/采用为这个节点的文件状态（先备份，可撤销）">
                         <i data-lucide="git-merge"></i>采用
+                      </button>
+                      <button class="fork-btn" @click="forkFromHere(m.id)"
+                              title="Fork from here：从这个节点分叉；发送时工作区会先恢复到此节点的快照">
+                        <i data-lucide="git-branch"></i>从此分叉
                       </button>
                     </span>
                   </template>
@@ -902,14 +884,11 @@ try {
             <pre class="tool-out step-modal-out" x-text="stepModal.result"></pre>
           </template>
           <template x-if="!stepModal.loading && !stepModal.diff && !stepModal.result">
-            <p class="hint">No diff or output recorded for this step.</p>
+            <p class="hint" x-text="stepModal.isNode ? 'No file changes in this turn.' : 'No diff or output recorded for this step.'"></p>
           </template>
         </div>
-        <div class="modal-foot" x-show="stepModal.ws_commit">
-          <button class="btn-ghost" @click="stepModal.open = false; restoreWorkspace(stepModal.nodeId)"
-                  title="Reset the workspace to this step's snapshot">
-            <i data-lucide="history"></i> Restore workspace here
-          </button>
+        <div class="modal-foot" x-show="stepModal.files && stepModal.files.length">
+          <span class="hint" x-text="(stepModal.files || []).map(f => f.path + ' (+' + f.additions + '/-' + f.deletions + ')').join('  ·  ')"></span>
         </div>
       </div>
     </div>
@@ -1176,33 +1155,29 @@ try {
                     <button class="map-del-btn" @click.stop="mapShowDetail(mn.id)" title="查看细节">
                       <i data-lucide="message-square"></i>
                     </button>
-                    <button class="map-del-btn" @click.stop="mapForkFrom(mn.id)"
-                            title="从这里分叉（agent 模式发送前会先恢复工作区快照）">
-                      <i data-lucide="git-branch"></i>
-                    </button>
-                    <button class="map-del-btn" x-show="mn.wsCommit" @click.stop="restoreWorkspace(mn.id)"
-                            title="恢复工作区到此快照">
-                      <i data-lucide="history"></i>
-                    </button>
-                    <button class="map-del-btn" x-show="mn.wsCommit" @click.stop="adoptBranch(mn.id)"
-                            title="采用此快照到当前工作区（可撤销）">
-                      <i data-lucide="git-merge"></i>
-                    </button>
                   </span>
                 </template>
                 <template x-if="!mn.isStep && mn.wsCommit">
                   <span class="btn-cluster">
-                    <button class="map-del-btn" @click.stop="restoreWorkspace(mn.replyId || mn.id)"
-                            title="恢复工作区到此快照">
-                      <i data-lucide="history"></i>
+                    <button class="map-del-btn" @click.stop="viewNodeDiff(mn.replyId || mn.id)"
+                            title="View diff：这一轮任务的改动">
+                      <i data-lucide="file-diff"></i>
                     </button>
                     <button class="map-del-btn" @click.stop="openCompare(mn.replyId || mn.id)"
-                            title="对比此快照与其他节点">
+                            title="Compare：对比此快照与其他节点">
                       <i data-lucide="git-compare"></i>
                     </button>
+                    <button class="map-del-btn" @click.stop="openFiles(mn.replyId || mn.id)"
+                            title="Files：浏览此节点的文件">
+                      <i data-lucide="folder-open"></i>
+                    </button>
                     <button class="map-del-btn" @click.stop="adoptBranch(mn.replyId || mn.id)"
-                            title="采用此分支的文件状态（可撤销）">
+                            title="Adopt：采用此节点的文件状态（可撤销）">
                       <i data-lucide="git-merge"></i>
+                    </button>
+                    <button class="map-del-btn" @click.stop="mapForkFrom(mn.replyId || mn.id)"
+                            title="Fork from here：从此节点分叉（发送前恢复它的快照）">
+                      <i data-lucide="git-branch"></i>
                     </button>
                   </span>
                 </template>
@@ -1863,7 +1838,7 @@ function chatable() {
     // Tools auto-approved ("always") for the current conversation's session.
     sessionAutoApprove: [],
     // Step detail/diff modal (chat timeline "View diff", mind-map step detail).
-    stepModal: {open: false, title: '', diff: '', result: '', ws_commit: null,
+    stepModal: {open: false, isNode: false, files: [], title: '', diff: '', result: '', ws_commit: null,
                 nodeId: null, loading: false},
     // Expanded read-only step groups in the chat timeline (group id → true).
     expandedGroups: {},
@@ -3352,7 +3327,8 @@ function chatable() {
         id: msg.id, tool: md.tool || msg.tool || 'tool', args: md.args || {},
         args_summary: md.args_summary || msg.content || '',
         status: md.status || 'ok', result: md.result || '', error: md.error || '',
-        diff: md.diff || '', duration_ms: 0, ws_commit: md.ws_commit || null,
+        diff: md.diff || '', duration_ms: md.duration_ms || 0, ws_commit: md.ws_commit || null,
+        touched_files: md.touched_files || [],
       };
     },
 
@@ -3461,46 +3437,28 @@ function chatable() {
       }
     },
 
-    async restoreWorkspace(nodeId) {
-      if (!confirm('Restore the workspace to the snapshot at #' + nodeId.slice(0, 6) +
-                   '? Files changed after it will be overwritten (a workspace .git is kept).')) return;
+    // Node "View diff": everything the agent turn changed — the node's
+    // end-of-turn snapshot vs the workspace state the turn started from.
+    async viewNodeDiff(nodeId) {
+      this.mindmap.open = false;
+      this.stepModal = {open: true, isNode: true, title: 'View diff · #' + nodeId.slice(0, 6),
+                        diff: '', result: '', files: [], ws_commit: null,
+                        nodeId, loading: true};
       try {
-        const r = await fetch('/api/agent/restore', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({node_id: nodeId}),
-        });
+        const r = await fetch('/api/agent/node/' + encodeURIComponent(nodeId) + '/diff');
         const data = r.ok ? await r.json() : {ok: false, reason: await this.errDetail(r)};
-        if (data.restored) {
-          toast('Workspace restored to ' + String(data.commit).slice(0, 8), 'success');
+        if (data.ok) {
+          this.stepModal.diff = data.diff || '';
+          this.stepModal.files = data.files || [];
+          this.stepModal.ws_commit = data.commit || null;
+          const n = (data.files || []).length;
+          this.stepModal.title += ' · ' + n + (n === 1 ? ' file' : ' files');
         } else {
-          toast(data.reason || 'No workspace snapshot on this path', 'info');
+          this.stepModal.result = data.reason || 'No workspace snapshot on this node.';
         }
       } catch (e) {
-        toast('Restore failed: ' + (e && e.message ? e.message : e), 'error');
-      }
-    },
-
-    // Open the step detail modal; fetch the diff when the step has none stored
-    // (e.g. shell steps, where it is computed from the shadow repo).
-    async viewStepDiff(s) {
-      this.stepModal = {
-        open: true,
-        title: (s.tool || 'step') + (s.args_summary ? ' · ' + shortArgs(s.tool, s.args_summary) : ''),
-        diff: s.diff || '',
-        result: stripDiffFromResult(s.result, s.diff),
-        ws_commit: s.ws_commit || null,
-        nodeId: s.id, loading: !s.diff && !!s.ws_commit,
-      };
-      if (s.diff || !s.ws_commit) return;
-      try {
-        const r = await fetch('/api/agent/step/' + encodeURIComponent(s.id) + '/diff');
-        if (r.ok) {
-          const data = await r.json();
-          this.stepModal.diff = data.diff || '';
-          this.stepModal.ws_commit = data.ws_commit || this.stepModal.ws_commit;
-        }
-      } catch (e) { /* the modal still shows the result text */ }
-      finally { this.stepModal.loading = false; }
+        this.stepModal.result = 'Failed to load diff: ' + (e && e.message ? e.message : e);
+      } finally { this.stepModal.loading = false; }
     },
 
     // Mind-map step click: recenter (handled by mapNodeClick) + open details.
@@ -4294,7 +4252,9 @@ function chatable() {
       }
       if (run.length) segs.push({run});
       // Build cards tail → head so children are ready when parents are built.
-      let next = sideKids(chain[chain.length - 1]).map(c => this.buildPairTree(c));
+      // (The tail's own side children are attached by its segment below —
+      // seeding them here too drew every follow-up twice.)
+      let next = [];
       for (let i = segs.length - 1; i >= 0; i--) {
         const seg = segs[i];
         if (seg.step) {
@@ -5214,7 +5174,7 @@ function chatable() {
           if (s) {
             s.status = evt.status;
             if (evt.duration_ms) s.duration_ms = evt.duration_ms;
-            if (evt.ws_commit) s.ws_commit = evt.ws_commit;
+            if (evt.touched_files && evt.touched_files.length) s.touched_files = evt.touched_files;
           }
           follow();
           break;
@@ -5311,6 +5271,7 @@ function chatable() {
         case 'error':
           st._sawDone = true;
           st._sawError = true;
+          if (evt.ws_commit) st.ws_commit = evt.ws_commit;
           st.text += '\n\n[error: ' + evt.message + ']';
           break;
       }

@@ -157,6 +157,33 @@ class ShadowGit:
             self._git(*args)
             return self._head()
 
+    def stage_changes(self, limit: int = 50) -> list[dict]:
+        """Files changed in the work tree since the last stage/snapshot, then
+        stage them (no commit). Called around a shell step so the step can
+        list the files it touched without a per-step snapshot commit."""
+        if not self.available:
+            return []
+        with self._lock:
+            self._ensure_init()
+            if self._head() is None:
+                # No baseline yet: everything would look "touched".
+                self._git("add", "-A")
+                return []
+            proc = self._git("status", "--porcelain", "--untracked-files=all",
+                             check=False)
+            out: list[dict] = []
+            for line in proc.stdout.splitlines():
+                if len(line) < 4:
+                    continue
+                y, path = line[1], line[3:]
+                if y == " ":
+                    continue  # already staged → not changed by this step
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1]
+                out.append({"status": {"?": "A"}.get(y, y), "path": path.strip('"')})
+            self._git("add", "-A")
+            return out[:limit]
+
     def restore(self, commit: str) -> None:
         """Reset the workspace to *commit*.
 

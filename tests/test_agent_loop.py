@@ -136,7 +136,9 @@ def test_path_messages_expands_steps_below_the_assistant_node(svc):
     # The step payload mirrors the live view (status, diff, duration, commit).
     md = msgs[2]["step"]
     assert md["tool"] == "write_file" and md["status"] == "ok"
-    assert md["diff"] and md["ws_commit"]
+    assert md["diff"]
+    assert not md["ws_commit"]  # node granularity: no per-step snapshot
+    assert msgs[1]["ws_commit"]  # …the assistant node carries the snapshot
     assert "duration_ms" in md
     # Selecting a step itself: steps come from the path, with no duplicates.
     msgs2 = svc.path_messages(steps[1].id)
@@ -229,65 +231,116 @@ def test_normal_mode_still_dedupes_and_caps(tmp_path, monkeypatch):
 # --------------------------------------------------------------- snapshots
 
 @git_required
-def test_steps_record_ws_commits_and_restore(svc):
-    info, _events, _calls = run_turn(svc, [
+def test_turn_takes_one_node_snapshot_not_per_step(svc):
+    """Node granularity: steps keep inline diffs but no ws_commit; the turn
+    is snapshotted exactly once, onto the assistant node."""
+    shadow = svc.shadow_git()
+    info, events, _calls = run_turn(svc, [
         tool_call("write_file", path="a.txt", content="v1\n"),
         tool_call("write_file", path="a.txt", content="v2\n"),
+        tool_call("write_file", path="b.txt", content="b\n"),
         ANSWER,
     ])
     steps = step_nodes(svc)
-    s1, s2 = steps
-    assert s1.metadata["ws_commit"]
-    assert s2.metadata["ws_commit"] != s1.metadata["ws_commit"]
-    assert s2.metadata["ws_parent_commit"] == s1.metadata["ws_commit"]
+    assert len(steps) == 3
+    for s in steps:
+        assert "ws_commit" not in s.metadata
+        assert s.metadata["diff"]  # each step still shows its own change
+    assert all(e.get("ws_commit") is None for e in events if e.get("type") == "step_done")
+    node = svc.store.get(info["assistant_id"])
+    base = svc.store.get(info["user_id"]).metadata["ws_commit"]
+    assert node.metadata["ws_commit"] and node.metadata["ws_commit"] != base
+    assert node.metadata["ws_parent_commit"] == base
+    # Exactly two shadow commits for the turn: the base + the node snapshot.
+    log = shadow._git("rev-list", "--count", "HEAD").stdout.strip()
+    assert log == "2"
 
+    # Restore/adopt resolve to the node snapshot.
     target = os.path.join(svc.workspace().root, "a.txt")
-    res = svc.restore_workspace(s1.id)
-    assert res["restored"] and res["commit"] == s1.metadata["ws_commit"]
-    assert open(target).read() == "v1\n"
-
-    # The assistant node resolves to its nearest step's snapshot.
-    res = svc.restore_workspace(info["assistant_id"])
-    assert res["commit"] == s2.metadata["ws_commit"]
+    open(target, "w").write("scribble\n")
+    res = svc.adopt_snapshot(info["assistant_id"])
+    assert res["ok"] and res["adopted_commit"] == node.metadata["ws_commit"]
     assert open(target).read() == "v2\n"
 
-    # Diff endpoint data: stored edit diff for the write step…
-    d1 = svc.step_diff(s1.id)
-    assert "+v1" in d1["diff"]
-    d2 = svc.step_diff(s2.id)
-    assert "-v1" in d2["diff"] and "+v2" in d2["diff"]
-
 
 @git_required
-def test_shell_step_snapshot_diff_falls_back_to_git(svc):
-    _info, _events, _calls = run_turn(svc, [
-        tool_call("run_shell", command="echo from-shell > shell.txt"),
-        ANSWER,
-    ])
-    (step,) = step_nodes(svc)
-    assert step.metadata["ws_commit"]
-    assert "diff" not in step.metadata  # shell steps have no stored edit diff
-    d = svc.step_diff(step.id)
-    assert "shell.txt" in d["diff"] and "+from-shell" in d["diff"]
-
-
-@git_required
-def test_send_from_step_restores_workspace_first(svc):
-    """Fork in agent mode = time travel: the workspace follows the fork point."""
+def test_node_diff_covers_the_whole_turn(svc):
+    with open(os.path.join(svc.workspace().root, "a.txt"), "w") as fh:
+        fh.write("orig\n")
     info, _events, _calls = run_turn(svc, [
         tool_call("write_file", path="a.txt", content="v1\n"),
         tool_call("write_file", path="a.txt", content="v2\n"),
+        tool_call("run_shell", command="echo from-shell > shell.txt"),
         ANSWER,
     ])
-    s1, _s2 = step_nodes(svc)
+    d = svc.node_diff(info["assistant_id"])
+    assert d["ok"]
+    assert "-orig" in d["diff"] and "+v2" in d["diff"] and "+v1" not in d["diff"]
+    assert "shell.txt" in d["diff"] and "+from-shell" in d["diff"]
+    assert sorted(f["path"] for f in d["files"]) == ["a.txt", "shell.txt"]
+    # A second turn's diff is relative to ITS start, not the first turn's.
+    info2, _e, _c = run_turn(svc, [tool_call("write_file", path="c.txt", content="c\n"),
+                                   ANSWER], parent_id=info["assistant_id"])
+    d2 = svc.node_diff(info2["assistant_id"])
+    assert [f["path"] for f in d2["files"]] == ["c.txt"]
+
+
+@git_required
+def test_old_step_level_snapshots_still_resolve(svc):
+    """Conversations saved before node snapshots: the assistant node has no
+    ws_commit, only its steps do → fall back to the last step's commit."""
+    info, _events, _calls = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        ANSWER,
+    ])
+    shadow = svc.shadow_git()
+    node = svc.store.get(info["assistant_id"])
+    commit = node.metadata["ws_commit"]
+    (step,) = step_nodes(svc)
+    # Rewrite into the legacy shape.
+    svc.store.update_metadata(step.id, {"ws_commit": commit})
+    svc.store.update_metadata(info["assistant_id"],
+                              {"ws_commit": None, "ws_parent_commit": None})
+    assert not svc.store.get(info["assistant_id"]).metadata.get("ws_commit")
+    assert svc.nearest_ws_commit(info["assistant_id"]) == commit
+    msgs = svc.path_messages(info["assistant_id"])
+    assert msgs[1]["ws_commit"] == commit
+    d = svc.node_diff(info["assistant_id"])
+    assert "+v1" in d["diff"]
+    assert svc.step_diff(step.id)["ws_commit"] == commit
+    assert shadow.available
+
+
+@git_required
+def test_send_from_assistant_node_restores_its_snapshot(svc):
+    """Fork from an older node = time travel: the workspace follows it."""
+    info1, _e, _c = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"), ANSWER])
+    info2, _e, _c = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v2\n"), ANSWER],
+        parent_id=info1["assistant_id"])
     target = os.path.join(svc.workspace().root, "a.txt")
     assert open(target).read() == "v2\n"
-
-    info2, _e2, _c2 = run_turn(svc, [ANSWER], content="try again from v1",
-                               parent_id=s1.id)
+    _info3, _e3, _c3 = run_turn(svc, [ANSWER], content="try again from v1",
+                                parent_id=info1["assistant_id"])
     assert open(target).read() == "v1\n"
-    # The fork's user node hangs off the step node.
-    assert svc.store.get(info2["user_id"]).parent_id == s1.id
+
+
+@git_required
+def test_crashed_turn_still_snapshots_the_node(svc):
+    def boom(messages, tools=None):
+        if any(m.get("role") == "tool" for m in messages):
+            raise RuntimeError("upstream exploded")
+        yield ("tool_calls", [{"id": "c1", "name": "write_file",
+                               "arguments": {"path": "a.txt", "content": "x\n"}}])
+        yield ("done", {"input": 1, "output": 1})
+    with patch.object(service_mod, "stream_backend", boom):
+        info = svc.start_turn("go", None, agent=True)
+        list(svc.subscribe(info["assistant_id"], 0))
+    md = svc.store.get(info["assistant_id"]).metadata
+    assert md.get("ws_commit")
+    d = svc.node_diff(info["assistant_id"])
+    assert "+x" in d["diff"]
 
 
 @git_required
@@ -314,7 +367,7 @@ def test_fork_from_readonly_step_restores_pre_turn_state(svc):
     ])
     read_step, _write_step = step_nodes(svc)
     assert read_step.metadata["tool"] == "read_file"
-    assert "ws_commit" not in read_step.metadata  # read-only steps don't snapshot
+    assert "ws_commit" not in read_step.metadata  # steps never snapshot
     res = svc.restore_workspace(read_step.id)
     assert res["restored"]
     assert not os.path.exists(os.path.join(svc.workspace().root, "new.txt"))
@@ -718,3 +771,23 @@ def test_followup_continues_the_step_chain_with_full_context(svc):
                for m in sent)
     assert not any("continuing from step" in (m.get("content") or "")
                    for m in sent)
+
+
+@git_required
+def test_shell_step_lists_touched_files_without_snapshot(svc):
+    with open(os.path.join(svc.workspace().root, "keep.txt"), "w") as fh:
+        fh.write("k\n")
+    info, events, _calls = run_turn(svc, [
+        tool_call("write_file", path="w.txt", content="w\n"),
+        tool_call("run_shell", command="echo hi > s.txt && rm keep.txt"),
+        ANSWER,
+    ])
+    _w, sh = step_nodes(svc)
+    assert "ws_commit" not in sh.metadata
+    touched = {f["path"]: f["status"] for f in sh.metadata["touched_files"]}
+    # Only what the COMMAND touched — not the earlier write_file edit.
+    assert touched == {"s.txt": "A", "keep.txt": "D"}
+    done = [e for e in events if e.get("type") == "step_done" and e["id"] == sh.id][0]
+    assert {f["path"] for f in done["touched_files"]} == {"s.txt", "keep.txt"}
+    msgs = svc.path_messages(info["assistant_id"])
+    assert msgs[-1]["step"]["touched_files"]

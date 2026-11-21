@@ -49,7 +49,7 @@ def test_approve_runs_the_tool(svc):
     assert len(approvals) == 1
     (step,) = step_nodes(svc)
     assert step.metadata["status"] == "ok"
-    assert step.metadata["ws_commit"]
+    assert svc.store.get(info["assistant_id"]).metadata["ws_commit"]  # node snapshot
     with open(os.path.join(svc.workspace().root, "a.txt")) as fh:
         assert fh.read() == "hello\n"
     assert svc.store.get(info["assistant_id"]).content == "all done"
