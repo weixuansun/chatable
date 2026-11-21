@@ -193,7 +193,6 @@ try {
       </template>
       <div class="section-head">
         <span>Conversations</span>
-        <button class="icon-btn ghost sm" @click="openOrch()" title="Orchestrator (external coding agents)"><i data-lucide="workflow"></i></button>
         <button class="icon-btn ghost sm" @click="collapseAll()" title="Collapse all nodes"><i data-lucide="chevrons-down-up"></i></button>
         <button class="icon-btn ghost sm" @click="expandAll()" title="Expand all nodes"><i data-lucide="chevrons-up-down"></i></button>
       </div>
@@ -297,7 +296,11 @@ try {
               <template x-if="m.role === 'assistant'"><i data-lucide="sparkles"></i></template>
               <template x-if="m.role === 'system_note'"><i data-lucide="wrench"></i></template>
             </span>
-            <span class="who-name" x-text="m.role === 'user' ? 'You' : (m.role === 'assistant' ? 'Assistant' : 'Tool')"></span>
+            <span class="who-name" x-text="m.role === 'user' ? 'You' : (m.role === 'assistant' ? (m.orch_run ? executorLabel(m.executor) : 'Assistant') : 'Tool')"></span>
+            <template x-if="m.orch_run && m.role === 'user'"><span class="run-badge" x-text="m.orch_merge ? '合并' : ('→ ' + executorLabel(m.executor))"></span></template>
+            <template x-if="m.orch_run && m.role === 'assistant' && !streams[m.id] && runStatusOf(m)">
+              <span class="run-status" :class="'rs-' + runStatusOf(m).cls" x-text="runStatusOf(m).label + runFacts(m)"></span>
+            </template>
             <!-- tool notes have no footer row, so their id stays up here -->
             <template x-if="m.role === 'system_note'"><span class="who-id" x-text="'#' + m.id.slice(0,6)"></span></template>
             <template x-if="m.tool"><span x-text="'· ' + m.tool"></span></template>
@@ -598,6 +601,24 @@ try {
           </template>
         </div>
       </template>
+      <!-- agent tasks dispatched from the node you're on (parallel siblings) -->
+      <template x-if="runsFromHere.length">
+        <div class="runs-here">
+          <div class="runs-here-head"><i data-lucide="git-fork"></i>
+            <span x-text="'从这里发出的 agent 任务（' + runsFromHere.length + '）'"></span>
+            <span class="hint">再发一条指令 = 再开一个并行任务；在思维图里可多选合并</span></div>
+          <template x-for="r in runsFromHere" :key="r.userId">
+            <div class="run-card" :class="'rs-' + r.status.cls">
+              <span class="run-badge" x-text="r.merge ? '合并' : executorLabel(r.executor)"></span>
+              <span class="run-q" x-text="r.q" :title="r.q"></span>
+              <span class="run-status" :class="'rs-' + r.status.cls" x-text="r.status.label + r.facts"></span>
+              <template x-if="r.live && r.lastStep"><span class="run-step" x-text="r.lastStep"></span></template>
+              <button class="fork-btn" x-show="r.replyId" @click="select(r.replyId)" title="打开这个任务（看每一步）"><i data-lucide="eye"></i>查看</button>
+              <button class="fork-btn" x-show="r.replyId && r.running" @click="cancelRun(r.replyId)" title="取消这个任务（已做的改动会保留成快照）"><i data-lucide="square"></i>取消</button>
+            </div>
+          </template>
+        </div>
+      </template>
      </div>
     </div>
 
@@ -606,7 +627,7 @@ try {
       <div class="ctx">
         <template x-if="selectedId">
           <span class="ctx-pill fork-pill">
-            <i data-lucide="git-branch"></i><span x-text="agentMode ? 'Continuing' : 'Forking from'"></span>
+            <i data-lucide="git-branch"></i><span x-text="composerMode === 'agent' ? '从这里派任务' : 'Forking from'"></span>
             <span class="fork" x-text="'#' + selectedId.slice(0,6)"></span>
             <button class="pill-x" @click="newTrunk()" title="Start a new conversation instead"><i data-lucide="x"></i></button>
           </span>
@@ -618,16 +639,29 @@ try {
             <i data-lucide="network"></i>思维图
           </button>
         </template>
-        <!-- agent mode: workspace file/shell tools for this conversation -->
-        <button class="ctx-map-btn agent-toggle" :class="{on: agentMode, off: !agent.available}"
-                @click="toggleAgentMode()" :title="agentTooltip()"
-                :aria-pressed="agentMode" aria-label="Toggle agent mode">
-          <i data-lucide="bot"></i>Agent
-        </button>
-        <span x-show="agentMode && agent.workspace" class="agent-ws" :title="agent.workspace"
+        <!-- ONE switch: 对话 (plain chat) vs 交给 agent (isolated run → snapshot node) -->
+        <div class="mode-switch" role="group" aria-label="发送方式">
+          <button :class="{on: composerMode === 'chat'}" @click="setComposerMode('chat')"
+                  title="对话：模型直接回答你，不会改动任何文件">
+            <i data-lucide="message-circle"></i>对话</button>
+          <button :class="{on: composerMode === 'agent', off: !agent.available}" @click="setComposerMode('agent')"
+                  :title="agent.available ? '交给 agent：把你的消息当作指令，在独立工作区里执行，完成后生成一个可查看改动 / 对比 / 采用的节点' : (agent.reason || '需要设置 CHATTABLE_AUTH_TOKEN')">
+            <i data-lucide="bot"></i>交给 agent</button>
+        </div>
+        <template x-if="composerMode === 'agent'">
+          <span class="agent-picker" role="group" aria-label="选择 agent">
+            <template x-for="eid in executorOrder" :key="eid">
+              <button class="agent-chip" :class="{on: runAgents.includes(eid), unavailable: !executorOk(eid)}"
+                      @click="toggleRunAgent(eid)"
+                      :title="executorOk(eid) ? (executorLabel(eid) + (runAgents.includes(eid) ? '（已选，点击取消）' : '（点击选择；可多选 = 同一指令让它们比赛）')) : ('不可用：' + executorReason(eid))"
+                      x-text="executorLabel(eid)"></button>
+            </template>
+          </span>
+        </template>
+        <span x-show="composerMode === 'agent' && agent.workspace" class="agent-ws" :title="agent.workspace"
               x-text="agent.workspace"></span>
         <!-- shell sandbox status: shield when confined, red warning otherwise -->
-        <span class="sandbox-badge" x-show="agentMode"
+        <span class="sandbox-badge" x-show="composerMode === 'agent'"
               :class="(agent.sandbox === 'bwrap' || agent.sandbox === 'seatbelt') ? 'ok' : 'warn'"
               :title="(agent.sandbox === 'bwrap' || agent.sandbox === 'seatbelt')
                 ? 'shell commands run in a ' + (agent.sandbox === 'seatbelt' ? 'macOS Seatbelt (sandbox-exec)' : 'bubblewrap') + ' sandbox · network ' + (agent.shell_network ? 'ON' : 'OFF')
@@ -639,6 +673,12 @@ try {
                 :title="'Auto-approving in this conversation: ' + sessionAutoApprove.join(', ') + ' — click to reset'">
           <i data-lucide="zap"></i><span x-text="'auto: ' + sessionAutoApprove.join(', ')"></span><i data-lucide="x"></i>
         </button>
+      </div>
+      <div class="mode-hint" x-show="composerMode === 'agent'">
+        <i data-lucide="info"></i>
+        <span x-text="selectedId
+          ? ('指令会在 #' + (forkParentId(selectedId) || selectedId).slice(0, 6) + ' 的文件状态上执行（独立工作区，不动你的真实目录）。发送后停在这里——再发一条就是并行任务；选多个 agent = 同一指令比赛。')
+          : '指令会在当前工作区的副本里执行，完成后生成一个节点，可以查看改动、对比、采用到真实目录。'"></span>
       </div>
       <!-- attachments -->
       <template x-if="attachments.length">
@@ -672,7 +712,7 @@ try {
                     @compositionend="imeComposing = false; _imeEndedAt = Date.now()"
                     @keydown.enter="composerEnter($event)"
                     @paste="onPaste($event)"
-                    placeholder="Ask anything…"></textarea>
+                    :placeholder="composerMode === 'agent' ? '给 agent 下一条指令…（在独立工作区执行，完成后可 改动 / 对比 / 采用）' : '问点什么…（对话：只回答，不改文件）'"></textarea>
         </div>
         <button class="send-btn send-main" @click="send()" :disabled="!canSend()" title="Send (Enter)"><i data-lucide="arrow-up"></i></button>
       </div>
@@ -1066,7 +1106,7 @@ try {
       <div class="mindmap-head">
         <h3><i data-lucide="network"></i> Mind map
           <span class="mm-title" x-text="mindmap.centerTitle"></span></h3>
-        <span class="count mm-hint" x-text="mindmap.nodes.length + ' nodes · drag to pan · scroll to zoom · click a node to center'"></span>
+        <span class="count mm-hint" x-text="mindmap.nodes.length + ' 个节点 · 拖动平移 · 滚轮缩放 · 点击定位 · Shift+点击多选（合并 / 对比）'"></span>
         <div class="tree-search mm-search">
           <i data-lucide="search"></i>
           <input type="text" x-model="mmSearch" @input="mmSearchInput()"
@@ -1102,12 +1142,13 @@ try {
             <path class="map-edge" :d="mindmap.edgesD"></path>
           </svg>
           <template x-for="mn in mindmap.nodes" :key="mn.id">
-            <div class="map-node" :class="{center: mn.isCenter, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id)}"
+            <div class="map-node" :class="{center: mn.isCenter, 'search-hit': mmHitSet.has(mn.id), 'search-dim': mmSearching && !mmHitSet.has(mn.id), 'map-selected': mn.replyId && mapSel.includes(mn.replyId)}"
                  :style="`left:${mn.x}px; top:${mn.y}px; width:${mn.w}px; height:${mn.h}px;`"
-                 :title="mn.q || mn.a"
-                 @click.stop="mapNodeClick(mn)">
+                 :title="(mn.q || mn.a) + (mn.wsCommit ? '\n（Shift+点击 多选，可合并 / 对比）' : '')"
+                 @click.stop="$event.shiftKey ? toggleMapSel(mn) : mapNodeClick(mn)">
               <div class="map-q" x-show="mn.isPair">
                 <span class="role-dot role-user" :class="{'streaming': !!(streams[mn.id] || (mn.replyId && streams[mn.replyId]))}"></span>
+                <template x-if="mn.run"><span class="run-badge" x-text="mn.merge ? '合并' : executorLabel(mn.executor)"></span></template>
                 <span class="map-q-text" x-text="mn.q"></span>
                 <template x-if="mn.plan && mn.plan.total">
                   <span class="plan-badge" :title="'plan: ' + mn.plan.done + ' of ' + mn.plan.total + ' done'"
@@ -1120,6 +1161,10 @@ try {
                   <span class="map-status-dot"></span>
                   <span x-text="mapNodeStatus(mn).label"></span>
                   <template x-if="mn.filesChanged"><span class="map-status-files" x-text="'· ' + mn.filesChanged + ' 个文件改动'"></span></template>
+                  <template x-if="mn.test"><span class="map-status-files" x-text="'· ' + (mn.test.new_failures ? ('新失败 ' + mn.test.new_failures) : (mn.test.ok ? '测试通过' : '测试失败'))"></span></template>
+                  <template x-if="mn.replyId && (mn.runStatus === 'running' || mn.runStatus === 'queued')">
+                    <button class="map-cancel" @click.stop="cancelRun(mn.replyId)" title="取消这个任务"><i data-lucide="x"></i></button>
+                  </template>
                 </div>
               </template>
               <div class="map-a" x-show="mn.a">
@@ -1142,6 +1187,12 @@ try {
                 <button class="map-detail-btn" @click.stop="mapShowDetail(mn.replyId || mn.id)" title="Open this conversation">
                   <i data-lucide="message-square"></i>查看细节
                 </button>
+                <template x-if="mn.wsCommit">
+                  <button class="map-del-btn map-sel-btn" :class="{on: mapSel.includes(mn.replyId)}" @click.stop="toggleMapSel(mn)"
+                          :title="mapSel.includes(mn.replyId) ? '取消选择' : '选择（多选后可合并 / 对比）'">
+                    <i :data-lucide="mapSel.includes(mn.replyId) ? 'check-square' : 'square'"></i>
+                  </button>
+                </template>
                 <template x-if="mn.wsCommit">
                   <span class="btn-cluster">
                     <button class="map-del-btn" @click.stop="viewNodeDiff(mn.replyId || mn.id)"
@@ -1170,6 +1221,24 @@ try {
             </div>
           </template>
         </div>
+      </div>
+      <!-- first-time hint -->
+      <div class="map-hint" x-show="mapHint">
+        <i data-lucide="lightbulb"></i>
+        <div><b>怎么用这张图</b><br>
+          每张卡片是一轮「问题 + 回复」。带 Kimi / 内置 agent 标签的是交给 agent 的任务，状态会实时更新。<br>
+          点卡片 = 回到那一轮继续；<b>Shift+点击</b> 或 ☐ 多选两张有快照的卡片 → 下方出现「合并」「对比」。
+          卡片下方按钮：改动 / 对比 / 文件 / 采用 / 从此分叉。</div>
+        <button class="fork-btn" @click="dismissMapHint()">知道了</button>
+      </div>
+      <!-- multi-select action bar -->
+      <div class="map-selbar" x-show="mapSel.length">
+        <span x-text="'已选 ' + mapSel.length + ' 个节点'"></span>
+        <button class="fork-btn primary" :disabled="mapSel.length < 2" @click="mergeSelected()"
+                :title="'把选中节点的改动三方合并（在它们的共同祖先下生成一个新节点）；有冲突时交给 ' + executorLabel(runAgents.find(a => executorOk(a)) || 'builtin') + ' 解决'">
+          <i data-lucide="git-merge"></i>合并</button>
+        <button class="fork-btn" :disabled="mapSel.length !== 2" @click="compareSelected()" title="对比两个节点的文件"><i data-lucide="git-compare"></i>对比</button>
+        <button class="fork-btn" @click="mapSel = []">清除</button>
       </div>
     </div>
   </template>
@@ -1819,6 +1888,13 @@ function chatable() {
     // is the server status from /api/config; `agentMode` is the toggle for the
     // current conversation (mirrored to the server for existing conversations).
     agent: {available: false, reason: '', workspace: '', auto_approve: []},
+    // CHA-5: one switch — 'chat' (plain reply) or 'agent' (isolated run).
+    composerMode: 'chat',
+    runAgents: ['builtin'],
+    executors: {},
+    executorOrder: ['builtin', 'kimi', 'claude', 'codex'],
+    mapSel: [],
+    mapHint: false,
     agentMode: false,
     // Tools auto-approved ("always") for the current conversation's session.
     sessionAutoApprove: [],
@@ -1879,6 +1955,8 @@ function chatable() {
       this.initQuotePop();
       this.config = await (await fetch('/api/config')).json();
       if (this.config.agent) this.agent = this.config.agent;
+      this.loadComposerMode();
+      this.loadExecutors();
       await this.refreshTree();
       // Open as a top-level conversation list (one row per trunk); carets
       // drill into branches. Search still sees inside collapsed subtrees.
@@ -1905,6 +1983,7 @@ function chatable() {
         if (this.orch.open) { this.closeOrch(); return; }
         if (this.report.open) { this.closeReport(); return; }
         if (this.bmDetail) { this.bmDetail = null; return; }
+        if (this.mindmap.open && this.mapSel.length) { this.mapSel = []; return; }
         if (this.mindmap.open) {
           if (this.mmSearch) { this.mmSearch = ''; this.mmSearchIdx = 0; }  // clear search before closing
           else this.closeMindmap();
@@ -2495,6 +2574,8 @@ function chatable() {
       if (this._treeRefreshTimer) { clearTimeout(this._treeRefreshTimer); this._treeRefreshTimer = null; }
       this.tree = await (await fetch('/api/tree')).json();
       this.rebuildFlat();
+      if (this.mindmap && this.mindmap.open) this.relayoutMindmap();
+      this._attachLiveRuns();
       this.refreshIcons();
       this._watchReports();
     },
@@ -3222,6 +3303,195 @@ function chatable() {
 
     // ---- agent mode (workspace tools, steps, approvals, snapshots) ---------
 
+    // ---- CHA-5: 对话 | 交给 agent ------------------------------------------
+    loadComposerMode() {
+      try {
+        const m = localStorage.getItem('chatable.composerMode');
+        if (m === 'agent' || m === 'chat') this.composerMode = m;
+        const a = JSON.parse(localStorage.getItem('chatable.runAgents') || 'null');
+        if (Array.isArray(a) && a.length) this.runAgents = a;
+      } catch (e) {}
+      if (!this.agent.available) this.composerMode = 'chat';
+    },
+    async loadExecutors() {
+      try {
+        const r = await fetch('/api/run/executors');
+        if (!r.ok) return;
+        const d = await r.json();
+        this.executors = d.executors || {};
+        const ok = this.runAgents.filter(a => this.executorOk(a));
+        if (!ok.length) {
+          const first = this.executorOrder.find(a => this.executorOk(a));
+          this.runAgents = first ? [first] : [];
+        } else this.runAgents = ok;
+      } catch (e) {}
+    },
+    setComposerMode(m) {
+      if (m === 'agent' && !this.agent.available) {
+        toast(this.agent.reason || '交给 agent 需要设置 CHATTABLE_AUTH_TOKEN', 'error');
+        return;
+      }
+      this.composerMode = m;
+      this.agentMode = false;   // the old in-place agent loop is retired from the UI
+      try { localStorage.setItem('chatable.composerMode', m); } catch (e) {}
+      if (m === 'agent' && !Object.keys(this.executors).length) this.loadExecutors();
+      this.refreshIcons();
+      this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+    executorLabel(id) {
+      return ({builtin: '内置 agent', kimi: 'Kimi', claude: 'Claude Code', codex: 'Codex'})[id] || (id || 'agent');
+    },
+    executorOk(id) {
+      const e = this.executors[id];
+      return !!(e && e.available);
+    },
+    executorReason(id) {
+      const e = this.executors[id];
+      if (!e) return '未配置';
+      return e.reason || (e.available ? '' : '命令不存在或未登录');
+    },
+    toggleRunAgent(id) {
+      if (!this.executorOk(id)) { toast(this.executorLabel(id) + ' 不可用：' + this.executorReason(id), 'error'); return; }
+      const has = this.runAgents.includes(id);
+      if (has && this.runAgents.length === 1) { toast('至少选一个 agent'); return; }
+      this.runAgents = has ? this.runAgents.filter(a => a !== id) : [...this.runAgents, id];
+      try { localStorage.setItem('chatable.runAgents', JSON.stringify(this.runAgents)); } catch (e) {}
+    },
+    runStatusOf(m) {
+      const rs = m && m.run_status;
+      const map = {
+        queued: ['排队中', 'queued'], running: ['运行中', 'running'], ok: ['完成', 'ok'],
+        failed: ['失败', 'failed'], cancelled: ['已取消', 'cancelled'],
+        conflict: ['有冲突', 'conflict'], tests_failed: ['测试失败', 'failed'],
+      };
+      if (!rs) return null;
+      const v = map[rs] || [rs, 'ok'];
+      return {label: v[0], cls: v[1]};
+    },
+    runFacts(m) {
+      const bits = [];
+      const fc = Array.isArray(m.files_changed) ? m.files_changed.length : m.files_changed;
+      if (typeof fc === 'number' && (m.run_status && m.run_status !== 'queued' && m.run_status !== 'running')) bits.push(fc ? ('改了 ' + fc + ' 个文件') : '没有改文件');
+      const t = m.test;
+      if (t) bits.push(t.new_failures ? ('新失败 ' + t.new_failures) : (t.ok ? ('测试通过' + (t.passed != null ? ' ' + t.passed : '')) : ('测试失败 ' + (t.failed || ''))));
+      return bits.length ? ' · ' + bits.join(' · ') : '';
+    },
+    // Agent tasks whose question hangs off the node the composer is on.
+    get runsFromHere() {
+      if (!this.selectedId) return [];
+      const pid = this.forkParentId(this.selectedId);
+      const node = pid && this.nodeById(pid);
+      if (!node) return [];
+      const out = [];
+      for (const u of (node.children || [])) {
+        if (u.role !== 'user' || !u.orch_run) continue;
+        const reply = (u.children || []).find(c => c.role === 'assistant');
+        const live = reply && this.streams[reply.id];
+        let status = this.runStatusOf(reply || {}) || {label: '排队中', cls: 'queued'};
+        if (live && status.cls === 'queued' && live.steps && live.steps.length) status = {label: '运行中', cls: 'running'};
+        const last = live && live.steps && live.steps.length ? live.steps[live.steps.length - 1] : null;
+        out.push({
+          userId: u.id, replyId: reply ? reply.id : null, executor: u.executor,
+          merge: !!u.orch_merge, q: u.preview || u.title || '',
+          status, facts: reply ? this.runFacts(reply) : '', live: !!live,
+          running: !!live || ['queued', 'running'].includes(status.cls),
+          lastStep: last ? (last.tool + ' ' + (last.args_summary || '')).slice(0, 80) : '',
+        });
+      }
+      return out;
+    },
+    async cancelRun(aid) {
+      try {
+        const r = await fetch('/api/stop/' + encodeURIComponent(aid), {method: 'POST'});
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        toast('已请求取消（已做的改动会保留成快照）');
+      } catch (e) { toast('取消失败：' + (e && e.message ? e.message : e), 'error'); }
+    },
+    // Dispatch the composer text to the selected agent(s) as isolated runs.
+    async sendRun(content, parentId) {
+      const agents = this.runAgents.filter(a => this.executorOk(a));
+      if (!agents.length) { toast('没有可用的 agent', 'error'); return false; }
+      let d;
+      try {
+        const r = await fetch('/api/run', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({content, parent_id: parentId || null, agents}),
+        });
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        d = await r.json();
+      } catch (e) {
+        toast('派任务失败：' + (e && e.message ? e.message : e), 'error');
+        return false;
+      }
+      const runs = d.runs || [];
+      for (const run of runs) if (!this.streams[run.assistant_id]) this.reconnect(run.assistant_id);
+      await this.refreshTree();
+      if (this.mindmap.open) this.relayoutMindmap();
+      if (!parentId && runs.length) {
+        await this.select(runs[0].assistant_id);
+      }
+      toast(runs.length > 1 ? ('已派出 ' + runs.length + ' 个任务（同一指令比赛）') : ('已交给 ' + this.executorLabel(runs[0] && runs[0].agent) + '，在下方「从这里发出的任务」里看进度'));
+      return true;
+    },
+    // Map multi-select → merge (3-way merge under their common ancestor).
+    toggleMapSel(mn) {
+      if (!mn.replyId) return;
+      if (!mn.wsCommit) { toast('这个节点没有文件快照，不能合并'); return; }
+      this.mapSel = this.mapSel.includes(mn.replyId)
+        ? this.mapSel.filter(x => x !== mn.replyId) : [...this.mapSel, mn.replyId];
+    },
+    async mergeSelected() {
+      if (this.mapSel.length < 2) return;
+      const agent = this.runAgents.find(a => this.executorOk(a)) || 'builtin';
+      try {
+        const r = await fetch('/api/run/merge', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({node_ids: this.mapSel, agent, test: true}),
+        });
+        if (!r.ok) throw new Error(await this.errDetail(r));
+        const d = await r.json();
+        this.mapSel = [];
+        if (d.assistant_id) this.reconnect(d.assistant_id);
+        await this.refreshTree();
+        this.relayoutMindmap();
+        toast('正在合并…（有冲突时会自动交给 ' + this.executorLabel(agent) + ' 解决）');
+      } catch (e) { toast('合并失败：' + (e && e.message ? e.message : e), 'error'); }
+    },
+    compareSelected() {
+      if (this.mapSel.length !== 2) return;
+      const [a, b] = this.mapSel;
+      this.mapSel = [];
+      this.openCompare(a, b);
+    },
+    // Agent runs still queued/running on the server (after a reload, or a
+    // resolver the server started itself after a merge conflict): watch them.
+    _attachLiveRuns() {
+      const live = [];
+      const walk = (n) => {
+        for (const c of (n.children || [])) {
+          if (c.role === 'assistant' && c.orch_run && (c.run_status === 'queued' || c.run_status === 'running')) live.push(c.id);
+          if (c.role !== 'step') walk(c);
+        }
+      };
+      walk(this.tree);
+      this._liveTried = this._liveTried || new Set();
+      for (const aid of live) {
+        if (this.streams[aid] || this._liveTried.has(aid)) continue;
+        this._liveTried.add(aid);   // once per run: no reconnect loop on a stale status
+        this.reconnect(aid);
+      }
+    },
+    relayoutMindmap() {
+      if (!this.mindmap.open || !this.mindmap.rootId) return;
+      const l = this.layoutMindmap(this.mindmap.rootId);
+      if (l) this.mindmap = {...this.mindmap, ...l};
+      this.refreshIcons();
+    },
+    dismissMapHint() {
+      this.mapHint = false;
+      try { localStorage.setItem('chatable.mapHintSeen', '1'); } catch (e) {}
+    },
+
     agentTooltip() {
       if (!this.agent.available) {
         return this.agent.reason || 'Agent mode requires CHATTABLE_AUTH_TOKEN to be set';
@@ -3262,7 +3532,9 @@ function chatable() {
       const trunkId = this.messages[0].id;
       try {
         const d = await (await fetch('/api/node/' + encodeURIComponent(trunkId))).json();
-        this.agentMode = !!(d.metadata && d.metadata.agent_mode);
+        // CHA-5: the in-place agent loop is retired from the UI; the composer
+        // switch (对话 | 交给 agent) decides per message.
+        this.agentMode = false; void d;
       } catch (e) { /* best-effort; keep the current toggle */ }
       await this.syncAgentApprovals();
     },
@@ -3954,6 +4226,8 @@ function chatable() {
                        ...layout };
       this.mapView = { tx: 0, ty: 0, scale: 1 };
       this.mmSearch = ''; this.mmSearchIdx = 0;
+      this.mapSel = [];
+      try { this.mapHint = !localStorage.getItem('chatable.mapHintSeen'); } catch (e) { this.mapHint = false; }
       this.refreshIcons();
       // Frame the whole tree first; individual clicks recenter from there.
       this.$nextTick(() => { this.mapFit(false); this.refreshIcons(); });
@@ -4127,6 +4401,8 @@ function chatable() {
                       plan: node.plan || null, wsCommit: node.wsCommit || null,
                       agent: !!node.agent, stopReason: node.stopReason || null,
                       filesChanged: node.filesChanged || 0,
+                      run: !!node.run, merge: !!node.merge, executor: node.executor || null,
+                      runStatus: node.runStatus || null, test: node.test || null,
                       q: node.q, a: node.a, kidCount: kids.length,
                       x, y, w: d.w, h: d.h,
                       isTrunk: y === 0,
@@ -4194,6 +4470,10 @@ function chatable() {
           agent: !!(reply && reply.agent),
           stopReason: (reply && reply.stop_reason) || null,
           filesChanged: (reply && reply.files_changed) || 0,
+          run: !!node.orch_run, merge: !!node.orch_merge,
+          executor: node.executor || (reply && reply.executor) || null,
+          runStatus: (reply && reply.run_status) || null,
+          test: (reply && reply.test) || null,
           ownedIds: owned,
           q: node.title || node.preview || '(untitled)',
           a: reply ? (reply.summary || reply.title || reply.reply_preview || reply.preview || '') : '',
@@ -4218,6 +4498,12 @@ function chatable() {
     // Status chip for a map card: live turns and agent replies only.
     mapNodeStatus(mn) {
       const live = !!(this.streams[mn.id] || (mn.replyId && this.streams[mn.replyId]));
+      if (mn.runStatus) {
+        const v = {queued: ['queued', '排队中'], running: ['running', '运行中'], ok: ['done', '完成'],
+                   failed: ['error', '失败'], cancelled: ['stopped', '已取消'],
+                   conflict: ['error', '有冲突'], tests_failed: ['error', '测试失败']}[mn.runStatus];
+        if (v && !(live && mn.runStatus === 'queued')) return {cls: v[0], label: v[1]};
+      }
       if (live) return {cls: 'running', label: '运行中'};
       if (!mn.agent) return null;
       const r = mn.stopReason;
@@ -4565,6 +4851,14 @@ function chatable() {
         const note = `Attached image(s) are provided inline in this message: ${names}`;
         content = content ? `${note}\n\n${content}` : note;
       }
+      if (this.composerMode === 'agent') {
+        const prevDraft = this.draft, prevAtt = this.attachments;
+        this.draft = '';
+        this.attachments = [];
+        const ok = await this.sendRun(content, parentId);
+        if (!ok) { this.draft = prevDraft; this.attachments = prevAtt; }
+        return;
+      }
       this.draft = '';
       this.attachments = [];
       await this._sendTurn(content, parentId, typed, ready);
@@ -4766,7 +5060,7 @@ function chatable() {
       // Agent mode: a finished turn becomes the composer's continuation point
       // — typing again continues the same branch instead of silently starting
       // a new conversation. (Only when the turn's branch is being viewed.)
-      if (st.agent && assistantId && onView && onView()) {
+      if (st.agent && !st.run && assistantId && onView && onView()) {
         this.selectedId = assistantId;
         this.syncAgentApprovals();
       }
@@ -4802,7 +5096,7 @@ function chatable() {
       // Candidate next questions for this reply, in the background — once per
       // completed reply, and never for a failed or empty one (st._sawError is
       // a server-side error event; `errored` is a broken connection).
-      if (assistantId && this.config.auto_suggest && !gone && !errored && !st._sawError) {
+      if (assistantId && !st.run && this.config.auto_suggest && !gone && !errored && !st._sawError) {
         const row = this.messages.find(m => m.id === assistantId);
         if (!row || this.canSuggest(row)) this.suggestFor(assistantId);
       }
@@ -4819,7 +5113,7 @@ function chatable() {
 
     // A reply worth suggesting follow-ups for: a finished, non-failed answer.
     canSuggest(m) {
-      if (!m || m.role !== 'assistant') return false;
+      if (!m || m.role !== 'assistant' || m.orch_run) return false;
       const t = (m.content || '').trim();
       return !!t && !t.startsWith('[error:') && !t.startsWith('[empty reply:');
     },
@@ -4951,6 +5245,10 @@ function chatable() {
     stopStream(id) {
       const st = this.streams[id];
       if (!st) return;
+      if (st.run) {   // agent run: cancel in the queue; partial work is snapshotted
+        if (st.assistantId) this.cancelRun(st.assistantId);
+        return;
+      }
       st.stopped = true;
       clearTimeout(st._resumeTimer);
       // Tell the server to halt background generation (it runs detached from
@@ -5021,6 +5319,7 @@ function chatable() {
         case 'assistant_start':
           st.ctx = '· ' + evt.context.messages + ' msgs ~' + evt.context.estimated_tokens + ' tok';
           if (evt.agent) st.agent = true;
+          if (evt.run) { st.run = true; st.executor = evt.executor || null; st.ctx = ''; }
           this.refreshIcons();
           break;
         // ---- agent steps (see docs/agent-api.md) ----
@@ -5137,6 +5436,11 @@ function chatable() {
           break;
         case 'done':
           st._sawDone = true;
+          // A merge with conflicts / new test failures hands off to a resolver
+          // run the server starts itself: pick it up shortly.
+          if (evt.run_status === 'conflict' || evt.run_status === 'tests_failed') {
+            setTimeout(() => this.refreshTree(), 1500);
+          }
           // The server sends the scrubbed final text (tool-call markup etc.
           // removed) — swap it in so the settled view matches the persisted one.
           if (typeof evt.content === 'string') st.text = evt.content;
