@@ -13,6 +13,7 @@ import fnmatch
 import glob as globmod
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -25,6 +26,8 @@ from web_tools import WebToolResult
 from workspace import Workspace, WorkspaceError
 from shell_sandbox import (
     build_bwrap_argv,
+    build_seatbelt_argv,
+    make_run_tmp,
     denylist_reason,
     sandbox_mode,
     scrubbed_env,
@@ -454,8 +457,8 @@ def do_run_shell(ws: Workspace, command: str, timeout: int = SHELL_DEFAULT_TIMEO
     first and last SHELL_STREAM_KEEP bytes with an omission note.
 
     Safety layers (see shell_sandbox.py): an advisory deny-list refuses
-    obviously destructive commands outright, and when bubblewrap is
-    available the command runs sandboxed — read-only system, workspace
+    obviously destructive commands outright, and when bubblewrap (Linux) or
+    Seatbelt (macOS sandbox-exec) is available the command runs sandboxed — read-only system, workspace
     read-write, hidden homes/data dir, no network by default.
     """
     refused = denylist_reason(command)
@@ -463,9 +466,17 @@ def do_run_shell(ws: Workspace, command: str, timeout: int = SHELL_DEFAULT_TIMEO
         return _err(f"[refused] {refused}")
     timeout = max(1, min(int(timeout or SHELL_DEFAULT_TIMEOUT_S), SHELL_MAX_TIMEOUT_S))
     env = scrubbed_env()
-    if sandbox_mode() == "bwrap":
+    run_tmp = ""
+    mode = sandbox_mode()
+    if mode == "bwrap":
         popen_args: Any = build_bwrap_argv(
             command, ws.root, network=shell_net_enabled(), data_dir=data_dir, env=os.environ)
+        use_shell = False
+    elif mode == "seatbelt":
+        run_tmp = make_run_tmp()
+        popen_args, env = build_seatbelt_argv(
+            command, ws.root, run_tmp, network=shell_net_enabled(),
+            data_dir=data_dir, env=os.environ)
         use_shell = False
     else:
         popen_args = command
@@ -477,6 +488,8 @@ def do_run_shell(ws: Workspace, command: str, timeout: int = SHELL_DEFAULT_TIMEO
             text=True, start_new_session=True,
         )
     except OSError as e:
+        if run_tmp:
+            shutil.rmtree(run_tmp, ignore_errors=True)
         return _err(f"failed to start command: {e}")
     if on_proc:
         on_proc(proc)
@@ -531,6 +544,8 @@ def do_run_shell(ws: Workspace, command: str, timeout: int = SHELL_DEFAULT_TIMEO
     t.join(timeout=2)
     if on_proc:
         on_proc(None)
+    if run_tmp:
+        shutil.rmtree(run_tmp, ignore_errors=True)
 
     out = "".join(head)
     omitted = total - head_len - len(tail)

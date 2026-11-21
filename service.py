@@ -185,7 +185,7 @@ def _agent_system_prompt(ws: "Workspace") -> str:
         "When done, reply with a concise summary: which files changed and "
         "how you verified the result."
     )
-    if sandbox_mode() == "bwrap" and not shell_net_enabled():
+    if sandbox_mode() in ("bwrap", "seatbelt") and not shell_net_enabled():
         prompt += (
             "\n- The shell has NO network access in this environment — do "
             "not try to download, fetch or install anything; work with what "

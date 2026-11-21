@@ -60,7 +60,15 @@ state, snapshotted on the spot) — used by the adopt dialog's preview.
    (`pyvenv.cfg` / `conda-meta/`, never a home dir or the data dir), and
    PATH entries under `$HOME` that are not venv bins are skipped entirely
    unless `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`. `CHATTABLE_AGENT_SANDBOX=
-   off` disables; when auto can't find bwrap, `/api/agent/status` reports
+   off` disables. **macOS:** `seatbelt` backend — `sandbox-exec -p <profile>
+   -D WORKSPACE=… -D RUN_TMP=…` with `(allow default)`, `(deny file-write*)`
+   + re-allow the workspace, a per-run temp dir (TMPDIR, synthetic HOME) and
+   tty/null devices; `(deny file-read-data)` on `/Users`, `/var/root`,
+   `$HOME` and the data dir + re-allow the workspace, run temp and venv
+   toolchain dirs; `(deny network*)` unless `CHATTABLE_AGENT_SHELL_NET=1`;
+   paths realpath'd (`/var`→`/private/var`); clean env (PATH/HOME/TMPDIR/
+   LANG/TERM). Mode `auto` = bwrap on Linux, seatbelt on macOS. When no
+   backend is available, `/api/agent/status` reports
    `sandbox: "off"` plus a loud `sandbox_warning` (the composer shows a red
    "no sandbox" badge).
 2. **Deny-list (advisory).** `rm -rf /|~`, `sudo`, `curl|sh`, recursive
@@ -164,7 +172,7 @@ kept — truncation only happens on mid-turn forks.
 | `grep(pattern, path?, glob?, ignore_case?, context?)` | yes | auto | pure-Python regex; `path:line: text` output (context lines use `-`), capped with a "N more matches" note |
 | `write_file(path, content)` | no | ask | creates parents, ≤1MB, returns unified diff |
 | `edit_file(path, old_string, new_string, replace_all?, expected_replacements?)` | no | ask | not-found errors show the most similar region with line numbers; non-unique errors list occurrence line numbers; returns unified diff |
-| `run_shell(command, timeout?)` | no | ask | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, credentials env vars scrubbed, **bwrap-sandboxed when available** (no network by default), deny-list refuses destructive commands outright |
+| `run_shell(command, timeout?)` | no | ask | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, credentials env vars scrubbed, **sandboxed when available (bwrap on Linux, Seatbelt on macOS)** (no network by default), deny-list refuses destructive commands outright |
 | `update_plan(items)` | yes | auto | TodoWrite-style plan checklist; latest plan emitted as `plan` SSE and persisted on the assistant node |
 
 All paths are confined to the workspace: real paths must stay under the
@@ -207,7 +215,7 @@ affected; persisted step results stay full.
 | `CHATTABLE_AGENT_MAX_CALLS_PER_ROUND` | `8` | Agent loop per-round tool-call cap. |
 | `CHATTABLE_AGENT_APPROVAL_TIMEOUT_S` | `600` | Approval wait before treating as denied. |
 | `CHATTABLE_AGENT_CTX_BUDGET_TOKENS` | `60000` | Estimated-token budget before old tool results are shrunk. |
-| `CHATTABLE_AGENT_SANDBOX` | `auto` | `auto` (bwrap if available) / `bwrap` / `off`. |
+| `CHATTABLE_AGENT_SANDBOX` | `auto` | `auto` (bwrap on Linux / seatbelt on macOS, if available) / `bwrap` / `seatbelt` / `off`. |
 | `CHATTABLE_AGENT_SHELL_NET` | (unset) | `1` allows network inside the shell sandbox. |
 | `CHATTABLE_AGENT_SHELL_DENYLIST` | (unset) | `off` disables the advisory command deny-list. |
 | `CHATTABLE_AGENT_SANDBOX_PATH_HOME` | (unset) | `1` also re-mounts non-venv PATH dirs under `$HOME` (skipped by default). |

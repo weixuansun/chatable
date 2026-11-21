@@ -646,11 +646,11 @@ try {
               x-text="agent.workspace"></span>
         <!-- shell sandbox status: shield when confined, red warning otherwise -->
         <span class="sandbox-badge" x-show="agentMode"
-              :class="agent.sandbox === 'bwrap' ? 'ok' : 'warn'"
-              :title="agent.sandbox === 'bwrap'
-                ? 'shell commands run in a bubblewrap sandbox · network ' + (agent.shell_network ? 'ON' : 'OFF')
+              :class="(agent.sandbox === 'bwrap' || agent.sandbox === 'seatbelt') ? 'ok' : 'warn'"
+              :title="(agent.sandbox === 'bwrap' || agent.sandbox === 'seatbelt')
+                ? 'shell commands run in a ' + (agent.sandbox === 'seatbelt' ? 'macOS Seatbelt (sandbox-exec)' : 'bubblewrap') + ' sandbox · network ' + (agent.shell_network ? 'ON' : 'OFF')
                 : (agent.sandbox_warning || 'shell commands are NOT sandboxed')"
-              x-text="agent.sandbox === 'bwrap' ? ('sandbox: bwrap' + (agent.shell_network ? '' : ' · no net')) : 'no sandbox'"></span>
+              x-text="(agent.sandbox === 'bwrap' || agent.sandbox === 'seatbelt') ? ('sandbox: ' + agent.sandbox + (agent.shell_network ? '' : ' · no net')) : 'no sandbox'"></span>
         <!-- session auto-approvals for this conversation; click to reset -->
         <button class="ctx-map-btn auto-approve-pill" x-show="agentMode && sessionAutoApprove.length"
                 @click="resetAutoApprove()"

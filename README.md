@@ -153,8 +153,22 @@ Shell commands run through two safety layers:
   for real venv/conda roots (`pyvenv.cfg` / `conda-meta/`), and non-venv
   PATH dirs under `$HOME` are skipped unless
   `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`.
-  - `CHATTABLE_AGENT_SANDBOX=auto|bwrap|off` (default `auto`: bwrap when
-    available; `/api/agent/status` and the composer badge warn when not).
+  - **macOS:** the same policy via Seatbelt (`/usr/bin/sandbox-exec`, built
+    in): writes only to the workspace, a per-run temp dir (`TMPDIR`) and a
+    synthetic `HOME`; `/Users`, `$HOME` and the data dir are unreadable except
+    the workspace and the toolchain (venv roots on PATH + the base Python they
+    point at); no network at all (IP and unix sockets) by default; clean env.
+    The badge shows `sandbox: seatbelt · no net`. **The Seatbelt profile is
+    covered only by mocked unit tests on Linux CI — please report anything
+    that breaks on macOS.** Quick check from the repo dir (expect `ok` and
+    `done` with no `LEAK` lines):
+
+    ```
+    python3 -c "import os,subprocess,shell_sandbox as s;H=os.environ['HOME'];rt=s.make_run_tmp();a,e=s.build_seatbelt_argv(f'echo ok; touch {H}/sb-x 2>/dev/null && echo WRITE-LEAK; ls {H}/Desktop >/dev/null 2>&1 && echo READ-LEAK; curl -sI -m5 https://example.com >/dev/null 2>&1 && echo NET-LEAK; touch sb-ok && rm sb-ok && echo done',os.getcwd(),rt);print(subprocess.run(a,env=e,capture_output=True,text=True).stdout)"
+    ```
+  - `CHATTABLE_AGENT_SANDBOX=auto|bwrap|seatbelt|off` (default `auto`: bwrap
+    on Linux, seatbelt on macOS, when available; `/api/agent/status` and the
+    composer badge warn when none is in effect).
   - `CHATTABLE_AGENT_SHELL_NET=1` allows network access inside the sandbox.
 - **Deny-list (advisory tripwire).** Obviously destructive commands
   (`rm -rf /`, `sudo`, `curl | sh`, `dd of=/dev/…`, `mkfs`, fork bombs,
@@ -179,6 +193,11 @@ for the model and API.
   `kimi=2,claude=2,codex=2,builtin=3`). Run/test timeouts:
   `CHATTABLE_ORCH_RUN_TIMEOUT_S` (1800), `CHATTABLE_ORCH_TEST_TIMEOUT_S` (300).
 - Requires `CHATTABLE_AUTH_TOKEN` like agent mode.
+- Sandboxing: `builtin` runs use the agent shell sandbox (bwrap on Linux,
+  Seatbelt on macOS) confined to the run's worktree. External CLIs (kimi,
+  claude, codex) are **not** wrapped — they need network to their APIs and
+  use their own permission modes; they are isolated only by running in a
+  throwaway worktree (the real workspace changes only on Adopt).
 
 
 
