@@ -203,3 +203,65 @@ Run/node model, executors, and environment:
   runners fall back to counts/exit code). Merge: baseline = the merge
   base's result; `tests_failed` only on new failures vs it.
 - Merge: phase o2 (hook: `parents` is already a list).
+
+---
+
+## CHA-5 · Unified mode: agent runs live in the conversation tree
+
+The separate Orchestrator overlay (its own DAG, its own page) confused
+users. From CHA-5 on there is **one tree per conversation** and **one
+switch in the composer**:
+
+| Composer mode | What a send does |
+|---|---|
+| **对话** (chat) | The original chatable conversation (model answers, web tools). No files are touched. |
+| **交给 agent** (agent) | The message becomes an *instruction*. Each selected agent (内置 DeepSeek / Kimi / Claude Code / Codex) runs it in an isolated git worktree checked out from the selected node's snapshot. The result is a snapshot node in the same tree. |
+
+Decisions:
+
+- **Nodes.** An agent run is an ordinary `user → assistant` pair in the
+  chat tree. The user node is the instruction (`metadata.orch_run`,
+  `executor`, and `ws_commit` = the base snapshot). The assistant node is
+  the result: content is the agent's final reply. Its metadata holds
+  `run_status` (queued/running/ok/failed/cancelled, plus
+  conflict/tests_failed for merges), `ws_commit` (end snapshot),
+  `ws_parent_commit` (base), `files_changed`, `facts` (files, test,
+  duration, error), `conclusion` and `session_id`. Because snapshots use
+  the same `ws_commit` scheme as CHA-4, every node action works as is:
+  改动 / 对比 / 文件 / 采用 / 从此分叉.
+- **Live progress** goes through the normal chat live-turn buffer
+  (`/api/stream/{assistant_id}`). Executor `tool_call`/`tool_result`
+  events become step nodes + `step_start`/`step_done` events, so the main
+  chat shows them exactly like agent steps. The mind map shows only the
+  nodes (CHA-4b rule).
+- **Parallel.** One send with N agents selected = N sibling runs (racing
+  the same instruction). After an agent-mode send the composer **stays on
+  the same node**, so sending another instruction from it makes a parallel
+  sibling run. Under the node, the chat lists "从这里发出的 agent 任务"
+  with live status. The run queue keeps per-agent limits.
+- **Merge.** In the map, Shift+click (or the ☐ on a card) multi-selects
+  result nodes, and a bar offers 合并 / 对比. A merge creates a node under
+  the selected nodes' lowest common ancestor:
+  - It does a 3-way merge of their snapshots, then runs tests
+    (baseline = the LCA snapshot).
+  - Its content summarises each merged branch's instruction and
+    conclusion, so later turns get both in context.
+  - On a conflict or a red test it automatically sends a resolver run
+    from the merge node.
+- **Context handoff** (`.chatable/CONTEXT.md`) is built from the
+  *conversation path*: project layer, then the recent user/assistant
+  turns in full and older ones one line each (chat answers and agent
+  results alike), the diff that produced the parent node, and the task.
+  When the parent is a run by the same agent, its session is resumed.
+- **Cancel** = the normal stop button (`/api/stop/{assistant_id}`). It
+  cancels the run, and the partial work is still snapshotted
+  (`run_status: cancelled`).
+- **Old built-in agent mode** (in-place edits with approvals) is no
+  longer a UI mode. 交给 agent → 内置 runs the same DeepSeek loop in a
+  worktree with auto-approve, inside the shell sandbox, and nothing
+  touches the real folder until you 采用. The `/api/send` `agent` flag
+  and old agent conversations keep working (they render and their node
+  buttons work). A plain send that explicitly passes `agent:false` is
+  chat, even in a conversation that was in agent mode.
+- **Old overlay.** The header entry is removed; `/api/orch/*` stays for
+  API users and old data.
