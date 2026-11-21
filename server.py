@@ -649,6 +649,20 @@ def api_agent_approve(body: ApproveBody) -> dict:
     return {"ok": True}
 
 
+@app.get("/api/agent/approvals")
+def api_agent_approvals(node: str) -> dict:
+    """Tools the user auto-approved ("always") for this conversation's session."""
+    _require_agent()
+    return service.session_approvals(node)
+
+
+@app.post("/api/agent/approvals/reset")
+def api_agent_approvals_reset(body: RestoreBody) -> dict:
+    """Clear the conversation's session auto-approvals."""
+    _require_agent()
+    return service.reset_session_approvals(body.node_id)
+
+
 @app.post("/api/agent/restore")
 def api_agent_restore(body: RestoreBody) -> dict:
     """Reset the workspace to the snapshot nearest ``node_id``.

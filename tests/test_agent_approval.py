@@ -141,6 +141,28 @@ def test_stop_denies_a_pending_approval(svc):
     assert not os.path.exists(os.path.join(svc.workspace().root, "a.txt"))
 
 
+def test_session_approvals_query_and_reset(svc):
+    """The composer pill reads/clears the conversation's always-approvals."""
+
+    def approve_writes(svc, ev):
+        svc.resolve_approval(ev["step_id"], "approve", always=True, scope="writes")
+
+    info, _ap, _calls = drive(svc, [
+        tool_call("write_file", path="a.txt", content="one\n"),
+        ANSWER,
+    ], approve_writes)
+    assert svc.session_approvals(info["user_id"])["always"] == ["edit_file", "write_file"]
+    svc.reset_session_approvals(info["user_id"])
+    assert svc.session_approvals(info["user_id"])["always"] == []
+    # After the reset the same tool asks again.
+    prompts = []
+    drive(svc, [
+        tool_call("write_file", path="b.txt", content="two\n"),
+        ANSWER,
+    ], lambda s, ev: (prompts.append(ev), s.resolve_approval(ev["step_id"], "approve")))
+    assert len(prompts) == 1
+
+
 def test_shell_always_asks_by_default(svc):
     def approve(svc, ev):
         assert ev["tool"] == "run_shell"

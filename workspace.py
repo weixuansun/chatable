@@ -197,11 +197,14 @@ class ShadowGit:
             if len(parts) < 3:
                 continue
             add, delete, path = parts[0], parts[1], parts[2]
+            binary = not (add.isdigit() and delete.isdigit())
             files.append({
                 "path": path,
                 "status": status_map.get(path, "M"),
                 "additions": int(add) if add.isdigit() else 0,
                 "deletions": int(delete) if delete.isdigit() else 0,
+                # numstat prints "-\t-" for binary files; there is no text diff.
+                "binary": binary,
             })
         return files
 

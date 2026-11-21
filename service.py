@@ -211,6 +211,11 @@ def _args_summary(name: str, args: dict) -> str:
     path = args.get("path")
     if name == "run_shell":
         text = f"$ {args.get('command', '')}"
+    elif name == "update_plan":
+        items = args.get("items") or []
+        done = sum(1 for it in items
+                   if isinstance(it, dict) and it.get("status") == "completed")
+        text = f"update_plan {done}/{len(items)}"
     elif path is not None:
         text = f"{name} {path}"
     elif name == "grep":
@@ -832,6 +837,23 @@ class ChatService:
             if md.get("ws_commit"):
                 return str(md["ws_commit"])
         return None
+
+    def _trunk_id_of(self, node_id: str) -> Optional[str]:
+        if node_id == ROOT_ID or not self.store.exists(node_id):
+            return None
+        path = self.store.path_to_root(node_id)
+        return path[0].id if path else None
+
+    def session_approvals(self, node_id: str) -> dict:
+        """Tools auto-approved for this conversation this session ("always")."""
+        trunk = self._trunk_id_of(node_id)
+        return {"always": sorted(self._always_approve.get(trunk or "", ()))}
+
+    def reset_session_approvals(self, node_id: str) -> dict:
+        trunk = self._trunk_id_of(node_id)
+        if trunk:
+            self._always_approve.pop(trunk, None)
+        return {"ok": True}
 
     def restore_workspace(self, node_id: str) -> dict:
         """Reset the workspace to the snapshot of the node nearest *node_id*."""
@@ -1972,11 +1994,21 @@ class ChatService:
         results into system_note text. These nodes are never persisted; they
         are reconstructed deterministically from metadata so forks from the
         same ancestor still send byte-identical prefixes to the backend.
+
+        Agent fork special case: when the path continues from an assistant
+        node into its step nodes (a fork from mid-turn), the replay is
+        truncated at that step — later tool calls and the turn's final answer
+        describe work that was rolled back, so they must not leak into the
+        model's context. A system note marks the continuation point.
         """
         out: list[Node] = []
-        for n in path:
+        for i, n in enumerate(path):
             if n.role == "assistant" and isinstance(n.metadata, dict):
                 replay = n.metadata.get("tool_messages") if NATIVE_TOOL_HISTORY else None
+                nxt = path[i + 1] if i + 1 < len(path) else None
+                if replay and nxt is not None and nxt.role == "step":
+                    out.extend(self._truncated_turn_replay(path, i))
+                    continue  # the final answer is dropped on purpose
                 if replay:
                     for m in replay:
                         # image_file sidecar refs (written by the image-capture
@@ -2004,6 +2036,69 @@ class ChatService:
                         ephem.title = rec.get("name", "")
                         out.append(ephem)
             out.append(n)
+        return out
+
+    def _truncated_turn_replay(self, path: list[Node], i: int) -> list[Node]:
+        """Replay of an agent turn truncated at the last step on the path.
+
+        Keeps the assistant tool_calls messages and tool results for exactly
+        the calls whose step nodes are on the path (splitting a round's
+        tool_calls list when the fork lands mid-round), stubs any id left
+        unanswered (defensive — a step on the path always executed), drops
+        the turn's final answer, and appends a system note marking the
+        continuation point.
+        """
+        node = path[i]
+        # Consecutive step nodes after the assistant on this path.
+        call_ids: list[str] = []
+        j = i + 1
+        while j < len(path) and path[j].role == "step":
+            cid = (path[j].metadata or {}).get("call_id")
+            if cid:
+                call_ids.append(cid)
+            j += 1
+        allowed = set(call_ids)
+        parent_id = path[j - 1].id  # the step we forked from
+
+        kept_msgs: list[dict] = []
+        unanswered: list[str] = []
+        for m in node.metadata["tool_messages"]:
+            role = m.get("role")
+            if role == "assistant" and m.get("tool_calls"):
+                kept = [c for c in m["tool_calls"] if c.get("id") in allowed]
+                if not kept:
+                    continue
+                m = dict(m, tool_calls=kept)
+                unanswered.extend(c["id"] for c in kept)
+            elif role == "tool":
+                cid = m.get("tool_call_id")
+                if cid not in allowed:
+                    continue
+                if cid in unanswered:
+                    unanswered.remove(cid)
+            kept_msgs.append(m)
+        for cid in unanswered:  # defensive: never leave a dangling tool_call id
+            kept_msgs.append(_canon_tool_result_msg(cid, _UNEXECUTED_TOOL_OUTPUT))
+
+        out: list[Node] = []
+        for m in kept_msgs:
+            m = self._restore_image_message(m)
+            if m is None:
+                continue
+            out.append(Node.new(
+                role="raw_message",
+                content=json.dumps(m, ensure_ascii=False, sort_keys=True),
+                parent_id=parent_id,
+            ))
+        out.append(Node.new(
+            role="system_note",
+            content=(
+                f"You are continuing from step {len(call_ids)} of a previous "
+                "agent run; later steps were discarded and the workspace was "
+                "restored to that point. Do not assume their changes exist."
+            ),
+            parent_id=parent_id,
+        ))
         return out
 
     def _live_context(self, anchor_id: str, tool_results: list[dict]) -> dict:

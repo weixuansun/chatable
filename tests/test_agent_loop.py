@@ -6,6 +6,7 @@ generator of ("delta"|"tool_calls"|"done") events patched over
 """
 import os
 import shutil
+import json
 from unittest.mock import patch
 
 import pytest
@@ -414,6 +415,9 @@ def test_update_plan_streams_and_persists(svc):
     (step,) = step_nodes(svc)
     assert step.metadata["tool"] == "update_plan"
     assert step.metadata["status"] == "ok"  # read-only: never needs approval
+    # Plan steps get a compact summary instead of raw JSON args.
+    assert step.metadata["args_summary"] == "update_plan 0/2"
+    assert step.content == "update_plan 0/2"
     plan = svc.store.get(info["assistant_id"]).metadata["plan"]
     assert plan[1] == {"content": "do b", "status": "pending"}
     # …and it reaches the UI payloads (path messages + tree summary).
@@ -462,3 +466,74 @@ def test_compare_and_snapshot_file_reads(svc):
         svc.agent_file(info1["assistant_id"], "../escape.txt")
     cmp_bad = svc.agent_compare(info1["assistant_id"], "no-such-node")
     assert cmp_bad["ok"] is False
+
+
+@git_required
+def test_compare_marks_binary_files(svc):
+    """Binary files appear in the file list flagged binary (no text diff)."""
+    info1, _e1, _c1 = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        ANSWER,
+    ])
+    info2, _e2, _c2 = run_turn(svc, [
+        tool_call("run_shell", command="printf 'a\\0b\\0c' > blob.dat"),
+        ANSWER,
+    ], content="second", parent_id=info1["assistant_id"])
+    cmp = svc.agent_compare(info1["assistant_id"], info2["assistant_id"])
+    files = {f["path"]: f for f in cmp["files"]}
+    assert files["blob.dat"]["binary"] is True
+    assert files["blob.dat"]["status"] == "A"
+    assert files["blob.dat"]["additions"] == 0
+
+
+def test_fork_from_step_truncates_context(svc):
+    """Forking from step k: the replay keeps only calls up to k (a round's
+    tool_calls list is split when the fork lands mid-round), the turn's final
+    answer is dropped, and a continuation note marks the point."""
+    round1 = [("tool_calls", [
+        {"id": "c1", "name": "write_file",
+         "arguments": {"path": "a.txt", "content": "v1\n"}},
+        {"id": "c2", "name": "write_file",
+         "arguments": {"path": "b.txt", "content": "v1\n"}},
+    ]), ("done", {"input": 1, "output": 1})]
+    round2 = [("tool_calls", [
+        {"id": "c3", "name": "write_file",
+         "arguments": {"path": "a.txt", "content": "v2\n"}},
+    ]), ("done", {"input": 1, "output": 1})]
+    _info, _e, _c = run_turn(svc, [round1, round2, ANSWER])
+    s1, s2, s3 = step_nodes(svc)
+
+    # Fork from step 2: both round-1 calls kept, round 2 and the answer gone.
+    _i2, _e2, calls2 = run_turn(svc, [ANSWER], content="redo from step 2",
+                                parent_id=s2.id)
+    sent = calls2[0]["messages"]
+    tool_msgs = [m for m in sent if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2"]
+    assistants = [m for m in sent if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(assistants) == 1
+    assert [c["id"] for c in assistants[0]["tool_calls"]] == ["c1", "c2"]
+    assert not any("c3" in json.dumps(m) for m in sent)
+    assert not any(m.get("role") == "assistant" and m.get("content") == "all done"
+                   for m in sent)
+    assert any(m.get("role") == "system"
+               and "continuing from step 2" in (m.get("content") or "")
+               for m in sent)
+
+    # Fork from step 1: the round-1 tool_calls list is split down to just c1.
+    _i3, _e3, calls3 = run_turn(svc, [ANSWER], content="redo from step 1",
+                                parent_id=s1.id)
+    sent3 = calls3[0]["messages"]
+    assert [m["tool_call_id"] for m in sent3 if m.get("role") == "tool"] == ["c1"]
+    a3 = [m for m in sent3 if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(a3) == 1 and [c["id"] for c in a3[0]["tool_calls"]] == ["c1"]
+    assert any("continuing from step 1" in (m.get("content") or "")
+               for m in sent3 if m.get("role") == "system")
+
+    # The truncated sequences are valid: every tool_call id is answered by an
+    # immediately following tool message.
+    for msgs in (sent, sent3):
+        for i, m in enumerate(msgs):
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                ids = [c["id"] for c in m["tool_calls"]]
+                following = msgs[i + 1:i + 1 + len(ids)]
+                assert [t.get("tool_call_id") for t in following] == ids
