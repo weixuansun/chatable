@@ -30,9 +30,23 @@ def detect_test_cmd(wt: str) -> Optional[str]:
         return "go test ./..."
     for marker in ("pytest.ini", "conftest.py", "setup.cfg", "pyproject.toml"):
         if os.path.isfile(os.path.join(wt, marker)):
-            return "pytest -q"
+            return "python -m pytest -q"
     if os.path.isdir(os.path.join(wt, "tests")) or os.path.isdir(os.path.join(wt, "test")):
-        return "pytest -q"
+        return "python -m pytest -q"
+    # Config-less pytest projects: test_*.py / *_test.py anywhere near the root.
+    try:
+        candidates = [os.path.join(wt, n) for n in os.listdir(wt)]
+        for sub in ("src", "lib"):
+            subdir = os.path.join(wt, sub)
+            if os.path.isdir(subdir):
+                candidates.extend(os.path.join(subdir, n) for n in os.listdir(subdir))
+    except OSError:
+        candidates = []
+    for path in candidates:
+        name = os.path.basename(path)
+        if os.path.isfile(path) and (name.startswith("test_") or name.endswith("_test.py")) \
+                and name.endswith(".py"):
+            return "python -m pytest -q"
     makefile = os.path.join(wt, "Makefile")
     if os.path.isfile(makefile):
         try:

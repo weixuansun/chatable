@@ -127,7 +127,15 @@ def test_detect_test_cmd(tmp_path):
     assert detect_test_cmd(str(tmp_path)) == "npm test"
     (tmp_path / "package.json").unlink()
     (tmp_path / "conftest.py").write_text("")
-    assert detect_test_cmd(str(tmp_path)) == "pytest -q"
+    assert detect_test_cmd(str(tmp_path)) == "python -m pytest -q"
+    (tmp_path / "conftest.py").unlink()
+    # Config-less pytest projects: bare test files count too.
+    (tmp_path / "calc.py").write_text("x = 1\n")
+    (tmp_path / "test_calc.py").write_text("def test_x():\n    assert True\n")
+    assert detect_test_cmd(str(tmp_path)) == "python -m pytest -q"
+    (tmp_path / "test_calc.py").unlink()
+    (tmp_path / "tests").mkdir()
+    assert detect_test_cmd(str(tmp_path)) == "python -m pytest -q"
 
 
 def test_context_file_layers(tmp_path):

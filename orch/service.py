@@ -364,11 +364,17 @@ class OrchService:
         return self.project_info()
 
     def compare(self, a_id: str, b_id: str) -> dict:
-        a = self.store.nodes.get(a_id)
         b = self.store.nodes.get(b_id)
-        if not a or not b:
+        if a_id == "workspace":
+            ca = self.shadow.snapshot("current workspace state", allow_empty=True)
+            if not ca:
+                return {"ok": False, "reason": "workspace snapshots unavailable"}
+        else:
+            a = self.store.nodes.get(a_id)
+            ca = a["snapshot"] if a else None
+        if not ca or not b:
             return {"ok": False, "reason": "unknown node id"}
-        ca, cb = a["snapshot"], b["snapshot"]
+        cb = b["snapshot"]
         return {"ok": True, "a_commit": ca, "b_commit": cb,
                 "diff": self.shadow.diff(cb, ca),
                 "files": self.shadow.diff_numstat(ca, cb)}
