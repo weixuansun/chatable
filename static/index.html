@@ -525,6 +525,18 @@ try {
               <template x-if="streams[m.id] && streams[m.id].resumeFailed">
                 <div class="stats"><span style="color:var(--fail)">connection lost.</span><button class="retry-btn" @click="retryResume(m.id)">retry</button></div>
               </template>
+              <!-- round-limit stop: the run hit the cap before finishing;
+                   offer to continue on the same branch -->
+              <template x-if="!streams[m.id] && m.role === 'assistant' && m.stop_reason === 'round_limit'">
+                <div class="run-notice limit-notice">
+                  <i data-lucide="alert-triangle"></i>
+                  <span>Stopped at the agent round limit — the task may be unfinished.</span>
+                  <button class="fork-btn" @click="continueFromLimit(m)"
+                          title="Continue the task on this branch">
+                    <i data-lucide="play"></i> Continue
+                  </button>
+                </div>
+              </template>
               <!-- per-message actions below the bubble, after generation
                    completes: fork/map for assistant; copy for every message.
                    Quiet until hovered, except on the latest assistant reply -->
@@ -2499,6 +2511,14 @@ function chatable() {
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
     },
 
+    // The round-limit affordance on an incomplete agent reply: continue the
+    // same branch with a follow-up prompt (the a9 continue default applies).
+    async continueFromLimit(m) {
+      this.selectedId = m.id;
+      await this._sendTurn('Continue the task from where you stopped.',
+                           m.id, 'Continue the task from where you stopped.', []);
+    },
+
     // ---- agent mode (workspace tools, steps, approvals, snapshots) ---------
 
     agentTooltip() {
@@ -4178,6 +4198,7 @@ function chatable() {
           }
           if (st.agent && st.plan && st.plan.length) row.plan = st.plan;
           if (st.ws_commit) row.ws_commit = st.ws_commit;
+          if (st.stop_reason) { row.stop_reason = st.stop_reason; row.incomplete = true; }
           // Persisted reasoning renders collapsed; carry the live text over.
           if (st.reasoning) row.reasoning = st.reasoning;
           this.$nextTick(() => { if (onView()) this.scrollDown(); });
@@ -4534,6 +4555,7 @@ function chatable() {
           st.stats = evt.stats;
           st.usage = evt.usage || null;
           if (evt.ws_commit) st.ws_commit = evt.ws_commit;
+          if (evt.stop_reason) st.stop_reason = evt.stop_reason;
           // Count session totals once per turn (guard against replay on reconnect).
           if (evt.usage && !st._counted) {
             st._counted = true;

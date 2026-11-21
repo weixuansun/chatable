@@ -39,6 +39,7 @@ import re
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterator, Optional
 
 import httpx
@@ -104,8 +105,9 @@ NATIVE_TOOL_HISTORY = os.environ.get("CHATTABLE_NATIVE_TOOL_HISTORY", "1").lower
 # "agent_mode" metadata). Agent turns get their own tool set (workspace file
 # tools + shell), higher limits, no call dedupe, per-call step nodes and
 # shadow-git workspace snapshots.
-AGENT_MAX_ROUNDS = int(os.environ.get("CHATTABLE_AGENT_MAX_ROUNDS", "25"))
+AGENT_MAX_ROUNDS = int(os.environ.get("CHATTABLE_AGENT_MAX_ROUNDS", "40"))
 AGENT_MAX_CALLS_PER_ROUND = int(os.environ.get("CHATTABLE_AGENT_MAX_CALLS_PER_ROUND", "8"))
+AGENT_PARALLEL_READS = int(os.environ.get("CHATTABLE_AGENT_PARALLEL_READS", "4"))
 AGENT_APPROVAL_TIMEOUT_S = float(os.environ.get("CHATTABLE_AGENT_APPROVAL_TIMEOUT_S", "600"))
 # In-turn context management: past this estimated-token total, tool results
 # older than the last few are shrunk to head/tail excerpts.
@@ -159,13 +161,21 @@ def _agent_system_prompt(ws: "Workspace") -> str:
         "How to work:\n"
         "- Explore before editing: use list_dir/glob/grep/read_file to "
         "understand the project layout and the code you will touch.\n"
+        "- Batch independent read-only calls: send several glob/grep/"
+        "read_file calls in ONE response — they run in parallel.\n"
+        "- Locate code with grep first (e.g. '^def |^class ' for an outline, "
+        "or context lines), then read windows of ~200-400 lines around the "
+        "hits instead of many small pages.\n"
+        "- Explore only until you know where to make the change, then START "
+        "EDITING. Do not keep reading around the target.\n"
         "- Always read a file with read_file before editing it.\n"
         "- Prefer edit_file with small, focused changes; use write_file only "
         "for new files or full rewrites.\n"
         "- For multi-step tasks, keep a plan with update_plan and mark items "
         "in_progress/completed as you go.\n"
-        "- After changing code, run the tests or linters with run_shell and "
-        "fix any failures you caused.\n"
+        "- After changing code, run the TARGETED tests first (pytest -k or "
+        "the single test file), fix failures you caused, and run the full "
+        "suite once at the end.\n"
         "- Never claim success without verifying it (run the code, the tests, "
         "or a targeted check). If the same action keeps failing, change your "
         "approach instead of retrying it unchanged.\n"
@@ -175,17 +185,17 @@ def _agent_system_prompt(ws: "Workspace") -> str:
         "When done, reply with a concise summary: which files changed and "
         "how you verified the result."
     )
+    if sandbox_mode() == "bwrap" and not shell_net_enabled():
+        prompt += (
+            "\n- The shell has NO network access in this environment — do "
+            "not try to download, fetch or install anything; work with what "
+            "is already in the workspace."
+        )
     instructions = _load_project_instructions(ws)
     if instructions:
         prompt += ("\n\nProject instructions (follow them unless they "
                    "conflict with the user):\n" + instructions)
     return prompt
-
-
-_AGENT_WRAP_UP_NUDGE = (
-    "系统提示：已达到 agent 轮次上限。不要再调用任何工具；请立即总结："
-    "完成了哪些改动（列出文件）、验证结果如何、还有什么没做完。"
-)
 
 
 def _shrink_old_tool_messages(messages: list[dict]) -> None:
@@ -1184,6 +1194,8 @@ class ChatService:
                 # the UI can rebuild the timeline.
                 "ws_commit": meta.get("ws_commit"),
                 "plan": meta.get("plan"),
+                "stop_reason": meta.get("stop_reason"),
+                "incomplete": bool(meta.get("incomplete")),
                 "step": (
                     {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
                                               "result", "error", "diff", "ws_commit",
@@ -2446,15 +2458,16 @@ class ChatService:
     # Agent mode: workspace tools, step nodes, approvals, snapshots
     # ------------------------------------------------------------------ #
 
-    def _run_agent_step(self, turn: "_LiveTurn", registry, ws: Workspace,
-                        shadow: ShadowGit, call: dict, assistant_id: str,
-                        state: dict) -> ToolResult:
-        """Execute one agent tool call, persisting a step node as it happens.
+    def _begin_agent_step(self, turn: "_LiveTurn", registry, ws: Workspace,
+                          shadow: ShadowGit, call: dict, assistant_id: str,
+                          state: dict) -> dict:
+        """Phase 1 of one agent tool call: persist the step node as it happens
+        and gate it (deny-list / approval). The returned dict drives execution:
+        ``result`` set means the call is already decided (refused/denied).
 
         The step node is chained under the previous step (or the assistant
-        node for the first call), so the trajectory is a path in the tree.
-        Write/shell calls go through approval unless policy auto-approves
-        them, and snapshot the workspace (recording ws_commit) on success.
+        node for the first call of a round), so the trajectory is a path in
+        the tree. Approval waits happen here, in the turn thread.
         """
         emit = turn.append
         name = call["name"]
@@ -2475,91 +2488,194 @@ class ChatService:
         state["last_step_id"] = step.id
         emit({"type": "step_start", "id": step.id, "parent_id": step.parent_id,
               "tool": name, "args": args, "args_summary": summary})
-        # Streamed shell output is tagged with the step currently running.
-        ctx = state.get("ctx")
-        if ctx is not None:
-            ctx["step_id"] = step.id
+        prep = {"call": call, "step": step, "result": None, "finished": False,
+                "mutating": name in MUTATING_TOOLS, "parent_commit": None}
 
         try:
-            try:
-                spec = registry.get(name)
-            except ValueError:
-                spec = None  # unknown tool: registry.run reports the error, no approval
-            mutating = name in MUTATING_TOOLS
+            spec = registry.get(name)
+        except ValueError:
+            spec = None  # unknown tool: registry.run reports the error, no approval
+        prep["spec"] = spec
 
-            # The advisory deny-list refuses dangerous shell commands outright
-            # — before any approval prompt (no point asking for a refusal).
-            refused = denylist_reason(str(args.get("command") or "")) \
-                if name == "run_shell" else None
-            # Grants walk the branch: the position is the previous step (or
-            # the turn's user node for the first step).
-            approval_anchor = state.get("last_step_id") or state.get("anchor_id", "")
-            if refused is None and spec is not None and not spec.read_only and \
-                    self._needs_approval(name, approval_anchor):
-                preview = preview_change(ws, name, args) if name in WRITE_TOOLS else ""
-                self.store.update_metadata(step.id, {"status": "pending_approval"})
-                ap = self._register_approval(step.id)
-                emit({"type": "approval_required", "step_id": step.id, "tool": name,
-                      "args": args, "preview_diff": preview})
-                decision = self._wait_approval(step.id, ap, turn)
-                emit({"type": "approval_resolved", "step_id": step.id, "decision": decision})
-                if decision != "approve":
-                    output = ("[tool call denied by the user; do not retry the same "
-                              "call — adapt your plan or explain the blocker]")
-                    self.store.update_metadata(step.id, {"status": "denied",
-                                                         "result": output})
-                    emit({"type": "step_done", "id": step.id, "status": "denied",
-                          "tool": name})
-                    return ToolResult(call_id=call["_cid"], name=name, arguments=args,
-                                      ok=False, output=output, error="denied by user")
-                if ap["always"]:
-                    # Record the grant on THIS step: it applies to its
-                    # descendants only — sibling branches ask again.
-                    grant = self._grant_nodes.setdefault(step.id, set())
-                    if ap.get("scope") == "writes":
-                        grant.update(WRITE_TOOLS)
-                    else:
-                        grant.add(name)
+        # The advisory deny-list refuses dangerous shell commands outright
+        # — before any approval prompt (no point asking for a refusal).
+        refused = denylist_reason(str(args.get("command") or "")) \
+            if name == "run_shell" else None
+        # Grants walk the branch: the position is the previous step (or
+        # the turn's user node for the first step).
+        approval_anchor = state.get("last_step_id") or state.get("anchor_id", "")
+        if refused is None and spec is not None and not spec.read_only and \
+                self._needs_approval(name, approval_anchor):
+            preview = preview_change(ws, name, args) if name in WRITE_TOOLS else ""
+            self.store.update_metadata(step.id, {"status": "pending_approval"})
+            ap = self._register_approval(step.id)
+            emit({"type": "approval_required", "step_id": step.id, "tool": name,
+                  "args": args, "preview_diff": preview})
+            decision = self._wait_approval(step.id, ap, turn)
+            emit({"type": "approval_resolved", "step_id": step.id, "decision": decision})
+            if decision != "approve":
+                output = ("[tool call denied by the user; do not retry the same "
+                          "call — adapt your plan or explain the blocker]")
+                self.store.update_metadata(step.id, {"status": "denied",
+                                                     "result": output})
+                emit({"type": "step_done", "id": step.id, "status": "denied",
+                      "tool": name})
+                prep["result"] = ToolResult(call_id=call["_cid"], name=name,
+                                            arguments=args, ok=False, output=output,
+                                            error="denied by user")
+                prep["finished"] = True
+                return prep
+            if ap["always"]:
+                # Record the grant on THIS step: it applies to its
+                # descendants only — sibling branches ask again.
+                grant = self._grant_nodes.setdefault(step.id, set())
+                if ap.get("scope") == "writes":
+                    grant.update(WRITE_TOOLS)
+                else:
+                    grant.add(name)
 
-            parent_commit = state["last_commit"] if mutating else None
+        prep["parent_commit"] = state["last_commit"] if prep["mutating"] else None
+        emit({"type": "tool_call", "name": name, "arguments": args})
+        if refused is not None:
+            prep["result"] = ToolResult(call_id=call["_cid"], name=name, arguments=args,
+                                        ok=False, output=f"[{refused}]", error=refused)
+        return prep
 
-            emit({"type": "tool_call", "name": name, "arguments": args})
-            if refused is not None:
-                result = ToolResult(call_id=call["_cid"], name=name, arguments=args,
-                                    ok=False, output=f"[{refused}]", error=refused)
-            else:
-                result = registry.run(name, args)
+    def _finish_agent_step(self, turn: "_LiveTurn", ws: Workspace, shadow: ShadowGit,
+                           prep: dict, result: ToolResult, state: dict) -> ToolResult:
+        """Phase 3 of one tool call: persist outcome, snapshot, emit events."""
+        if prep["finished"]:
+            return prep["result"]
+        emit = turn.append
+        call = prep["call"]
+        step = prep["step"]
+        name = call["name"]
+        args = call.get("arguments") or {}
 
-            status = "ok" if result.ok else "error"
-            update: dict = {"status": status, "result": result.output[:4000],
-                            "duration_ms": result.duration_ms}
-            if result.error:
-                update["error"] = result.error
-            diff = (result.metadata or {}).get("diff")
-            if diff:
-                update["diff"] = diff
-            if mutating and result.ok:
-                commit = shadow.snapshot(f"agent step: {summary}")
-                if commit:
-                    update["ws_commit"] = commit
-                    if parent_commit:
-                        update["ws_parent_commit"] = parent_commit
-                    state["last_commit"] = commit
-            self.store.update_metadata(step.id, update)
-            if name == "update_plan" and result.ok:
-                items = (result.metadata or {}).get("items") or []
-                state["plan"] = items
-                emit({"type": "plan", "step_id": step.id, "items": items})
-            emit({"type": "step_done", "id": step.id, "status": status, "tool": name,
-                  "ok": result.ok, "duration_ms": result.duration_ms,
-                  "ws_commit": update.get("ws_commit")})
-            emit({"type": "tool_result", "name": name, "arguments": args,
-                  "ok": result.ok, "error": result.error,
-                  "duration_ms": result.duration_ms, "output": result.output})
-            return result
-        finally:
+        status = "ok" if result.ok else "error"
+        update: dict = {"status": status, "result": result.output[:4000],
+                        "duration_ms": result.duration_ms}
+        if result.error:
+            update["error"] = result.error
+        diff = (result.metadata or {}).get("diff")
+        if diff:
+            update["diff"] = diff
+        if prep["mutating"] and result.ok:
+            commit = shadow.snapshot(f"agent step: {step.metadata['args_summary']}")
+            if commit:
+                update["ws_commit"] = commit
+                if prep["parent_commit"]:
+                    update["ws_parent_commit"] = prep["parent_commit"]
+                state["last_commit"] = commit
+        self.store.update_metadata(step.id, update)
+        if name == "run_shell":
+            state.setdefault("shell_runs", []).append(
+                {"command": str(args.get("command") or "")[:200], "ok": result.ok})
+        if name == "update_plan" and result.ok:
+            items = (result.metadata or {}).get("items") or []
+            state["plan"] = items
+            emit({"type": "plan", "step_id": step.id, "items": items})
+        emit({"type": "step_done", "id": step.id, "status": status, "tool": name,
+              "ok": result.ok, "duration_ms": result.duration_ms,
+              "ws_commit": update.get("ws_commit")})
+        emit({"type": "tool_result", "name": name, "arguments": args,
+              "ok": result.ok, "error": result.error,
+              "duration_ms": result.duration_ms, "output": result.output})
+        return result
+
+    @staticmethod
+    def _is_parallel_read(registry, name: str) -> bool:
+        """Parallel-safe: a read-only tool (never asks, never snapshots)."""
+        try:
+            return bool(registry.get(name).read_only)
+        except ValueError:
+            return False
+
+    def _run_agent_step(self, turn: "_LiveTurn", registry, ws: Workspace,
+                        shadow: ShadowGit, call: dict, assistant_id: str,
+                        state: dict) -> ToolResult:
+        """Execute one agent tool call, persisting a step node as it happens.
+
+        The step node is chained under the previous step (or the assistant
+        node for the first call), so the trajectory is a path in the tree.
+        Write/shell calls go through approval unless policy auto-approves
+        them, and snapshot the workspace (recording ws_commit) on success.
+        """
+        prep = self._begin_agent_step(turn, registry, ws, shadow, call,
+                                      assistant_id, state)
+        if prep["result"] is None:
+            # Streamed shell output is tagged with the step currently running.
+            ctx = state.get("ctx")
             if ctx is not None:
-                ctx["step_id"] = None
+                ctx["step_id"] = prep["step"].id
+            try:
+                result = registry.run(call["name"], call.get("arguments") or {})
+            finally:
+                if ctx is not None:
+                    ctx["step_id"] = None
+        else:
+            result = prep["result"]
+        return self._finish_agent_step(turn, ws, shadow, prep, result, state)
+
+    def _run_readonly_segment(self, turn: "_LiveTurn", registry, ws: Workspace,
+                              shadow: ShadowGit, calls: list[dict],
+                              assistant_id: str, state: dict) -> list[ToolResult]:
+        """Run a run of ≥2 consecutive read-only calls concurrently.
+
+        Step nodes are created and settled in call order, still chained, so
+        the trajectory stays a path; only the tool executions overlap.
+        Mutating calls and approvals never take this path.
+        """
+        preps = [self._begin_agent_step(turn, registry, ws, shadow, c,
+                                        assistant_id, state)
+                 for c in calls]
+
+        def _exec(p: dict) -> ToolResult:
+            if p["result"] is not None:
+                return p["result"]
+            return registry.run(p["call"]["name"], p["call"].get("arguments") or {})
+
+        with ThreadPoolExecutor(max_workers=AGENT_PARALLEL_READS) as pool:
+            results = list(pool.map(_exec, preps))
+        return [self._finish_agent_step(turn, ws, shadow, p, r, state)
+                for p, r in zip(preps, results)]
+
+    def _agent_wrap_up_nudge(self, state: dict, shadow: ShadowGit) -> str:
+        """The round-limit wrap-up prompt, with a server-computed factual
+        record of what this turn ACTUALLY did — files changed (shadow-git
+        diff of the turn's base snapshot vs now) and shell commands with
+        their exit status — so the final answer can't claim phantom work.
+        """
+        lines = ["FACTUAL RECORD (computed by the server — trust only this):"]
+        files: list[dict] = []
+        base = state.get("base_commit")
+        if base and shadow.available:
+            head = shadow.snapshot("round-limit wrap-up", allow_empty=True)
+            if head and head != base:
+                files = shadow.diff_numstat(base, head)
+        if files:
+            lines.append("Files changed this turn:")
+            for f in files:
+                lines.append(f"  {f['status']} {f['path']} "
+                             f"(+{f['additions']}/-{f['deletions']})")
+        else:
+            lines.append("Files changed this turn: NONE.")
+        shells = state.get("shell_runs") or []
+        if shells:
+            lines.append("Shell commands this turn:")
+            for s in shells[-5:]:
+                lines.append(f"  $ {s['command']} -> {'ok (exit 0)' if s['ok'] else 'FAILED'}")
+        else:
+            lines.append("Shell commands this turn: none.")
+        lines.append(
+            "\nThe agent round limit was reached. Write your final answer now, "
+            "WITHOUT any more tool calls. Report ONLY what the record above "
+            "shows — do not claim changes that are not listed in it. If "
+            "nothing changed, say so plainly, summarize what you found, and "
+            "list concretely what remains to do. Answer in the language of "
+            "the user's request."
+        )
+        return "\n".join(lines)
 
     def _generate_agent(self, turn: "_LiveTurn", user_node: Node, assistant_node: Node) -> None:
         """Agent-mode tool loop.
@@ -2626,8 +2742,9 @@ class ChatService:
         round_no = 0
         t0 = time.monotonic()
         state = {"last_step_id": None, "last_commit": base_commit,
-                 "anchor_id": user_node.id, "trunk_id": trunk_id,
-                 "plan": None, "ctx": agent_ctx}
+                 "base_commit": base_commit, "anchor_id": user_node.id,
+                 "trunk_id": trunk_id, "plan": None, "shell_runs": [],
+                 "ctx": agent_ctx}
 
         while True:
             if turn.stop_requested:
@@ -2636,9 +2753,12 @@ class ChatService:
             tools = registry.openai_tools() if allow_tools else None
             if round_no >= AGENT_MAX_ROUNDS and not limit_notified:
                 # The fuse: one final no-tools round asking for a summary
-                # instead of stopping mid-task without a word.
+                # instead of stopping mid-task without a word. The nudge
+                # carries a server-computed record of what REALLY changed, so
+                # the wrap-up can't hallucinate completed work.
                 limit_notified = True
-                loop_messages.append({"role": "user", "content": _AGENT_WRAP_UP_NUDGE})
+                loop_messages.append({"role": "user",
+                                      "content": self._agent_wrap_up_nudge(state, shadow)})
                 emit({"type": "notice",
                       "text": f"agent round limit ({AGENT_MAX_ROUNDS}) reached — "
                               "asking the model to wrap up"})
@@ -2720,17 +2840,36 @@ class ChatService:
             replay.append(assistant_msg)
 
             answered: set[str] = set()
-            for call in fresh:
+            i = 0
+            while i < len(fresh):
                 if turn.stop_requested:
                     break
-                result = self._run_agent_step(
-                    turn, registry, ws, shadow, call, assistant_node.id, state)
-                record = self._tool_record(call, result)
-                tool_results.append(record)
-                tool_msg = _canon_tool_result_msg(call["_cid"], record["output"])
-                loop_messages.append(tool_msg)
-                replay.append(tool_msg)
-                answered.add(call["_cid"])
+                # Runs of ≥2 consecutive read-only calls execute concurrently;
+                # mutating calls (and anything needing approval) stay serial.
+                if self._is_parallel_read(registry, fresh[i]["name"]) \
+                        and i + 1 < len(fresh) \
+                        and self._is_parallel_read(registry, fresh[i + 1]["name"]):
+                    j = i
+                    while j < len(fresh) and self._is_parallel_read(registry, fresh[j]["name"]):
+                        j += 1
+                    batch = fresh[i:j]
+                    results = self._run_readonly_segment(
+                        turn, registry, ws, shadow, batch, assistant_node.id, state)
+                else:
+                    batch = [fresh[i]]
+                    results = [self._run_agent_step(
+                        turn, registry, ws, shadow, fresh[i], assistant_node.id, state)]
+                    j = i + 1
+                # Results fold back strictly in call order, whatever the
+                # execution overlap was.
+                for call, result in zip(batch, results):
+                    record = self._tool_record(call, result)
+                    tool_results.append(record)
+                    tool_msg = _canon_tool_result_msg(call["_cid"], record["output"])
+                    loop_messages.append(tool_msg)
+                    replay.append(tool_msg)
+                    answered.add(call["_cid"])
+                i = j
 
             # Answer any unexecuted call ids with a stub (see the research
             # loop for why dangling ids poison the persisted replay).
@@ -2751,6 +2890,10 @@ class ChatService:
             extra["ws_commit"] = state["last_commit"]
         if state.get("plan"):
             extra["plan"] = state["plan"]
+        if limit_notified:
+            # The turn did not finish on its own — the UI offers Continue.
+            extra["stop_reason"] = "round_limit"
+            extra["incomplete"] = True
         self._finalize_turn(
             turn, user_node, assistant_node,
             context=context, full_text=full_text, usage=usage,
@@ -3014,8 +3157,10 @@ class ChatService:
             "stats": _fmt_stats(usage, elapsed),
             "elapsed": elapsed,
             # Agent turns: the turn's final workspace snapshot (lets the UI
-            # offer restore/compare without a reload).
+            # offer restore/compare without a reload), and whether the turn
+            # ended unfinished (round-limit fuse → the UI offers Continue).
             "ws_commit": metadata.get("ws_commit"),
+            "stop_reason": metadata.get("stop_reason"),
             "tool_results": [
                 {k: r[k] for k in ("name", "arguments", "ok", "error", "duration_ms", "output")}
                 for r in tool_results

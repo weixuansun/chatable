@@ -7,6 +7,8 @@ generator of ("delta"|"tool_calls"|"done") events patched over
 import os
 import shutil
 import json
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -401,6 +403,124 @@ def test_long_turn_shrinks_old_tool_results(svc, monkeypatch):
     # The oldest results are shrunk with a note; the last 6 stay intact.
     assert all("older tool output shrunk" in m["content"] for m in tool_msgs[:2])
     assert not any("older tool output shrunk" in m["content"] for m in tool_msgs[2:])
+
+
+def test_wrap_up_record_with_changes_and_stop_reason(svc, monkeypatch):
+    """The round-limit wrap-up carries the server-computed factual record."""
+    monkeypatch.setattr(service_mod, "AGENT_MAX_ROUNDS", 1)
+    info, _events, calls = run_turn(svc, [
+        tool_call("write_file", path="a.txt", content="v1\n"),
+        ANSWER,
+    ])
+    node = svc.store.get(info["assistant_id"])
+    assert node.metadata["stop_reason"] == "round_limit"
+    assert node.metadata["incomplete"] is True
+    nudge = calls[1]["messages"][-1]
+    assert nudge["role"] == "user"
+    assert "Files changed this turn" in nudge["content"]
+    assert "a.txt" in nudge["content"]
+    assert "+1" in nudge["content"]
+    assert "Answer in the language of the user's request" in nudge["content"]
+    # The record is English, unlike the old Chinese nudge.
+    assert "系统提示" not in nudge["content"]
+
+
+def test_wrap_up_record_without_changes(svc, monkeypatch):
+    monkeypatch.setattr(service_mod, "AGENT_MAX_ROUNDS", 1)
+    with open(os.path.join(svc.workspace().root, "x.txt"), "w") as fh:
+        fh.write("x\n")
+    _i, _e, calls = run_turn(svc, [
+        tool_call("read_file", path="x.txt"),
+        ANSWER,
+    ])
+    nudge = calls[1]["messages"][-1]["content"]
+    assert "Files changed this turn: NONE." in nudge
+    assert "Shell commands this turn: none." in nudge
+
+
+def test_wrap_up_record_includes_shell_results(svc, monkeypatch):
+    monkeypatch.setattr(service_mod, "AGENT_MAX_ROUNDS", 1)
+    _i, _e, calls = run_turn(svc, [
+        tool_call("run_shell", command="true"),
+        ANSWER,
+    ])
+    nudge = calls[1]["messages"][-1]["content"]
+    assert "Shell commands this turn" in nudge
+    assert "$ true -> ok" in nudge
+
+
+def test_parallel_readonly_calls_run_concurrently(svc, monkeypatch):
+    """A batch of read-only calls in one round executes concurrently, with
+    step nodes and tool messages still in strict call order."""
+    import agent_tools
+    lock = threading.Lock()
+    cur = {"n": 0, "max": 0}
+    orig = agent_tools.do_read_file
+
+    def slow_read(ws, path, offset=1, limit=0):
+        with lock:
+            cur["n"] += 1
+            cur["max"] = max(cur["max"], cur["n"])
+        time.sleep(0.15)
+        try:
+            return orig(ws, path, offset, limit)
+        finally:
+            with lock:
+                cur["n"] -= 1
+
+    monkeypatch.setattr(agent_tools, "do_read_file", slow_read)
+    for f in ("f1.txt", "f2.txt", "f3.txt"):
+        with open(os.path.join(svc.workspace().root, f), "w") as fh:
+            fh.write(f + "\n")
+    script = [[("tool_calls", [
+        {"id": "r1", "name": "read_file", "arguments": {"path": "f1.txt"}},
+        {"id": "r2", "name": "read_file", "arguments": {"path": "f2.txt"}},
+        {"id": "r3", "name": "read_file", "arguments": {"path": "f3.txt"}},
+    ]), ("done", {"input": 1, "output": 1})], ANSWER]
+    info, _events, calls = run_turn(svc, script)
+    assert cur["max"] > 1, "read-only calls did not run concurrently"
+    assert [m["tool_call_id"] for m in calls[1]["messages"]
+            if m.get("role") == "tool"] == ["r1", "r2", "r3"]
+    steps = step_nodes(svc)
+    assert [s.metadata["call_id"] for s in steps] == ["r1", "r2", "r3"]
+    # The trajectory stays a chain even though the executions overlapped.
+    assert steps[0].parent_id == info["assistant_id"]
+    assert [s.parent_id for s in steps[1:]] == [s.id for s in steps[:-1]]
+
+
+def test_mutating_calls_stay_sequential(svc, monkeypatch):
+    """Writes never run concurrently, even between read-only batches."""
+    import agent_tools
+    lock = threading.Lock()
+    cur = {"n": 0, "max": 0}
+    orig = agent_tools.do_write_file
+
+    def slow_write(ws, path, content):
+        with lock:
+            cur["n"] += 1
+            cur["max"] = max(cur["max"], cur["n"])
+        time.sleep(0.1)
+        try:
+            return orig(ws, path, content)
+        finally:
+            with lock:
+                cur["n"] -= 1
+
+    monkeypatch.setattr(agent_tools, "do_write_file", slow_write)
+    script = [[("tool_calls", [
+        {"id": "w1", "name": "write_file",
+         "arguments": {"path": "a.txt", "content": "1\n"}},
+        {"id": "g1", "name": "grep", "arguments": {"pattern": "x"}},
+        {"id": "g2", "name": "grep", "arguments": {"pattern": "y"}},
+        {"id": "w2", "name": "write_file",
+         "arguments": {"path": "b.txt", "content": "2\n"}},
+    ]), ("done", {"input": 1, "output": 1})], ANSWER]
+    _info, _events, calls = run_turn(svc, script)
+    assert cur["max"] == 1, "mutating calls overlapped"
+    assert [m["tool_call_id"] for m in calls[1]["messages"]
+            if m.get("role") == "tool"] == ["w1", "g1", "g2", "w2"]
+    assert os.path.exists(os.path.join(svc.workspace().root, "a.txt"))
+    assert os.path.exists(os.path.join(svc.workspace().root, "b.txt"))
 
 
 def test_update_plan_streams_and_persists(svc):

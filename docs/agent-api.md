@@ -176,11 +176,19 @@ minimal edits, plan tracking, test-after-change and verify-before-claiming.
 If `AGENTS.md`, `CLAUDE.md` or `.chatable/instructions.md` exists at the
 workspace root it is appended to that prompt (20KB cap).
 
-Agent loop limits: up to 25 rounds (`CHATTABLE_AGENT_MAX_ROUNDS`), up to 8
+Agent loop limits: up to 40 rounds (`CHATTABLE_AGENT_MAX_ROUNDS`), up to 8
 tool calls per round (`CHATTABLE_AGENT_MAX_CALLS_PER_ROUND`), and **no**
-cross-round dedupe of repeated calls. Normal mode keeps its 3-calls/round,
-10-round, dedupe behaviour untouched. When the round limit is hit the model
-gets one final no-tools round to summarize (plus a `notice` event).
+cross-round dedupe of repeated calls. Consecutive read-only calls of a round
+execute concurrently (`CHATTABLE_AGENT_PARALLEL_READS`, default 4); mutating
+calls and approvals stay sequential, and results always fold back in call
+order. Normal mode keeps its 3-calls/round, 10-round, dedupe behaviour
+untouched. When the round limit is hit the model gets one final no-tools
+round to summarize (plus a `notice` event): the wrap-up prompt contains a
+**server-computed factual record** — the files actually changed this turn
+(shadow-git diff of the turn's base snapshot vs now, with +/- counts or
+"NONE") and the last shell commands with exit status — and the assistant
+node is marked `stop_reason: "round_limit", incomplete: true` so the UI can
+offer a Continue affordance on that branch.
 
 Long turns: past ~60k estimated tokens of loop context
 (`CHATTABLE_AGENT_CTX_BUDGET_TOKENS`), tool results older than the last 6
@@ -194,7 +202,8 @@ affected; persisted step results stay full.
 | `CHATTABLE_AUTH_TOKEN` | (unset) | **Required for agent mode.** Also the existing server auth token. |
 | `CHATTABLE_WORKSPACE` | `<data_dir>/workspace` | Agent workspace root (created if missing). |
 | `CHATTABLE_AGENT_AUTO_APPROVE` | (unset) | Comma-separated: `writes` (write_file+edit_file), `shell` (run_shell), `all`. |
-| `CHATTABLE_AGENT_MAX_ROUNDS` | `25` | Agent loop round cap. |
+| `CHATTABLE_AGENT_MAX_ROUNDS` | `40` | Agent loop round cap. |
+| `CHATTABLE_AGENT_PARALLEL_READS` | `4` | Max concurrent read-only tool calls per round. |
 | `CHATTABLE_AGENT_MAX_CALLS_PER_ROUND` | `8` | Agent loop per-round tool-call cap. |
 | `CHATTABLE_AGENT_APPROVAL_TIMEOUT_S` | `600` | Approval wait before treating as denied. |
 | `CHATTABLE_AGENT_CTX_BUDGET_TOKENS` | `60000` | Estimated-token budget before old tool results are shrunk. |

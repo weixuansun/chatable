@@ -1416,3 +1416,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
         color: var(--dim-2); cursor: pointer; }
 .pill-x:hover { color: var(--fail); background: var(--fail-soft); }
 .pill-x .lucide { width: 10px; height: 10px; }
+
+/* round-limit stop notice + Continue */
+.limit-notice { margin: 4px 0 8px; }
+.limit-notice .fork-btn { margin-left: auto; }
