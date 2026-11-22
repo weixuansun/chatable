@@ -277,3 +277,22 @@ snapshot first).
 
 Shell commands can still cause effects outside the workspace (network,
 global installs); those are **not** rolled back by restores.
+
+
+## CHA-6 notes
+
+- `notice` events may carry `kind: "sandbox"` — a sandboxed shell command was
+  blocked (network off / path outside the workspace / tool under `$HOME`);
+  `text` says which env var allows it. Emitted once per kind per turn. The
+  step's `sandbox_block` (`network` | `filesystem` | `path`) is persisted and
+  the tool output ends with a `[sandbox]` note for the model.
+- Snapshots store nested git repositories (e.g. a clone inside the workspace)
+  as plain files instead of gitlinks (`workspace.add_all_with_nested`).
+- Tool calls a model leaks into its text (DSML markers, `<invoke>` XML, or the
+  `<|open|>tools<|sep|><|open|>call tool="…"…` template) are hidden from the
+  answer and, when they name a tool offered that round, executed.
+- 对话 turns get a system note that they have web tools only (no local
+  files); the UI shows a hint with a one-click switch to 交给 agent on a branch
+  that has agent work. Older tool results in the chat tool loop shrink past
+  `CHATTABLE_CHAT_CTX_BUDGET_TOKENS` (default 120000 est. tokens; the last 2
+  stay whole).

@@ -179,6 +179,15 @@ Shell commands run through two safety layers:
     on Linux, seatbelt on macOS, when available; `/api/agent/status` and the
     composer badge warn when none is in effect).
   - `CHATTABLE_AGENT_SHELL_NET=1` allows network access inside the sandbox.
+- **Denials are explained.** When a sandboxed command fails because the
+  sandbox blocked it (no network, a path outside the workspace, a tool under
+  your home dir), the agent gets a `[sandbox]` note telling it not to retry,
+  and the chat shows which switch allows it (`CHATTABLE_AGENT_SHELL_NET=1`,
+  `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`). Defaults are not relaxed.
+- **Nested repositories are snapshotted as files.** A `git clone` / `git init`
+  the agent runs inside the workspace is stored file-by-file (honouring that
+  repo's own `.gitignore`; its `.git` is not stored), so follow-ups, forks and
+  parallel runs see the code instead of an empty directory.
 - **Deny-list (advisory tripwire).** Obviously destructive commands
   (`rm -rf /`, `sudo`, `curl | sh`, `dd of=/dev/…`, `mkfs`, fork bombs,
   `git push --force`, writes to `~/.ssh`…) are refused outright.
