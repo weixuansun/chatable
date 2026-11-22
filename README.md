@@ -129,7 +129,49 @@ range is allowed by default so fetches keep working. Override with
 `CHATTABLE_FETCH_ALLOW_NETS` (comma-separated CIDRs, e.g. to allow an
 intranet range; set it empty to disable the default).
 
-### Agent mode (prototype, optional)
+### 交给 agent: external coding agents in the conversation tree
+
+One switch above the composer decides what a message does:
+
+- **对话** — a normal chatable reply; nothing touches your files.
+- **交给 agent** — the message is an instruction for a coding agent
+  (built-in DeepSeek agent, Kimi Code, Claude Code or Codex; pick one or
+  several — several = race the same instruction). It runs in an isolated git
+  worktree from the current node's file snapshot, its steps stream into the
+  main chat, and the result becomes a normal reply node with status, files
+  changed and test result. The real workspace changes only when you click
+  **采用 (Adopt)**.
+
+After sending, the composer stays on the same node, so sending another
+instruction starts a parallel task; the 「从这里发出的 agent 任务」 list under
+the conversation shows each one's live status (查看 / 取消). In the mind
+map, run cards show the agent and status; **Shift+click** (or the ☐ button)
+two or more cards with snapshots to **合并** (3-way merge under their common
+ancestor; conflicts or new test failures are handed to a resolver agent
+automatically) or **对比**. The agent's context (`.chatable/CONTEXT.md`) is
+built from the conversation path. API: see "Agent runs in the conversation"
+in [docs/agent-api.md](docs/agent-api.md); design notes in
+[docs/orchestrator-design.md](docs/orchestrator-design.md).
+
+- Executors are auto-detected (`CHATTABLE_KIMI_BIN` / `CHATTABLE_CLAUDE_BIN`
+  / `CHATTABLE_CODEX_BIN` to override); unavailable ones show greyed out.
+- Per-agent concurrency: `CHATTABLE_ORCH_LIMITS` (default
+  `kimi=2,claude=2,codex=2,builtin=3`). Run/test timeouts:
+  `CHATTABLE_ORCH_RUN_TIMEOUT_S` (1800), `CHATTABLE_ORCH_TEST_TIMEOUT_S` (300).
+- Requires `CHATTABLE_AUTH_TOKEN` like agent mode.
+- Sandboxing: `builtin` runs use the agent shell sandbox (bwrap on Linux,
+  Seatbelt on macOS) confined to the run's worktree. External CLIs (kimi,
+  claude, codex) are **not** wrapped — they need network to their APIs and
+  use their own permission modes; they are isolated only by running in a
+  throwaway worktree (the real workspace changes only on Adopt).
+
+### Legacy agent mode (planned for removal)
+
+> **Legacy.** Use 交给 agent above instead. This older toggle runs the agent
+> directly in your workspace directory (continuing a branch restores that
+> directory in place), so it does not keep changes in an isolated copy. It
+> will be removed. The shell sandbox described below also applies to the
+> built-in agent in 交给 agent runs.
 
 Agent mode lets the model work autonomously in a dedicated workspace
 (workspace file tools + shell, per-step tree nodes, shadow-git snapshots,
@@ -190,46 +232,6 @@ Shell commands run through two safety layers:
   `git push --force`, writes to `~/.ssh`…) are refused outright.
   `CHATTABLE_AGENT_SHELL_DENYLIST=off` disables it — note the sandbox, not
   the deny-list, is the real protection.
-
-### 交给 agent: external coding agents in the conversation tree
-
-One switch above the composer decides what a message does:
-
-- **对话** — a normal chatable reply; nothing touches your files.
-- **交给 agent** — the message is an instruction for a coding agent
-  (built-in DeepSeek agent, Kimi Code, Claude Code or Codex; pick one or
-  several — several = race the same instruction). It runs in an isolated git
-  worktree from the current node's file snapshot, its steps stream into the
-  main chat, and the result becomes a normal reply node with status, files
-  changed and test result. The real workspace changes only when you click
-  **采用 (Adopt)**.
-
-After sending, the composer stays on the same node, so sending another
-instruction starts a parallel task; the 「从这里发出的 agent 任务」 list under
-the conversation shows each one's live status (查看 / 取消). In the mind
-map, run cards show the agent and status; **Shift+click** (or the ☐ button)
-two or more cards with snapshots to **合并** (3-way merge under their common
-ancestor; conflicts or new test failures are handed to a resolver agent
-automatically) or **对比**. The agent's context (`.chatable/CONTEXT.md`) is
-built from the conversation path. API: see "Agent runs in the conversation"
-in [docs/agent-api.md](docs/agent-api.md); design notes in
-[docs/orchestrator-design.md](docs/orchestrator-design.md).
-
-- Executors are auto-detected (`CHATTABLE_KIMI_BIN` / `CHATTABLE_CLAUDE_BIN`
-  / `CHATTABLE_CODEX_BIN` to override); unavailable ones show greyed out.
-- Per-agent concurrency: `CHATTABLE_ORCH_LIMITS` (default
-  `kimi=2,claude=2,codex=2,builtin=3`). Run/test timeouts:
-  `CHATTABLE_ORCH_RUN_TIMEOUT_S` (1800), `CHATTABLE_ORCH_TEST_TIMEOUT_S` (300).
-- Requires `CHATTABLE_AUTH_TOKEN` like agent mode.
-- Sandboxing: `builtin` runs use the agent shell sandbox (bwrap on Linux,
-  Seatbelt on macOS) confined to the run's worktree. External CLIs (kimi,
-  claude, codex) are **not** wrapped — they need network to their APIs and
-  use their own permission modes; they are isolated only by running in a
-  throwaway worktree (the real workspace changes only on Adopt).
-
-
-
-
 
 ## License
 
