@@ -5,38 +5,71 @@
 
 ![Concept: fork to explore, prune to focus, build your mindmap](image/concept.png)
 
-A tree-structured research chat web UI for paper and blog reading with LLMs.
-Ask a question at any point, fork the conversation, and come back to a mind
-map of where you've been.
-When you talk to LLM, not all context is neccesary, you can control your context 
-by forking at any conversation turn.
+**Ask once, let AI try several approaches side by side, compare them, and
+keep the best one.** chatable is a conversation tree where chat and code
+changes live on the same map: fork at any turn, hand a node to one or more
+coding agents, and every reply node remembers both the conversation and the
+files at that moment. Agent changes stay in an isolated copy until you click
+**采用 (Adopt)**, and adopting is undoable.
 
-It's built for paper/blog reading, math/proof discussion, and algorithm idea
-exploration — workflows that have:
+## Why chatable
 
-- **Natural mind map.** Your conversation is already a tree, so you get a
-visual overview of your reading for free.
-- **No Context pollution.** Later turns can derail the context; jump back to any
-earlier definition, claim, or answer instead of scrolling and re-explaining.
-- **Fork from anywhere.** Any message can be a fork point — ask a side
-question about a single sentence without touching the main-line context.
-- **Cheaper context.** Forking reuses the shared prefix instead of repeating
-it, saving context length (and staying cache-friendly).
-- **Private by default.** It runs against your own LLM API key and stores
-everything on your local filesystem — nothing is uploaded to any
-third-party service.
-- **Configurable in the browser.** Model, base URL, and API key can be
-switched from the settings panel without restarting, and the UI appearance
-(theme color, font size) is adjustable too.
-- **Bookmarks / read-it-later.** Save URLs (blogs, papers, articles) in the
-bookmark sidebar; the server fetches a title and summary, and you can start
-a chat from any bookmark to discuss it with the model.
-- **Survey report.** From a conversation's "⋯" menu, have the model read the
-whole tree — every branch — and write one report on the topic, organized by
-theme rather than by turn. An optional focus steers it; the report is saved
-alongside your data and can be copied or downloaded as Markdown.
+The pain points it targets:
 
+1. **Chats only go one way.** Trying a different idea means a new chat (and
+   lost context) or rewriting the old one until it is a mess.
+2. **You can't try several approaches — or several agents — at once.** An AI
+   coding session usually commits to one approach; if it's wrong you start
+   over.
+3. **Plans discussed in a chat get copy-pasted into the agent by hand.**
+4. **Agents edit your real project.** When they get it wrong, rolling back is
+   on you.
+5. **Attempts are hard to compare or combine.** Results end up scattered
+   across chats and branches.
+6. **You can't go back to a midpoint.** Returning to turn 5 of the chat
+   leaves the code at turn 10.
 
+How chatable answers them:
+
+- **Fork from anywhere (1).** Any message is a fork point; side questions
+  don't pollute the main line, and the tree doubles as a mind map.
+- **Race approaches and agents (2).** One 交给 agent instruction can go to the
+  built-in DeepSeek agent, Claude Code, Codex or Kimi Code at once — each runs
+  on its own branch, and the results sit next to each other on the map.
+- **Chat, then hand off (3).** The same node can switch from 对话 (chat) to
+  交给 agent; the branch's discussion is written into the agent's context
+  file automatically.
+- **Changes stay in an isolated copy until you adopt them (4).** Every run
+  works in a throwaway worktree checked out from its parent node's snapshot;
+  your project directory changes only on Adopt, which backs it up first and
+  can be undone.
+- **Compare and merge (5).** Diff any two nodes, or Shift+click several and
+  merge them (3-way); conflicts and new test failures are handed to a
+  resolver agent.
+- **Conversation and code go back together (6).** Each node stores a file
+  snapshot, so forking from an old node continues from both its context and
+  its files.
+
+Also included, from chatable's research-chat roots:
+
+- **Private by default.** Your own LLM API key, everything stored on your
+  local filesystem.
+- **Configurable in the browser.** Model, base URL, API key and appearance
+  without restarting.
+- **Bookmarks / read-it-later** and **survey reports** that read a whole
+  tree and write one themed report.
+
+### Status
+
+chatable is a local, single-user prototype. Known gaps before the
+"isolated until Adopt" promise holds everywhere:
+
+- The legacy agent-mode toggle still exists; continuing a branch there
+  restores your workspace directory in place instead of using a separate copy.
+- External CLIs (Claude Code, Codex, Kimi Code) run in the isolated worktree
+  but are **not** sandboxed, so they could still write outside it.
+- The macOS Seatbelt sandbox is covered only by unit tests on Linux, and
+  full Claude Code / Codex runs have not been verified end to end yet.
 
 ## Screenshots
 
