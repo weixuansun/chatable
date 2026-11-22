@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from typing import Optional
 
-from workspace import ShadowGit, WorkspaceError
+from workspace import ShadowGit, WorkspaceError, add_all_with_nested
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -44,7 +44,9 @@ def worktree_snapshot(shadow: ShadowGit, wt: str, message: str) -> Optional[str]
     and HEAD are untouched."""
     base = ["git", "-C", wt, "-c", "user.name=chatable-orchestrator",
             "-c", "user.email=orchestrator@chatable.local"]
-    _check(_run(base + ["add", "-A"]), "git add")
+    # A repo the agent cloned inside the worktree: store its files, not an
+    # empty gitlink (follow-ups / forks would otherwise see an empty dir).
+    add_all_with_nested(shadow.git_dir, wt, ["git", "-C", wt], keep_index=False)
     dirty = _run(base + ["status", "--porcelain"]).stdout.strip()
     if not dirty:
         return None

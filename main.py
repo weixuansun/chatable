@@ -84,6 +84,48 @@ _DSML_PREFIX_RE = re.compile(r"<\s*[｜|]+\s*DSML\s*[｜|]+\s*(?=[A-Za-z/])", re
 _DSML_CLOSE_PREFIX_RE = re.compile(r"</\s*[｜|]+\s*DSML\s*[｜|]+\s*(?=[A-Za-z])", re.IGNORECASE)
 
 
+# Another leaked tool-call template (seen with DeepSeek V4 / Kimi backends
+# when the provider fails to turn it into structured tool_calls):
+#   <|open|>tools<|sep|><|open|>call tool="grep" index="1"<|sep|>
+#   <|open|>argument key="pattern" type="string"<|sep|>@media<|close|>argument<|sep|>
+#   <|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>
+# (ASCII or fullwidth pipes). Complete markers are rewritten to the standard
+# <function_calls>/<invoke>/<parameter> forms, so the existing scrubber hides
+# them and the recovery parser can still execute the intended calls.
+_P = r"[|｜]"
+_SEP_MARK_RE = re.compile(rf"<\s*{_P}\s*sep\s*{_P}\s*>", re.IGNORECASE)
+_OPEN_MARK_RE = re.compile(
+    rf"<\s*{_P}\s*open\s*{_P}\s*>\s*([A-Za-z_]+)([^<>]*?)\s*<\s*{_P}\s*sep\s*{_P}\s*>",
+    re.IGNORECASE)
+_CLOSE_MARK_RE = re.compile(
+    rf"<\s*{_P}\s*close\s*{_P}\s*>\s*(?:(tools|call|argument|message)\b|([A-Za-z_]+)(?=\s*<\s*{_P}\s*sep))"
+    rf"\s*(?:<\s*{_P}\s*sep\s*{_P}\s*>)?",
+    re.IGNORECASE)
+_ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+
+
+def _open_marker(m: "re.Match") -> str:
+    tag = m.group(1).lower()
+    attrs = dict(_ATTR_RE.findall(m.group(2) or ""))
+    if tag == "tools":
+        return "<function_calls>"
+    if tag == "call":
+        return f'<invoke name="{attrs.get("tool") or attrs.get("name") or ""}">'
+    if tag == "argument":
+        typ = attrs.get("type", "string")
+        return f'<parameter name="{attrs.get("key") or attrs.get("name") or ""}" type="{typ}">'
+    return ""  # message / other envelope markers carry no content
+
+
+def _close_marker(m: "re.Match") -> str:
+    return {"tools": "</function_calls>", "call": "</invoke>",
+            "argument": "</parameter>"}.get((m.group(1) or "").lower(), "")
+
+
+def has_open_close_markup(text: str) -> bool:
+    return bool(text) and re.search(rf"<\s*{_P}\s*(open|close|sep)\s*{_P}", text, re.I) is not None
+
+
 def normalize_model_markup(text: str) -> str:
     """Rewrite DeepSeek DSML tool-call markers to the standard tag forms.
 
@@ -91,7 +133,13 @@ def normalize_model_markup(text: str) -> str:
     ``</｜｜DSML｜｜tool_calls>`` → ``</tool_calls>``. Leaves all other text
     untouched and is idempotent on text containing no DSML markers.
     """
-    if not text or "DSML" not in text:
+    if not text:
+        return text
+    if has_open_close_markup(text):
+        text = _OPEN_MARK_RE.sub(_open_marker, text)
+        text = _CLOSE_MARK_RE.sub(_close_marker, text)
+        text = _SEP_MARK_RE.sub("", text)
+    if "DSML" not in text:
         return text
     text = _DSML_CLOSE_PREFIX_RE.sub("</", text)
     text = _DSML_PREFIX_RE.sub("<", text)

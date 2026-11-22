@@ -29,6 +29,7 @@ from shell_sandbox import (
     build_seatbelt_argv,
     make_run_tmp,
     denylist_reason,
+    sandbox_denial,
     sandbox_mode,
     scrubbed_env,
     shell_net_enabled,
@@ -555,6 +556,11 @@ def do_run_shell(ws: Workspace, command: str, timeout: int = SHELL_DEFAULT_TIMEO
     rc = proc.returncode
     status = f"[{killed}]" if killed else f"[exit {rc}]"
     text = f"$ {command}\n{status}\n{out}".strip()
+    denial = None if killed else sandbox_denial(
+        out, rc == 0, mode, shell_net_enabled(), ws.root)
+    if denial:
+        text += "\n\n" + denial["agent_hint"]
+        return WebToolResult(False, text, {"sandbox_block": denial})
     return WebToolResult(rc == 0 and not killed, text)
 
 

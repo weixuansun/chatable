@@ -1598,3 +1598,5 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .map-selbar .fork-btn:disabled { opacity: .45; cursor: not-allowed; }
 .run-notice.info { color: var(--dim); background: var(--card); border-color: var(--border); }
 .run-notice.info .lucide { color: var(--accent); }
+.mode-hint-chat { align-items: center; color: var(--dim); }
+.mode-hint-chat .fork-btn { height: 22px; }

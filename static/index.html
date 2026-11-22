@@ -674,6 +674,11 @@ try {
           <i data-lucide="zap"></i><span x-text="'auto: ' + sessionAutoApprove.join(', ')"></span><i data-lucide="x"></i>
         </button>
       </div>
+      <div class="mode-hint mode-hint-chat" x-show="composerMode === 'chat' && agent.available && chatOnAgentBranch">
+        <i data-lucide="info"></i>
+        <span>当前是「对话」：模型只能查网页，<b>看不到本地文件</b>，也不能跑命令。要让它读 / 改这里的代码，请切到</span>
+        <button class="fork-btn" @click="setComposerMode('agent')"><i data-lucide="bot"></i>交给 agent</button>
+      </div>
       <div class="mode-hint" x-show="composerMode === 'agent'">
         <i data-lucide="info"></i>
         <span x-text="selectedId
@@ -3375,6 +3380,11 @@ function chatable() {
       const t = m.test;
       if (t) bits.push(t.new_failures ? ('新失败 ' + t.new_failures) : (t.ok ? ('测试通过' + (t.passed != null ? ' ' + t.passed : '')) : ('测试失败 ' + (t.failed || ''))));
       return bits.length ? ' · ' + bits.join(' · ') : '';
+    },
+    // The branch being continued has agent work on it (runs / legacy agent
+    // turns): in 对话 mode the model can't see those files — say so.
+    get chatOnAgentBranch() {
+      return !!this.selectedId && this.messages.some(m => m.orch_run || m.ws_commit || m.role === 'step');
     },
     // Agent tasks whose question hangs off the node the composer is on.
     get runsFromHere() {

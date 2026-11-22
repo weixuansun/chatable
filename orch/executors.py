@@ -376,6 +376,8 @@ class BuiltinExecutor:
                 yield {"type": "meta", "kind": "plan", "items": ev.get("items")}
             elif typ == "error":
                 yield {"type": "error", "text": ev.get("message") or "error"}
+            elif typ == "notice":
+                yield {"type": "meta", "kind": "notice", "text": ev.get("text") or ""}
             elif typ == "done":
                 final_text = ev.get("content") or ""
                 usage = ev.get("usage") or {}

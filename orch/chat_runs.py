@@ -195,6 +195,8 @@ class ChatRunsMixin:
                          "duration_ms": dur, "output": output[:STEP_RESULT_CAP]})
         elif typ == "meta" and ev.get("kind") == "plan":
             turn.append({"type": "plan", "step_id": None, "items": ev.get("items") or []})
+        elif typ == "meta" and ev.get("kind") == "notice" and ev.get("text"):
+            turn.append({"type": "notice", "text": str(ev.get("text"))[:400]})
         elif typ == "error":
             turn.append({"type": "notice", "text": str(ev.get("text") or "error")[:300]})
 

@@ -32,6 +32,96 @@ def default_shadow_git_dir(data_dir: str) -> str:
     return os.path.join(data_dir, "agent_shadow.git")
 
 
+# Directories never searched for nested repositories (also excluded from
+# snapshots by the shadow repo's info/exclude).
+_NESTED_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__",
+                     ".pytest_cache", ".mypy_cache", ".chatable"}
+
+
+def find_nested_repos(root: str, limit: int = 200) -> list[str]:
+    """Relative paths of git repositories nested inside *root* (a directory
+    holding its own ``.git`` dir or file), outermost only."""
+    out: list[str] = []
+    root = os.path.abspath(root)
+    for dirpath, dirnames, _files in os.walk(root):
+        if dirpath != root and os.path.lexists(os.path.join(dirpath, ".git")):
+            out.append(os.path.relpath(dirpath, root).replace(os.sep, "/"))
+            dirnames[:] = []
+            if len(out) >= limit:
+                break
+            continue
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _NESTED_SKIP_DIRS
+                             and not os.path.islink(os.path.join(dirpath, d)))
+    return out
+
+
+def _nested_tree(git_dir: str, repo_dir: str, depth: int = 0, keep_index: bool = True) -> str:
+    """Tree object (in *git_dir*) holding the work-tree files of the nested
+    repository at *repo_dir* — its own .gitignore is honoured, its ``.git``
+    is not stored. Nested-in-nested repos are expanded recursively."""
+    import hashlib
+    idx_dir = os.path.join(git_dir, "chatable-nested-index")
+    os.makedirs(idx_dir, exist_ok=True)
+    key = hashlib.sha1(os.path.abspath(repo_dir).encode()).hexdigest()[:16]
+    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(idx_dir, key))
+    base = ["git", f"--git-dir={git_dir}", f"--work-tree={repo_dir}",
+            "-c", "core.autocrlf=false"]
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        proc = subprocess.run([*base, *args], capture_output=True, text=True,
+                              timeout=300, env=env)
+        if proc.returncode != 0:
+            raise WorkspaceError(
+                f"git {args[0]} (nested {repo_dir}) failed: "
+                f"{(proc.stderr or proc.stdout).strip()[:300]}")
+        return proc
+
+    inner = find_nested_repos(repo_dir) if depth < 4 else []
+    run("add", "-A", "--", ".", *[f":(exclude){r}" for r in inner])
+    for sub in inner:
+        tree = _nested_tree(git_dir, os.path.join(repo_dir, sub), depth + 1, keep_index)
+        run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", sub)
+        run("read-tree", f"--prefix={sub}/", tree)
+    tree = run("write-tree").stdout.strip()
+    if not keep_index:
+        try:
+            os.remove(env["GIT_INDEX_FILE"])
+        except OSError:
+            pass
+    return tree
+
+
+def add_all_with_nested(git_dir: str, work_tree: str, git_argv: list[str],
+                        keep_index: bool = True) -> list[str]:
+    """``git add -A`` for a snapshot, with nested git repositories (e.g. a
+    ``git clone`` / ``git init`` the agent ran inside the workspace) stored as
+    their actual files instead of empty gitlinks — so snapshots, and the run
+    worktrees / forks checked out from them, contain the code. A plain
+    ``git add -A`` records a gitlink (or fails outright for a repo without a
+    commit). *git_argv* runs git against the index being built (workspace or
+    run worktree). Returns the nested paths that were expanded."""
+    def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        proc = subprocess.run([*git_argv, *args], capture_output=True, text=True,
+                              timeout=300)
+        if check and proc.returncode != 0:
+            raise WorkspaceError(
+                f"git {args[0]} failed: {(proc.stderr or proc.stdout).strip()[:400]}")
+        return proc
+
+    nested = find_nested_repos(work_tree)
+    run("add", "-A", "--", ".", *[f":(exclude){rel}" for rel in nested])
+    expanded = []
+    for rel in nested:
+        if run("check-ignore", "-q", "--", rel, check=False).returncode == 0:
+            continue  # ignored on purpose by the user's .gitignore
+        tree = _nested_tree(git_dir, os.path.join(work_tree, rel), keep_index=keep_index)
+        run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", rel)
+        run("read-tree", f"--prefix={rel}/", tree)
+        expanded.append(rel)
+    return expanded
+
+
 class Workspace:
     """A directory the agent tools are confined to."""
 
@@ -128,6 +218,13 @@ class ShadowGit:
 
     # ------------------------------------------------------------------ #
 
+    def _add_all(self) -> None:
+        """``git add -A`` plus nested repositories as plain files (no empty
+        gitlinks). Caller must hold ``_lock``."""
+        add_all_with_nested(self.git_dir, self.workspace.root, [
+            "git", f"--git-dir={self.git_dir}", f"--work-tree={self.workspace.root}",
+            "-c", "core.autocrlf=false"])
+
     def _head(self) -> Optional[str]:
         """HEAD commit id, or None. Caller must hold ``_lock``."""
         proc = self._git("rev-parse", "HEAD", check=False)
@@ -147,7 +244,7 @@ class ShadowGit:
             return None
         with self._lock:
             self._ensure_init()
-            self._git("add", "-A")
+            self._add_all()
             dirty = self._git("status", "--porcelain").stdout.strip()
             if not dirty and not allow_empty:
                 return self._head()
@@ -167,7 +264,7 @@ class ShadowGit:
             self._ensure_init()
             if self._head() is None:
                 # No baseline yet: everything would look "touched".
-                self._git("add", "-A")
+                self._add_all()
                 return []
             proc = self._git("status", "--porcelain", "--untracked-files=all",
                              check=False)
@@ -181,7 +278,7 @@ class ShadowGit:
                 if " -> " in path:
                     path = path.split(" -> ", 1)[1]
                 out.append({"status": {"?": "A"}.get(y, y), "path": path.strip('"')})
-            self._git("add", "-A")
+            self._add_all()
             return out[:limit]
 
     def restore(self, commit: str) -> None:

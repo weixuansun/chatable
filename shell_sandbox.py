@@ -412,3 +412,73 @@ def make_run_tmp() -> str:
     os.makedirs(os.path.join(d, "home"), exist_ok=True)
     os.makedirs(os.path.join(d, "tmp"), exist_ok=True)
     return d
+
+
+# --------------------------------------------------------------------------- #
+# Explaining sandbox denials (CHA-6): a sandboxed command that fails because
+# the sandbox blocked it should say so — to the agent (so it stops retrying
+# and works around it) and to the user (so they know which switch allows it).
+# --------------------------------------------------------------------------- #
+
+_NET_FAIL_MARKERS = (
+    "could not resolve host", "temporary failure in name resolution",
+    "name or service not known", "nodename nor servname", "network is unreachable",
+    "failed to establish a new connection", "getaddrinfo", "no route to host",
+    "could not resolve proxy", "name resolution", "unable to access 'http",
+    "connection timed out", "network unreachable", "dns lookup",
+)
+_PERM_FAIL_MARKERS = (
+    "operation not permitted", "permission denied", "read-only file system",
+    "sandbox-exec", "deny file", "deny network",
+)
+
+
+def sandbox_denial(output: str, exit_ok: bool, mode: str, network: bool,
+                   ws_root: str = "") -> Optional[dict]:
+    """Classify a failed sandboxed command: {kind, agent_hint, user_hint}
+    when the failure looks like a sandbox denial, else None."""
+    if exit_ok or mode not in ("bwrap", "seatbelt"):
+        return None
+    low = (output or "").lower()
+    if not network and any(m in low for m in _NET_FAIL_MARKERS):
+        return {
+            "kind": "network",
+            "agent_hint": (
+                "[sandbox] This command failed because the agent shell sandbox has "
+                "NO network access (downloads, git clone/fetch, pip/npm install are "
+                "blocked). Do not retry it. Work with the files already in the "
+                "workspace, or tell the user it needs network: they can allow it by "
+                "restarting chatable with CHATTABLE_AGENT_SHELL_NET=1."),
+            "user_hint": (
+                "沙箱拦住了一条需要联网的命令（agent 的 shell 默认不联网）。"
+                "如需允许：用 CHATTABLE_AGENT_SHELL_NET=1 重新启动 chatable。"),
+        }
+    if any(m in low for m in _PERM_FAIL_MARKERS):
+        where = f" ({ws_root})" if ws_root else ""
+        return {
+            "kind": "filesystem",
+            "agent_hint": (
+                "[sandbox] This looks like a sandbox denial: the agent shell may only "
+                f"write inside the workspace{where} and cannot read the user's home "
+                "directory or other folders. Use paths inside the workspace (the "
+                "project files are there); do not retry the same path."),
+            "user_hint": (
+                "沙箱拦住了一次文件访问：agent 只能读写工作区"
+                + (f"（{ws_root}）" if ws_root else "")
+                + "，看不到你的主目录和其他文件夹。需要的文件请放进工作区"
+                "（或用 CHATTABLE_WORKSPACE 指向项目目录）。"),
+        }
+    if mode == "seatbelt" and "command not found" in low and \
+            os.environ.get("CHATTABLE_AGENT_SANDBOX_PATH_HOME", "") not in ("1", "true", "yes"):
+        return {
+            "kind": "path",
+            "agent_hint": (
+                "[sandbox] The command was not found inside the sandbox. Tools "
+                "installed under the user's home directory are hidden from the "
+                "sandboxed shell; tell the user they can allow them with "
+                "CHATTABLE_AGENT_SANDBOX_PATH_HOME=1."),
+            "user_hint": (
+                "沙箱里找不到这个命令：装在你主目录下的工具（如 ~/.cargo、~/.local）"
+                "默认对 agent 不可见。如需允许：用 CHATTABLE_AGENT_SANDBOX_PATH_HOME=1 重新启动。"),
+        }
+    return None

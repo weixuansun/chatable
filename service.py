@@ -113,6 +113,21 @@ AGENT_APPROVAL_TIMEOUT_S = float(os.environ.get("CHATTABLE_AGENT_APPROVAL_TIMEOU
 # older than the last few are shrunk to head/tail excerpts.
 AGENT_CTX_BUDGET_TOKENS = int(os.environ.get("CHATTABLE_AGENT_CTX_BUDGET_TOKENS", "60000"))
 AGENT_CTX_KEEP_LAST_TOOL_MSGS = 6
+# Same for the plain chat tool loop (web_fetch can return up to 500k chars per
+# call; every later round re-sends it): past this budget, older tool results
+# shrink to head/tail excerpts — the latest few stay whole.
+CHAT_CTX_BUDGET_TOKENS = int(os.environ.get("CHATTABLE_CHAT_CTX_BUDGET_TOKENS", "120000"))
+CHAT_CTX_KEEP_LAST_TOOL_MSGS = 2
+
+CHAT_MODE_NOTE = (
+    "This turn is plain chat mode: you have web tools only and NO access to the "
+    "user's local files, workspace or shell (earlier agent runs in this "
+    "conversation had those tools; this turn does not). If the user asks you to "
+    "read, review, run or change their local code, answer from what is already in "
+    "the conversation and tell them briefly that for file access they should switch "
+    "the input box to 「交给 agent」 and send it again. Do not fetch their code from "
+    "the web unless they gave you a public URL for it."
+)
 
 
 def _agent_auth_token() -> str:
@@ -191,6 +206,14 @@ def _agent_system_prompt(ws: "Workspace") -> str:
             "not try to download, fetch or install anything; work with what "
             "is already in the workspace."
         )
+    if sandbox_mode() in ("bwrap", "seatbelt"):
+        prompt += (
+            "\n- The shell is sandboxed: it can write only inside the workspace "
+            "and cannot see the user's home directory or other folders. The "
+            "project files you need are in the workspace — use list_dir/glob/"
+            "read_file on it. If a command output ends with a [sandbox] note, "
+            "do not retry it; work around it or tell the user what to enable."
+        )
     instructions = _load_project_instructions(ws)
     if instructions:
         prompt += ("\n\nProject instructions (follow them unless they "
@@ -198,7 +221,8 @@ def _agent_system_prompt(ws: "Workspace") -> str:
     return prompt
 
 
-def _shrink_old_tool_messages(messages: list[dict]) -> None:
+def _shrink_old_tool_messages(messages: list[dict], budget_tokens: Optional[int] = None,
+                              keep_last: int = AGENT_CTX_KEEP_LAST_TOOL_MSGS) -> None:
     """Shrink old tool results in-place when the loop context gets large.
 
     Past AGENT_CTX_BUDGET_TOKENS (estimated), role=tool messages older than
@@ -208,11 +232,11 @@ def _shrink_old_tool_messages(messages: list[dict]) -> None:
     affected — the persisted replay keeps full outputs.
     """
     total = sum(len(str(m.get("content") or "")) for m in messages) // 4
-    if total <= AGENT_CTX_BUDGET_TOKENS:
+    if total <= (AGENT_CTX_BUDGET_TOKENS if budget_tokens is None else budget_tokens):
         return
     marker = "[... older tool output shrunk"
     tool_idx = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
-    for i in tool_idx[:-AGENT_CTX_KEEP_LAST_TOOL_MSGS]:
+    for i in (tool_idx[:-keep_last] if keep_last else tool_idx):
         content = messages[i].get("content")
         if not isinstance(content, str) or len(content) <= 1500 or marker in content:
             continue
@@ -568,12 +592,55 @@ def _scrub_answer_text(text: str) -> str:
     return _strip_raw_tool_call_json(text)
 
 
+def _recover_text_tool_calls(text: str, tools: Optional[list]) -> list[dict]:
+    """Tool calls the model wrote as TEXT (leaked template markup such as
+    ``<|open|>call tool="grep"…`` or ``<invoke name=…>``) instead of issuing
+    structured tool_calls. Returns stream-shaped calls ({id, name, arguments})
+    for tools offered this round; [] when there is nothing recoverable."""
+    if not text or not tools:
+        return []
+    norm = normalize_model_markup(text)
+    if "<invoke" not in norm:
+        return []
+    allowed = {((t.get("function") or {}).get("name")) for t in tools if isinstance(t, dict)}
+    out = []
+    for m in re.finditer(r'<invoke\s+name="([^"]+)"\s*>(.*?)</invoke>', norm, flags=re.DOTALL):
+        name = m.group(1)
+        if name not in allowed:
+            continue
+        args: dict = {}
+        for pm in re.finditer(r'<parameter\s+name="([^"]+)"([^>]*)>(.*?)</parameter>',
+                              m.group(2), flags=re.DOTALL):
+            key, attrs, raw = pm.group(1), pm.group(2), pm.group(3).strip()
+            tm = re.search(r'type="([^"]*)"', attrs)
+            typ = (tm.group(1) if tm else "string").lower()
+            value: Any = raw
+            if typ in ("int", "integer", "number"):
+                try:
+                    value = int(raw) if re.fullmatch(r"-?\d+", raw) else float(raw)
+                except ValueError:
+                    value = raw
+            elif typ in ("bool", "boolean"):
+                value = raw.lower() in ("true", "1", "yes")
+            elif typ in ("array", "object", "json"):
+                try:
+                    value = json.loads(raw)
+                except ValueError:
+                    value = raw
+            args[key] = value
+        out.append({"id": None, "name": name, "arguments": args})
+    return out[:AGENT_MAX_CALLS_PER_ROUND]
+
+
 # Appended once when a turn's visible answer scrubbed to nothing: tell the
 # model to stop trying to call tools and just write the answer.
 _NO_TOOL_NUDGE = (
     "系统提示：工具调用阶段已结束。不要再输出任何工具调用标记或 "
     "tool_calls JSON；请直接基于已获得的工具结果给出完整的最终回答。"
 )
+
+
+_PIPE_MARK_START_RE = re.compile(r"<\s*[|｜]\s*(?:o|c|s|$)", re.IGNORECASE)
 
 
 class _ToolCallStripper:
@@ -626,6 +693,12 @@ class _ToolCallStripper:
         return "".join(out)
 
     def _partial_tail_len(self) -> int:
+        # An unfinished "<|open|>…<|sep|>" style marker (complete ones were
+        # already rewritten by normalize_model_markup): hold from its start.
+        window = self.buf[-600:]
+        m = _PIPE_MARK_START_RE.search(window)
+        if m:
+            return len(window) - m.start()
         # Hold back a tail that could be the start of a standard open tag…
         for length in range(min(len(self.buf), _TOOL_CALL_MAX_OPEN_LEN - 1), 0, -1):
             suffix = self.buf[-length:]
@@ -637,12 +710,16 @@ class _ToolCallStripper:
         # "<" whose stripped remainder is still a prefix of "DSML".
         lt = self.buf.rfind("<")
         if lt != -1:
-            core = re.sub(r"[｜|\s]", "", self.buf[lt + 1:])
-            if "dsml".startswith(core.lower()):  # "" counts as a prefix → hold a lone "<"
+            core = re.sub(r"[｜|\s]", "", self.buf[lt + 1:]).lower()
+            # "" counts as a prefix → hold a lone "<"
+            if any(w.startswith(core) for w in ("dsml", "open", "close", "sep")):
                 return len(self.buf) - lt
         return 0
 
     def flush(self) -> str:
+        m = _PIPE_MARK_START_RE.search(self.buf)
+        if m:  # an unfinished leaked marker at the very end: never show it
+            self.buf = self.buf[:m.start()]
         if self.buf and not any(tag in self.buf for tag in _TOOL_CALL_OPEN_TAGS):
             out, self.buf = self.buf, ""
             return out
@@ -1309,7 +1386,8 @@ class ChatService:
                 "step": (
                     {k: meta.get(k) for k in ("tool", "args", "args_summary", "status",
                                               "result", "error", "diff", "ws_commit",
-                                              "touched_files", "duration_ms")}
+                                              "touched_files", "duration_ms",
+                                              "sandbox_block")}
                     if n.role == "step" else None
                 ),
             })
@@ -2704,6 +2782,14 @@ class ChatService:
         # it ends (node granularity). The step keeps its own inline diff.
         if prep["mutating"] and result.ok:
             state["dirty"] = True
+        block = (result.metadata or {}).get("sandbox_block")
+        if isinstance(block, dict):
+            update["sandbox_block"] = block.get("kind")
+            # Tell the user once per kind per turn which switch allows it.
+            seen = state.setdefault("sandbox_notices", set())
+            if block.get("kind") not in seen:
+                seen.add(block.get("kind"))
+                emit({"type": "notice", "kind": "sandbox", "text": block.get("user_hint") or ""})
         self.store.update_metadata(step.id, update)
         if name == "run_shell":
             state.setdefault("shell_runs", []).append(
@@ -3003,6 +3089,13 @@ class ChatService:
                     return
 
             iter_text = "".join(text_parts)
+            if not iter_calls and tools is not None:
+                # The model wrote its tool call as text (leaked template
+                # markup) — run it instead of ending the turn on it.
+                recovered = _recover_text_tool_calls(iter_text, tools)
+                if recovered:
+                    iter_calls = recovered
+                    iter_text = _scrub_answer_text(iter_text)
             if _scrub_answer_text(iter_text).strip():
                 segments.append(iter_text)
 
@@ -3112,6 +3205,11 @@ class ChatService:
         tool_results: list[dict] = []
         context = self._live_context(user_node.id, tool_results)
         loop_messages = list(context["messages"])
+        # 对话 mode has web tools only. Say so, so a follow-up on an agent
+        # run doesn't make the model claim "no file access" mid-task or go
+        # hunting for the user's code on the web (CHA-6).
+        at = 1 if loop_messages and loop_messages[0].get("role") == "system" else 0
+        loop_messages.insert(at, {"role": "system", "content": CHAT_MODE_NOTE})
 
         emit({
             "type": "assistant_start",
@@ -3143,6 +3241,8 @@ class ChatService:
                 AUTO_TOOLS_ENABLED and not nudged and round_no < AUTO_TOOL_MAX_ROUNDS
             )
             tools = TOOL_REGISTRY.openai_tools() if allow_tools else None
+            _shrink_old_tool_messages(loop_messages, CHAT_CTX_BUDGET_TOKENS,
+                                      CHAT_CTX_KEEP_LAST_TOOL_MSGS)
 
             # One stream iteration, with a single retry on transient upstream
             # failures (truncated stream or dropped connection; clients drop
@@ -3191,6 +3291,13 @@ class ChatService:
                     return
 
             iter_text = "".join(text_parts)
+            if not iter_calls and tools is not None:
+                # The model wrote its tool call as text (leaked template
+                # markup) — run it instead of ending the turn on it.
+                recovered = _recover_text_tool_calls(iter_text, tools)
+                if recovered:
+                    iter_calls = recovered
+                    iter_text = _scrub_answer_text(iter_text)
             if _scrub_answer_text(iter_text).strip():
                 segments.append(iter_text)
 
@@ -3258,7 +3365,7 @@ class ChatService:
                     "images": len(record.get("images") or []),
                 })
                 tool_msg = _canon_tool_result_msg(call["_cid"], record["output"])
-                loop_messages.append(tool_msg)
+                loop_messages.append(dict(tool_msg))  # may be shrunk in-loop; replay keeps it whole
                 replay.append(tool_msg)
                 answered.add(call["_cid"])
                 # Vision: hand captured images to the model as a synthetic user
