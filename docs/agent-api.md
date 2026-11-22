@@ -296,3 +296,9 @@ global installs); those are **not** rolled back by restores.
   that has agent work. Older tool results in the chat tool loop shrink past
   `CHATTABLE_CHAT_CTX_BUDGET_TOKENS` (default 120000 est. tokens; the last 2
   stay whole).
+- On a branch that has agent runs, a 对话 turn also gets a reminder right
+  before the latest user message: do not fetch the user's code from GitHub,
+  ask them to switch to 交给 agent instead. Live check: without it the model
+  spent 10 web_fetch rounds on raw.githubusercontent.com (206k input tokens,
+  empty reply); with it, it answered in one round (4k input) and pointed to
+  交给 agent.

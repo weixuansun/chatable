@@ -119,6 +119,17 @@ AGENT_CTX_KEEP_LAST_TOOL_MSGS = 6
 CHAT_CTX_BUDGET_TOKENS = int(os.environ.get("CHATTABLE_CHAT_CTX_BUDGET_TOKENS", "120000"))
 CHAT_CTX_KEEP_LAST_TOOL_MSGS = 2
 
+CHAT_AGENT_BRANCH_NOTE = (
+    "Reminder for THIS message: earlier turns on this branch were done by a coding "
+    "agent in the user's workspace. You are in 对话 (chat) mode and cannot open "
+    "those files. If answering needs the code or files (reading, reviewing, "
+    "running or changing them), do NOT search for or fetch the code on GitHub or "
+    "elsewhere on the web — reply briefly, in the user's language, that 对话 mode "
+    "cannot see the local files and that they should switch the input box to "
+    "「交给 agent」 and send the request again; you may add what you can say from "
+    "the conversation so far. Only use web tools for genuinely external information."
+)
+
 CHAT_MODE_NOTE = (
     "This turn is plain chat mode: you have web tools only and NO access to the "
     "user's local files, workspace or shell (earlier agent runs in this "
@@ -1318,6 +1329,19 @@ class ChatService:
             "created_at": node.created_at,
             "path": [self._node_summary_dict(n) for n in path],
         }
+
+    def _path_has_agent_work(self, nid: str) -> bool:
+        """True when the branch up to *nid* contains agent turns / runs."""
+        try:
+            path = self.store.path_to_root(nid)
+        except Exception:  # noqa: BLE001
+            return False
+        for n in path:
+            md = n.metadata if isinstance(n.metadata, dict) else {}
+            if md.get("orch_run") or md.get("orch_merge") or (
+                    n.role == "assistant" and md.get("agent")):
+                return True
+        return False
 
     def path_messages(self, nid: str) -> list[dict]:
         """root→nid full nodes, for rendering a conversation view.
@@ -3210,6 +3234,14 @@ class ChatService:
         # hunting for the user's code on the web (CHA-6).
         at = 1 if loop_messages and loop_messages[0].get("role") == "system" else 0
         loop_messages.insert(at, {"role": "system", "content": CHAT_MODE_NOTE})
+        if self._path_has_agent_work(user_node.id):
+            # The branch holds agent runs whose files this turn cannot see.
+            # A note far up the prompt was not enough in practice (the model
+            # went to GitHub for 10 rounds instead), so repeat it right before
+            # the latest user message.
+            last_user = max((i for i, m in enumerate(loop_messages)
+                             if m.get("role") == "user"), default=len(loop_messages))
+            loop_messages.insert(last_user, {"role": "system", "content": CHAT_AGENT_BRANCH_NOTE})
 
         emit({
             "type": "assistant_start",

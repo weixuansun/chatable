@@ -210,3 +210,17 @@ def test_chat_loop_shrinks_old_tool_results_past_budget(monkeypatch):
     service_mod._shrink_old_tool_messages(msgs, 100_000, 2)
     sizes = [len(m["content"]) for m in msgs[1:]]
     assert all(s < 3000 for s in sizes[:3]) and all(s > 200_000 for s in sizes[3:])
+
+
+def test_chat_turn_on_an_agent_branch_gets_a_late_reminder(svc):  # noqa: F811
+    from test_agent_loop import tool_call
+    info, _ev, _calls = run_turn(svc, [tool_call("list_dir", path="."), ANSWER])  # agent turn
+    _info2, _ev2, calls = run_turn(svc, [ANSWER], content="review the code",
+                                   agent=False, parent_id=info["assistant_id"])
+    msgs = calls[0]["messages"]
+    last_user = max(i for i, m in enumerate(msgs) if m.get("role") == "user")
+    assert msgs[last_user - 1]["role"] == "system"
+    assert "交给 agent" in msgs[last_user - 1]["content"] and "GitHub" in msgs[last_user - 1]["content"]
+    # a plain chat branch does not get it
+    _i3, _e3, calls3 = run_turn(svc, [ANSWER], content="hi", agent=False)
+    assert not any("Reminder for THIS message" in str(m.get("content")) for m in calls3[0]["messages"])
