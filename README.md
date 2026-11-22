@@ -5,71 +5,35 @@
 
 ![Concept: fork to explore, prune to focus, build your mindmap](image/concept.png)
 
-**Ask once, let AI try several approaches side by side, compare them, and
-keep the best one.** chatable is a conversation tree where chat and code
-changes live on the same map: fork at any turn, hand a node to one or more
-coding agents, and every reply node remembers both the conversation and the
-files at that moment. Agent changes stay in an isolated copy until you click
-**采用 (Adopt)**, and adopting is undoable.
+一个问题，让 AI 同时试几种做法，比一比再挑最好的那个。agent 的改动在你点“采用”之前都在独立副本里，采用之后也能撤销。
 
-## Why chatable
+chatable 是一个树状的 AI 对话工具：每条消息是一个节点，可以从任意节点续问或分叉，几条思路同时往下走，互不干扰。每个节点同时记住对话和代码快照。
 
-The pain points it targets:
+## 它解决什么问题
 
-1. **Chats only go one way.** Trying a different idea means a new chat (and
-   lost context) or rewriting the old one until it is a mess.
-2. **You can't try several approaches — or several agents — at once.** An AI
-   coding session usually commits to one approach; if it's wrong you start
-   over.
-3. **Plans discussed in a chat get copy-pasted into the agent by hand.**
-4. **Agents edit your real project.** When they get it wrong, rolling back is
-   on you.
-5. **Attempts are hard to compare or combine.** Results end up scattered
-   across chats and branches.
-6. **You can't go back to a midpoint.** Returning to turn 5 of the chat
-   leaves the code at turn 10.
+- **对话只能一条线走**：想换个思路，要么新开对话丢掉上下文，要么把原对话搞乱。
+- **没法同时试几种方案、几个 agent**：通常一次只跑一种做法，不满意就推倒重来。
+- **聊清楚的方案还要手动搬给 agent**：网页上讨论完，再复制粘贴到 Claude Code 里。
+- **agent 直接改真实项目**：改坏了要自己 `git stash`、`git reset`，难以回退。
+- **几次尝试难比较、难合并**：各对一半的结果只能手动对 diff。
+- **回不到中间状态**：回到第 5 轮对话时，代码已经是第 10 轮的样子。
 
-How chatable answers them:
+## 怎么用
 
-- **Fork from anywhere (1).** Any message is a fork point; side questions
-  don't pollute the main line, and the tree doubles as a mind map.
-- **Race approaches and agents (2).** One 交给 agent instruction can go to the
-  built-in DeepSeek agent, Claude Code, Codex or Kimi Code at once — each runs
-  on its own branch, and the results sit next to each other on the map.
-- **Chat, then hand off (3).** The same node can switch from 对话 (chat) to
-  交给 agent; the branch's discussion is written into the agent's context
-  file automatically.
-- **Changes stay in an isolated copy until you adopt them (4).** Every run
-  works in a throwaway worktree checked out from its parent node's snapshot;
-  your project directory changes only on Adopt, which backs it up first and
-  can be undone.
-- **Compare and merge (5).** Diff any two nodes, or Shift+click several and
-  merge them (3-way); conflicts and new test failures are handed to a
-  resolver agent.
-- **Conversation and code go back together (6).** Each node stores a file
-  snapshot, so forking from an old node continues from both its context and
-  its files.
+每个节点有两种模式：
 
-Also included, from chatable's research-chat roots:
+- **对话**：只读，可以上网，用来提问和查资料。
+- **交给 agent**：在从父节点快照检出的独立目录里读代码、改代码、跑命令。前面整条分支的讨论会自动写成上下文文件交给 agent。一次可以派给多个 agent，每个各跑一支分支。
 
-- **Private by default.** Your own LLM API key, everything stored on your
-  local filesystem.
-- **Configurable in the browser.** Model, base URL, API key and appearance
-  without restarting.
-- **Bookmarks / read-it-later** and **survey reports** that read a whole
-  tree and write one themed report.
+跑完的结果存成节点快照。不同分支可以比较、合并，有冲突时会自动派 agent 解决。挑中一个之后点“采用”，改动才会写入你的项目，随时可以撤销。
 
-### Status
+## 当前状态
 
-chatable is a local, single-user prototype. Known gaps before the
-"isolated until Adopt" promise holds everywhere:
+原型阶段，单机本地运行，代码在 `orchestrator` 分支。
 
-- The legacy agent-mode toggle still exists; continuing a branch there
-  restores your workspace directory in place instead of using a separate copy.
-- External CLIs (Claude Code, Codex, Kimi Code) run in the isolated worktree
-  but are **not** sandboxed, so they could still write outside it.
-- The macOS Seatbelt sandbox is covered only by unit tests on Linux, and
-  full Claude Code / Codex runs have not been verified end to end yet.
+- 已完成：树状对话、两种模式、多 agent 并行、节点快照、合并与采用、沙箱（Linux 上用 bwrap，默认不联网）。
+- 内置 agent（DeepSeek）已验证；Claude Code、Codex、Kimi Code 已接入，尚未完整实测。
+- 已知限制：Mac 上的 Seatbelt 沙箱未实测；外部 CLI 尚未套沙箱；旧版 agent 模式入口仍会直接改写项目目录，计划移除；旧运行目录不会自动清理。
 
 ## Screenshots
 
