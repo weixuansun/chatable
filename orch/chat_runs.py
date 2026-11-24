@@ -74,8 +74,10 @@ class ChatRunsMixin:
             user.metadata = {"orch_run": True, "executor": agent, "ws_commit": base}
             chat.store.add(user)
             asst = Node.new(role="assistant", content="", parent_id=user.id)
+            run_id = new_id()
             asst.metadata = {"agent": True, "orch_run": True, "executor": agent,
-                             "run_status": "queued", "ws_parent_commit": base}
+                             "run_id": run_id, "run_status": "queued",
+                             "ws_parent_commit": base}
             chat.store.add(asst)
             turn = chat.live.create(asst.id)
             turn.append({"type": "user_node", "id": user.id, "parent_id": parent_id})
@@ -85,10 +87,11 @@ class ChatRunsMixin:
                          "context": {"messages": 0, "estimated_tokens": 0,
                                      "pinned": 0, "shortened": 0, "prefix": ""}})
             run = {
-                "id": new_id(), "from_node": None, "instruction": content,
+                "id": run_id, "from_node": None, "instruction": content,
                 "agent": agent, "after": None, "status": "queued",
                 "created_at": time.time(), "started_at": None, "finished_at": None,
                 "node_id": None, "events": [], "error": "",
+                "steps": [], "steps_done": 0,
                 "chat": {"user_id": user.id, "assistant_id": asst.id,
                          "parent_id": parent_id, "base_commit": base,
                          "extra_context": extra_context or ""},

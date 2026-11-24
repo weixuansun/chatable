@@ -787,6 +787,17 @@ def api_run_merge(body: RunMergeBody) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/run/{run_id}")
+def api_run_detail(run_id: str) -> dict:
+    """Single run, queued/running/finished: status, timing, step trail,
+    changed files (snapshot diff) and the failure reason."""
+    _require_agent()
+    try:
+        return orch.run_detail(run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+
+
 @app.get("/api/orch/state")
 def api_orch_state() -> dict:
     """DAG nodes, runs, executor availability, limits for this project."""

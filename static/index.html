@@ -466,6 +466,58 @@ try {
                   </div>
                 </details>
               </template>
+              <!-- 「交给 agent」运行详情：状态/耗时/当前步骤/改动文件/失败原因，
+                   展开后拉取 GET /api/run/{run_id}，运行中每 2s 轮询 -->
+              <template x-if="m.role === 'assistant' && m.orch_run && m.run_id">
+                <details class="run-detail" @toggle="onRunDetailToggle(m, $event)">
+                  <summary>
+                    <i data-lucide="activity"></i>
+                    <span>运行详情</span>
+                    <span class="run-detail-hint" x-text="runDetailHint(m)"></span>
+                  </summary>
+                  <template x-if="runDetails[m.run_id]">
+                    <div class="run-detail-body">
+                      <div class="run-detail-row">
+                        <span class="run-status" :class="'rs-' + runDetailStatus(m).cls" x-text="runDetailStatus(m).label"></span>
+                        <span x-text="executorLabel(runDetails[m.run_id].agent)"></span>
+                        <template x-if="runDetails[m.run_id].duration_s != null"><span x-text="'· 耗时 ' + runDetails[m.run_id].duration_s + 's'"></span></template>
+                        <span x-text="'· 已执行 ' + runDetails[m.run_id].steps_done + ' 步'"></span>
+                      </div>
+                      <template x-if="runDetails[m.run_id].current_step">
+                        <div class="run-detail-row run-detail-step">
+                          <i data-lucide="chevron-right"></i>
+                          <span x-text="(['queued','running'].includes(runDetails[m.run_id].status) ? '当前步骤：' : '最后一步：')
+                                + runDetails[m.run_id].current_step.name + ' '
+                                + (runDetails[m.run_id].current_step.args_summary || '')"></span>
+                        </div>
+                      </template>
+                      <template x-if="runDetails[m.run_id].error">
+                        <div class="run-detail-error">
+                          <i data-lucide="alert-triangle"></i>
+                          <span x-text="'失败原因：' + runDetails[m.run_id].error"></span>
+                        </div>
+                      </template>
+                      <template x-for="(line, li) in (runDetails[m.run_id].output_tail || [])" :key="li">
+                        <pre class="run-detail-out" x-text="line"></pre>
+                      </template>
+                      <template x-if="runDetails[m.run_id].files && runDetails[m.run_id].files.length">
+                        <div class="run-detail-files">
+                          <template x-for="f in runDetails[m.run_id].files" :key="f.path">
+                            <div class="run-detail-file">
+                              <span class="file-st" :class="'fst-' + f.status" x-text="fileStatusLabel(f.status)"></span>
+                              <span class="file-path" x-text="f.path"></span>
+                              <span class="file-num" x-text="'+' + f.added + ' -' + f.removed"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <template x-if="runDetails[m.run_id].files && !runDetails[m.run_id].files.length && !['queued','running'].includes(runDetails[m.run_id].status)">
+                        <div class="run-detail-row"><span class="run-detail-hint">没有改文件</span></div>
+                      </template>
+                    </div>
+                  </template>
+                </details>
+              </template>
               <!-- body: live text (with … placeholder) while streaming, else persisted -->
               <div class="bubble-wrap">
                 <template x-if="streams[m.id]">
@@ -1873,6 +1925,10 @@ function chatable() {
     composerMode: 'chat',
     runAgents: ['builtin'],
     executors: {},
+    // 「交给 agent」单次运行详情面板：run_id → GET /api/run/{run_id} 的返回；
+    // runDetailOpen 跟踪哪个面板正展开（运行中每 2s 轮询）。
+    runDetails: {},
+    runDetailOpen: {},
     executorOrder: ['builtin', 'kimi', 'claude', 'codex'],
     mapSel: [],
     mapHint: false,
@@ -3367,6 +3423,41 @@ function chatable() {
       const t = m.test;
       if (t) bits.push(t.new_failures ? ('新失败 ' + t.new_failures) : (t.ok ? ('测试通过' + (t.passed != null ? ' ' + t.passed : '')) : ('测试失败 ' + (t.failed || ''))));
       return bits.length ? ' · ' + bits.join(' · ') : '';
+    },
+    // ---- 单次运行详情面板（GET /api/run/{run_id}）----
+    fileStatusLabel(s) {
+      return {A: '新增', M: '修改', D: '删除', R: '改名'}[s] || s || '修改';
+    },
+    runDetailStatus(m) {
+      const d = m && m.run_id && this.runDetails[m.run_id];
+      return this.runStatusOf({run_status: d && d.status}) || {label: '…', cls: 'queued'};
+    },
+    runDetailHint(m) {
+      const d = m && m.run_id && this.runDetails[m.run_id];
+      if (!d) return '';
+      const bits = [];
+      if (d.steps_done) bits.push(d.steps_done + ' 步');
+      if (d.duration_s != null) bits.push(d.duration_s + 's');
+      if (d.files && d.files.length) bits.push('改 ' + d.files.length + ' 个文件');
+      return bits.length ? '· ' + bits.join(' · ') : '';
+    },
+    onRunDetailToggle(m, ev) {
+      const open = ev.target.open;
+      this.runDetailOpen = {...this.runDetailOpen, [m.run_id]: open};
+      if (open) this._pollRunDetail(m.run_id);
+    },
+    async _pollRunDetail(runId) {
+      if (!this.runDetailOpen[runId]) return;
+      try {
+        const r = await fetch('/api/run/' + encodeURIComponent(runId));
+        if (!r.ok) return;
+        const d = await r.json();
+        this.runDetails = {...this.runDetails, [runId]: d};
+        this.refreshIcons();
+        if (this.runDetailOpen[runId] && ['queued', 'running'].includes(d.status)) {
+          setTimeout(() => this._pollRunDetail(runId), 2000);
+        }
+      } catch (e) { /* transient network error: the next toggle retries */ }
     },
     // The branch being continued has agent work on it (runs / legacy agent
     // turns): in 对话 mode the model can't see those files — say so.

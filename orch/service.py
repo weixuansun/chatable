@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import threading
 import time
 from typing import Iterator, Optional
 
-from orch.chat_runs import ChatRunsMixin
+from orch.chat_runs import ChatRunsMixin, _args_summary
 from orch.context import (PROMPT_TEMPLATE, build_chat_context, detect_test_cmd,
                           parse_conclusion, write_chat_context, write_context)
 from orch.executors import RUN_TIMEOUT_S, default_executors
@@ -26,6 +27,88 @@ from workspace import WorkspaceError
 
 TEST_TIMEOUT_S = int(os.environ.get("CHATTABLE_ORCH_TEST_TIMEOUT_S", "300"))
 _EVENT_CAP_PER_RUN = 300
+_STEP_CAP_PER_RUN = 200
+_STEP_OUTPUT_CAP = 300
+
+
+def _record_step(steps: list[dict], ev: dict) -> bool:
+    """Fold one executor event into the compact, persisted step trail
+    (tool name, args summary, time, ok/error). True when a step closed."""
+    typ = ev.get("type")
+    if typ == "tool_call":
+        name = str(ev.get("name") or "tool")
+        args = ev.get("arguments") if isinstance(ev.get("arguments"), dict) else {}
+        steps.append({"id": ev.get("id"), "name": name,
+                      "args_summary": _args_summary(name, args),
+                      "at": ev.get("at") or time.time(), "ok": None})
+        if len(steps) > _STEP_CAP_PER_RUN:
+            del steps[:-_STEP_CAP_PER_RUN]
+        return False
+    if typ == "tool_result":
+        cid = ev.get("id")
+        match = None
+        if cid is not None:
+            for s in reversed(steps):
+                if s.get("ok") is None and s.get("id") == cid:
+                    match = s
+                    break
+        if match is None:
+            for s in steps:
+                if s.get("ok") is None:
+                    match = s
+                    break
+        if match is None:
+            return False
+        match["ok"] = ev.get("ok") is not False
+        output = str(ev.get("output") or "")
+        if output:
+            match["output"] = output[:_STEP_OUTPUT_CAP]
+        return True
+    return False
+
+
+def _live_worktree_files(wt: str, base: str) -> list[dict]:
+    """Files a running agent has changed so far, read-only.
+
+    Polled every couple of seconds by the UI, so it must not commit or take
+    the worktree's index lock (that would race the agent and the run's final
+    snapshot): working tree vs ``base`` via ``git diff`` with optional locks
+    off, plus untracked files.
+    """
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+
+    def git(*args: str) -> str:
+        r = subprocess.run(["git", "-C", wt, *args], capture_output=True,
+                           text=True, env=env, timeout=10)
+        return r.stdout if r.returncode == 0 else ""
+
+    try:
+        status = {}
+        for line in git("diff", "--name-status", base).splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                status[parts[-1]] = parts[0][:1]
+        files = []
+        for line in git("diff", "--numstat", base).splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            add, rem, path = parts
+            files.append({"path": path, "status": status.get(path, "M"),
+                          "added": int(add) if add.isdigit() else 0,
+                          "removed": int(rem) if rem.isdigit() else 0})
+        for path in git("ls-files", "--others", "--exclude-standard").splitlines():
+            if not path or path.startswith(".chatable/"):
+                continue
+            try:
+                with open(os.path.join(wt, path), "rb") as fh:
+                    added = fh.read(2_000_000).count(b"\n")
+            except OSError:
+                added = 0
+            files.append({"path": path, "status": "A", "added": added, "removed": 0})
+        return files
+    except Exception:  # noqa: BLE001 - detail is best-effort
+        return []
 
 
 def _parse_limits() -> dict[str, int]:
@@ -185,6 +268,80 @@ class OrchService(ChatRunsMixin):
     def node_detail(self, node_id: str) -> dict:
         return self.store.nodes[node_id]  # KeyError → 404
 
+    def _run_files(self, base: str, end: str) -> list[dict]:
+        """Changed files base→end with git status (A/M/D…) + line counts."""
+        try:
+            return [{"path": f["path"], "status": f.get("status", "M"),
+                     "added": f["additions"], "removed": f["deletions"]}
+                    for f in self.shadow.diff_numstat(base, end)]
+        except Exception:  # noqa: BLE001 - detail is best-effort
+            return []
+
+    def run_detail(self, run_id: str) -> dict:
+        """One run, queued/running/finished: timing, step trail, changed
+        files (snapshot diff), failure reason. KeyError → 404."""
+        run = self.store.runs.get(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        status = run.get("status") or "queued"
+        started = run.get("started_at")
+        finished = run.get("finished_at")
+        duration = round((finished or time.time()) - started, 1) if started else None
+        chat = run.get("chat") or {}
+        user_id = chat.get("user_id")
+        assistant_id = chat.get("assistant_id")
+        node_id = run.get("node_id")
+        base, end = None, None
+        if chat:
+            base = chat.get("base_commit")
+            if assistant_id and self.chat.store.exists(assistant_id):
+                md = self.chat.store.get(assistant_id).metadata or {}
+                end = md.get("ws_commit")
+        else:
+            parent = self.store.nodes.get(run.get("from_node") or "")
+            base = (parent or {}).get("snapshot")
+            node = self.store.nodes.get(node_id or "")
+            end = (node or {}).get("snapshot")
+        files: list[dict] = []
+        if base:
+            if end and end != base:
+                files = self._run_files(base, end)
+            elif status == "running":
+                # Mid-run: snapshot whatever the worktree currently holds.
+                wt = os.path.join(self.runs_dir, run_id, "wt")
+                if os.path.isdir(wt):
+                    files = _live_worktree_files(wt, base)
+        steps = run.get("steps")
+        if steps is None:  # runs recorded before the step trail existed
+            steps = []
+            for ev in run.get("events") or []:
+                _record_step(steps, ev)
+        steps_done = run.get("steps_done")
+        if steps_done is None:
+            steps_done = sum(1 for s in steps if s.get("ok") is not None)
+        current = next((s for s in reversed(steps) if s.get("ok") is None), None)
+        if current is None and steps:
+            current = steps[-1]
+        out = {
+            "id": run["id"], "agent": run.get("agent"), "status": status,
+            "instruction": run.get("instruction") or "",
+            "created_at": run.get("created_at"), "started_at": started,
+            "finished_at": finished, "duration_s": duration,
+            "user_id": user_id, "assistant_id": assistant_id, "node_id": node_id,
+            "steps_done": steps_done,
+            "current_step": ({k: current.get(k) for k in ("name", "args_summary", "ok")}
+                             if current else None),
+            "steps": steps[-_STEP_CAP_PER_RUN:],
+            "files": files,
+            "error": run.get("error") or "",
+        }
+        if status in ("failed", "cancelled"):
+            tail = [s["output"] for s in steps if s.get("ok") is False and s.get("output")]
+            if not tail:
+                tail = [s["output"] for s in steps if s.get("output")]
+            out["output_tail"] = tail[-3:]
+        return out
+
     # ------------------------------------------------------------------ #
     # submit / cancel
     # ------------------------------------------------------------------ #
@@ -208,6 +365,7 @@ class OrchService(ChatRunsMixin):
                     "status": "queued", "created_at": time.time(),
                     "started_at": None, "finished_at": None,
                     "node_id": None, "events": [], "error": "",
+                    "steps": [], "steps_done": 0,
                 }
                 self.store.add_run(run)
                 created.append(run["id"])
@@ -308,6 +466,9 @@ class OrchService(ChatRunsMixin):
         wt = os.path.join(self.runs_dir, run_id, "wt")
         t0 = time.monotonic()
         events: list[dict] = []
+        steps: list[dict] = []
+        steps_done = 0
+        steps_saved_at = 0.0
         result = {"final_text": "", "exit_code": -1, "session_id": None,
                   "usage": {}, "killed": None}
         error = ""
@@ -356,6 +517,19 @@ class OrchService(ChatRunsMixin):
                 self._emit({"type": "run_event", "run_id": run_id, "event": ev})
                 if chat:
                     self._chat_event(run, ev, chat_state)
+                if _record_step(steps, ev):
+                    steps_done += 1
+                # Persist the compact step trail as the run progresses (the
+                # full event log only lands at the end), throttled to ~1/s.
+                if ev.get("type") in ("tool_call", "tool_result"):
+                    now = time.monotonic()
+                    if ev["type"] == "tool_result" or now - steps_saved_at > 1.0:
+                        steps_saved_at = now
+                        try:
+                            self.store.update_run(run_id, steps=list(steps),
+                                                  steps_done=steps_done)
+                        except Exception:  # noqa: BLE001 - detail is best-effort
+                            pass
                 if ev.get("type") == "result":
                     result = ev
         except Exception as e:  # noqa: BLE001 - a failed run still produces a node
@@ -406,7 +580,8 @@ class OrchService(ChatRunsMixin):
         if chat:
             self.store.update_run(run_id, status=status, node_id=chat["assistant_id"],
                                   finished_at=time.time(), error=error,
-                                  events=events[-_EVENT_CAP_PER_RUN:])
+                                  events=events[-_EVENT_CAP_PER_RUN:],
+                                  steps=list(steps), steps_done=steps_done)
             try:
                 self._chat_run_finished(
                     run, status=status, end_commit=end_commit, base=parent["snapshot"],
@@ -434,7 +609,8 @@ class OrchService(ChatRunsMixin):
         self.store.add_node(node)
         self.store.update_run(run_id, status=status, node_id=node["id"],
                               finished_at=time.time(), error=error,
-                              events=events[-_EVENT_CAP_PER_RUN:])
+                              events=events[-_EVENT_CAP_PER_RUN:],
+                              steps=list(steps), steps_done=steps_done)
         self._emit({"type": "run_finished", "run_id": run_id,
                     "status": status, "node_id": node["id"]})
         self._emit({"type": "node_created", "node": node})
@@ -631,6 +807,7 @@ class OrchService(ChatRunsMixin):
             "status": "queued", "created_at": time.time(),
             "started_at": None, "finished_at": None,
             "node_id": None, "events": [], "error": "",
+            "steps": [], "steps_done": 0,
             "merge": merge_ctx,
         }
         self.store.add_run(run)

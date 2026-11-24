@@ -1033,6 +1033,8 @@ class ChatService:
                "run_status": md.get("run_status"),
                "orch_merge": bool(md.get("orch_merge")),
                "merged_from": md.get("merged_from") or []}
+        if md.get("run_id"):
+            out["run_id"] = md.get("run_id")
         if "files_changed" in md:
             out["files_changed"] = md.get("files_changed")
         test = ((md.get("facts") or {}).get("test")) or None
