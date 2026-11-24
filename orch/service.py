@@ -87,6 +87,40 @@ class OrchService(ChatRunsMixin):
         self._emit({"type": "node_created", "node": node})
         return node
 
+    def busy(self) -> bool:
+        """True while any orchestrator run is queued or running."""
+        return any(r.get("status") in ("queued", "running")
+                   for r in self.store.runs.values())
+
+    def rebind(self) -> None:
+        """Follow the chat service onto its current data folder.
+
+        The service's store may be swapped after construction (``--data-dir``
+        at launch, or the storage folder in settings); without this the
+        orchestrator kept writing runs, snapshots and its node store under the
+        folder it was created with. Refuses while runs are queued/running.
+        """
+        with self._cond:
+            if self.busy():
+                raise RuntimeError("cannot switch storage while agent runs are queued or running")
+            data_dir = self.chat.data_dir()
+            workspace = self.chat.workspace()
+            if data_dir == self.data_dir and workspace.root == self.workspace.root:
+                return
+            self.workspace = workspace
+            self.shadow = self.chat.shadow_git()
+            self.data_dir = data_dir
+            self.project_id = hashlib.sha1(self.workspace.root.encode()).hexdigest()[:12]
+            self.store = OrchStore(os.path.join(self.data_dir, "orch",
+                                                f"{self.project_id}.jsonl"))
+            self.runs_dir = os.path.join(self.data_dir, "orch", "runs")
+            self._test_cache.clear()
+            self._chat_turns.clear()
+            self._chat_run_by_asst.clear()
+            self._ensure_root()
+            self._recover_chat_runs()
+            self._cond.notify_all()
+
     def _recover_chat_runs(self) -> None:
         """Chat runs interrupted by a server restart: mark them failed so
         their nodes don't spin forever (queued ones simply run again)."""

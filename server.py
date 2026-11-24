@@ -334,8 +334,13 @@ def api_settings(body: SettingsBody) -> dict:
 
     # Storage folder
     if body.data_dir is not None and body.data_dir.strip():
+        if orch.busy():
+            raise HTTPException(
+                status_code=409,
+                detail="an agent run is queued or running; stop it before changing storage")
         try:
             service.rebind_store(body.data_dir.strip())
+            orch.rebind()
             # Persist so the next launch opens this folder without re-selecting.
             llm.persist_config(
                 data_dir=os.path.abspath(os.path.expanduser(body.data_dir.strip()))
@@ -1051,8 +1056,10 @@ def main() -> None:
 
     if args.data_dir:
         # Rebind the module-global service onto the chosen folder before serving.
-        global service
-        service = ChatService(TreeStore(db_path=resolve_db_path(args.data_dir)))
+        # Rebind in place: `orch` (and its queue thread) hold this same
+        # service object, so swapping the object would leave them behind.
+        service.rebind_store(args.data_dir)
+        orch.rebind()
 
     # The Host allowlist must know the ACTUAL bind host (CLI --host wins over
     # the CHATTABLE_WEB_HOST env fallback captured at import time).

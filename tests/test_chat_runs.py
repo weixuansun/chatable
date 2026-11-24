@@ -227,3 +227,39 @@ def test_build_chat_context_layers(tmp_path):
     assert "older turns" in ctx and "- User: msg 0" in ctx
     assert "### Assistant\nmsg 9" in ctx and "Test command: `pytest -q`" in ctx
     assert ctx.rstrip().endswith("do it") and "## Merge" in ctx
+
+
+@git_required
+def test_orch_follows_chat_store_rebind(tmp_path, monkeypatch):
+    """--data-dir / the settings storage switch rebind the chat service in
+    place; the orchestrator must move its store, runs and shadow repo too."""
+    monkeypatch.delenv("CHATTABLE_WORKSPACE", raising=False)
+    chat = ChatService(TreeStore(str(tmp_path / "old" / "chatable.jsonl")))
+    orch = OrchService(chat, executors={"a": WriterExecutor("a.txt")})
+    assert orch.data_dir == str(tmp_path / "old")
+    chat.rebind_store(str(tmp_path / "new"))
+    orch.rebind()
+    new = str(tmp_path / "new")
+    assert orch.data_dir == new
+    assert orch.workspace.root.startswith(os.path.realpath(new))
+    assert orch.runs_dir == os.path.join(new, "orch", "runs")
+    assert os.path.isdir(os.path.join(new, "orch"))
+    assert orch.store.root_node()  # fresh root in the new folder
+
+    os.makedirs(orch.workspace.root, exist_ok=True)
+    runs = orch.start_chat_runs("write a", ROOT_ID, ["a"])
+    _events, md = _wait(chat, runs[0]["assistant_id"])
+    assert md["run_status"] == "ok"
+    assert os.path.isdir(os.path.join(new, "orch", "runs"))
+    assert not os.path.exists(tmp_path / "old" / "orch" / "runs")
+
+
+@git_required
+def test_orch_rebind_refuses_while_busy(tmp_path, monkeypatch):
+    chat, orch = _svc(tmp_path, monkeypatch, {"a": WriterExecutor("a.txt", sleep=2)})
+    orch.start_chat_runs("write a", ROOT_ID, ["a"])
+    assert orch.busy()
+    with pytest.raises(RuntimeError):
+        orch.rebind()
+    for r in list(orch.store.runs.values()):
+        orch.cancel_run(r["id"])
