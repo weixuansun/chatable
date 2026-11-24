@@ -31,6 +31,7 @@ import hmac
 import ipaddress
 import json
 import os
+import shutil
 from http.cookies import SimpleCookie
 from typing import Optional
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
@@ -366,6 +367,44 @@ def api_settings(body: SettingsBody) -> dict:
             raise HTTPException(status_code=400, detail=f"model: {e}")
 
     return service.config()
+
+
+@app.post("/api/sample-project")
+def api_sample_project() -> dict:
+    """Copy the bundled sample project into <data_dir>/sample-project (never
+    overwriting an existing copy) and make it the agent project directory —
+    the onboarding "用示例项目试一试" button.
+
+    Follows the same rules as the workspace branch of /api/settings: the
+    CHATTABLE_WORKSPACE env var pins the directory (400), and a switch is
+    refused while an agent run is queued/running (409).
+    """
+    if os.environ.get("CHATTABLE_WORKSPACE", "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="workspace: pinned by CHATTABLE_WORKSPACE; unset it to choose one here")
+    bundled = os.path.join(HERE, "examples", "sample-project")
+    if not os.path.isdir(bundled):
+        raise HTTPException(status_code=404, detail="bundled sample project not found")
+    dest = os.path.join(service.data_dir(), "sample-project")
+    created = not os.path.exists(dest)
+    if created:
+        shutil.copytree(bundled, dest)
+    try:
+        target = service.validate_workspace_dir(dest)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"workspace: {e}")
+    if target != service.workspace().root and orch.busy():
+        raise HTTPException(
+            status_code=409,
+            detail="an agent run is queued or running; stop it before changing "
+                   "the project directory")
+    llm.persist_config(workspace_dir=target)
+    try:
+        orch.rebind()
+    except RuntimeError as e:  # a run slipped in between the check and now
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "path": target, "created": created, "config": service.config()}
 
 
 @app.get("/api/tree")

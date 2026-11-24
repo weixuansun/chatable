@@ -164,11 +164,76 @@ try {
           <template x-if="settingsError">
             <div class="modal-err" x-text="settingsError"></div>
           </template>
+
+          <hr class="sep" />
+          <p class="hint">第一次用？
+            <button class="link-btn" @click="closeSettings(); openOnboarding()">重新打开新手引导</button>
+          </p>
         </div>
         <div class="modal-foot">
           <button class="btn-ghost" @click="closeSettings()">Cancel</button>
           <button class="btn-primary" @click="saveSettings()" :disabled="settingsSaving"
                   x-text="settingsSaving ? 'Saving…' : 'Apply'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- onboarding: 3-step first-run guide. Auto-opens on a first run with no
+       conversations (unless localStorage chatable.onboarded); reopenable from
+       the settings modal. -->
+  <template x-if="onboard.open">
+    <div class="modal-backdrop" @click.self="dismissOnboarding(false)">
+      <div class="modal onboard-modal" @keydown="trapModalTab($event)">
+        <div class="modal-head">
+          <h2><i data-lucide="sprout"></i><span>欢迎使用 chatable</span></h2>
+          <button class="icon-btn" @click="dismissOnboarding(false)" title="Close (Esc)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <div class="onb-dots">
+            <template x-for="(s, i) in ONBOARD_STEPS" :key="i">
+              <button class="onb-dot" :class="{on: onboard.step === i}" @click="onboard.step = i"
+                      :title="s.title"></button>
+            </template>
+          </div>
+          <div class="onb-demo">
+            <!-- ① 对话与分叉：一条主线，从中间节点分出两支 -->
+            <div class="onb-tree" x-show="onboard.step === 0">
+              <span class="onb-node"></span><i class="onb-line"></i><span class="onb-node"></span>
+              <i class="onb-line"></i>
+              <div class="onb-branchrow"><span class="onb-node"></span><span class="onb-node accent"></span></div>
+            </div>
+            <!-- ② 交给 agent：一条指令同时派给多个 agent，各自在独立副本里执行 -->
+            <div class="onb-agents" x-show="onboard.step === 1">
+              <span class="onb-cmd">指令</span><span class="onb-arrow">→</span>
+              <span class="onb-agentcard"><i data-lucide="bot"></i>agent A</span>
+              <span class="onb-agentcard"><i data-lucide="bot"></i>agent B</span>
+            </div>
+            <!-- ③ 比较、合并、采用 -->
+            <div class="onb-merge" x-show="onboard.step === 2">
+              <span class="onb-node"></span><span class="onb-node"></span>
+              <span class="onb-arrow">→</span>
+              <span class="onb-adopt"><i data-lucide="git-merge"></i>采用</span>
+            </div>
+          </div>
+          <h3 class="onb-title" x-text="ONBOARD_STEPS[onboard.step].title"></h3>
+          <p class="onb-text" x-text="ONBOARD_STEPS[onboard.step].text"></p>
+          <template x-if="onboard.error">
+            <div class="modal-err" x-text="onboard.error"></div>
+          </template>
+        </div>
+        <div class="modal-foot onboard-foot">
+          <button class="btn-ghost" @click="dismissOnboarding(false)">跳过</button>
+          <button class="btn-ghost" @click="dismissOnboarding(true)">不再显示</button>
+          <span class="onb-spacer"></span>
+          <button class="btn-ghost" x-show="onboard.step > 0" @click="onboard.step--">上一步</button>
+          <button class="btn-primary" x-show="onboard.step < ONBOARD_STEPS.length - 1"
+                  @click="onboard.step++; refreshIcons()">下一步</button>
+          <template x-if="onboard.step === ONBOARD_STEPS.length - 1">
+            <button class="btn-primary" @click="trySampleProject()" :disabled="onboard.busy"
+                    title="把内置示例项目复制到数据目录并设为项目目录，然后预填一条 agent 指令"
+                    x-text="onboard.busy ? '准备中…' : '用示例项目试一试'"></button>
+          </template>
         </div>
       </div>
     </div>
@@ -1836,6 +1901,14 @@ function chatable() {
     dragActive: false, _dragDepth: 0,
     // Settings modal (model + storage). Persisted to settings.json.
     settingsOpen: false, settingsSaving: false, settingsError: '',
+    // First-run onboarding (3-step guide). Auto-opens when the tree is empty
+    // and localStorage 'chatable.onboarded' is unset; reopenable from settings.
+    onboard: {open: false, step: 0, busy: false, error: ''},
+    ONBOARD_STEPS: [
+      {title: '① 对话与分叉', text: '在下方输入问题开始对话；点任意回复下的「追问」，就从那里分叉出新分支，互不影响。'},
+      {title: '② 交给 agent', text: '切到「交给 agent」：指令在项目目录的独立副本里执行、改代码；同一条指令可以同时派给多个 agent。'},
+      {title: '③ 比较、合并、采用', text: '每个任务生成一个节点：看改动、做对比、多选合并；只有点「采用」才写回真实项目目录，随时可撤销。'},
+    ],
     // Appearance (theme + chat font size), persisted to localStorage.
     appearance: { theme: 'midnight', fontSize: 14 },
     FONT_SIZES: [12, 13, 14, 15, 16, 17, 18],
@@ -2001,10 +2074,13 @@ function chatable() {
       // page refresh mid-stream): generation runs detached from the connection,
       // so we resume watching instead of losing the reply.
       this.reconnectActive();
+      // First run (empty tree, not yet dismissed): show the 3-step guide.
+      this.maybeShowOnboarding();
 
-      // Escape closes the topmost overlay: report > bookmark modal > mind map > settings > gallery > bookmarks > drawer.
+      // Escape closes the topmost overlay: onboarding > report > bookmark modal > mind map > settings > gallery > bookmarks > drawer.
       window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
+        if (this.onboard.open) { this.dismissOnboarding(false); return; }
         if (this.quotePop.show) { this.quotePop.show = false; return; }
         if (this.effortOpen) { this.effortOpen = false; return; }
         if (this.nodeMenu.node) { this.nodeMenu.node = null; return; }
@@ -2110,6 +2186,51 @@ function chatable() {
     useSuggestion(text) {
       this.draft = text;
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
+    },
+
+    // ---- first-run onboarding --------------------------------------------
+
+    openOnboarding() {
+      this.onboard = {open: true, step: 0, busy: false, error: ''};
+      this.refreshIcons();
+    },
+    // forever=true also marks it seen (localStorage) so it never auto-opens.
+    dismissOnboarding(forever) {
+      this.onboard.open = false;
+      if (forever) { try { localStorage.setItem('chatable.onboarded', '1'); } catch (e) {} }
+    },
+    // Called once at the end of init(): first run = no conversations yet.
+    maybeShowOnboarding() {
+      let seen = false;
+      try { seen = !!localStorage.getItem('chatable.onboarded'); } catch (e) {}
+      if (!seen && !(this.tree.children && this.tree.children.length)) this.openOnboarding();
+    },
+    // "用示例项目试一试": copy the bundled sample project, make it the agent
+    // project directory, and prefill a fix-the-tests instruction.
+    async trySampleProject() {
+      if (this.onboard.busy) return;
+      this.onboard.busy = true;
+      this.onboard.error = '';
+      try {
+        const resp = await fetch('/api/sample-project', {method: 'POST'});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || ('HTTP ' + resp.status));
+        if (data.config) {
+          this.config = data.config;
+          if (this.config.agent) this.agent = this.config.agent;
+        }
+        this.dismissOnboarding(true);
+        toast('示例项目已就绪：' + data.path, 'success');
+        // Switch to agent mode (toasts and stays in chat mode if unavailable),
+        // then prefill the instruction for the user to send.
+        this.setComposerMode('agent');
+        this.useSuggestion('修复这个示例项目里失败的测试，让 pytest 全部通过');
+      } catch (e) {
+        this.onboard.error = String(e && e.message || e);
+      } finally {
+        this.onboard.busy = false;
+        this.refreshIcons();
+      }
     },
 
     // ---- attachments (drag-and-drop / paperclip upload) -------------------

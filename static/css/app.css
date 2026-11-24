@@ -1620,3 +1620,36 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .run-notice.info .lucide { color: var(--accent); }
 .mode-hint-chat { align-items: center; color: var(--dim); }
 .mode-hint-chat .fork-btn { height: 22px; }
+
+/* first-run onboarding modal (3-step guide + sample project) */
+.onboard-modal { width: 520px; }
+.onboard-foot { align-items: center; }
+.onboard-foot .onb-spacer { flex: 1; }
+.onb-dots { display: flex; gap: 6px; justify-content: center; margin: 2px 0 14px; }
+.onb-dot { width: 8px; height: 8px; border-radius: 50%; border: 0; padding: 0; cursor: pointer;
+  background: var(--border-2); transition: background .15s; }
+.onb-dot.on { background: var(--accent); }
+.onb-demo { height: 120px; display: flex; align-items: center; justify-content: center;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; }
+.onb-tree { display: flex; flex-direction: column; align-items: center; }
+.onb-node { width: 12px; height: 12px; border-radius: 50%; background: var(--dim-2); flex: none; }
+.onb-node.accent { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.onb-line { width: 2px; height: 12px; background: var(--border-2); }
+.onb-branchrow { display: flex; gap: 56px; position: relative; padding-top: 12px; }
+.onb-branchrow::before { content: ""; position: absolute; top: 0; left: calc(50% - 34px); width: 68px; height: 12px;
+  border: 2px solid var(--border-2); border-bottom: 0; border-radius: 8px 8px 0 0; box-sizing: border-box; }
+.onb-agents, .onb-merge { display: flex; align-items: center; gap: 10px; }
+.onb-cmd { background: var(--accent-soft); color: var(--accent); border-radius: 999px;
+  padding: 5px 12px; font-size: 12px; font-weight: 500; }
+.onb-arrow { color: var(--dim-2); font-style: normal; }
+.onb-agentcard { display: flex; align-items: center; gap: 6px; background: var(--card);
+  border: 1px solid var(--border); border-radius: 10px; padding: 7px 12px; font-size: 12px; color: var(--dim); }
+.onb-agentcard .lucide { width: 14px; height: 14px; color: var(--accent); }
+.onb-adopt { display: flex; align-items: center; gap: 6px; background: var(--ok-soft); color: var(--ok);
+  border-radius: 999px; padding: 6px 14px; font-size: 12.5px; font-weight: 500; }
+.onb-adopt .lucide { width: 14px; height: 14px; }
+.onb-title { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.onb-text { margin: 0 0 4px; font-size: 13.5px; line-height: 1.65; color: var(--dim); }
+.hint .link-btn { background: transparent; border: 0; color: var(--accent); font-size: 12px;
+  cursor: pointer; padding: 0; }
+.hint .link-btn:hover { text-decoration: underline; }
