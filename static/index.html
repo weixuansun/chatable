@@ -419,7 +419,7 @@ try {
                             <template x-for="s in [row.step]" :key="s.id">
                               <div class="step-card" :class="'st-' + s.status" :id="'step-' + s.id"
                                    x-show="!row.hiddenBy || expandedGroups[row.hiddenBy]">
-                                <details :open="s.status === 'pending_approval' || (s.status === 'running' && s.tool === 'run_shell')">
+                                <details :open="s.status === 'running' && s.tool === 'run_shell'">
                                   <summary>
                                     <i :data-lucide="stepIcon(s.tool)"></i>
                                     <span class="tool-name" x-text="s.tool"></span>
@@ -428,34 +428,6 @@ try {
                                     <template x-if="s.duration_ms"><span class="tool-ms" x-text="s.duration_ms + 'ms'"></span></template>
                                   </summary>
                                   <div class="step-body">
-                                    <!-- approval card: accent-bordered, shown while the
-                                         server-side turn waits for a decision -->
-                                    <template x-if="s.status === 'pending_approval'">
-                                      <div class="approval-card">
-                                        <div class="approval-head">
-                                          <i data-lucide="shield-alert"></i>
-                                          <span x-text="s.tool === 'run_shell' ? 'Approve this command?' : 'Approve this change?'"></span>
-                                        </div>
-                                        <template x-if="s.preview_diff">
-                                          <div class="diff-view" x-html="renderDiff(s.preview_diff)"></div>
-                                        </template>
-                                        <template x-if="!s.preview_diff">
-                                          <pre class="tool-out" x-text="s.tool === 'run_shell' ? (s.args.command || '') : JSON.stringify(s.args, null, 1)"></pre>
-                                        </template>
-                                        <div class="approval-actions">
-                                          <button class="btn-primary btn-sm" :disabled="s.deciding"
-                                                  @click="approveStep(s, 'approve')"><i data-lucide="check"></i> Approve</button>
-                                          <button class="btn-ghost danger btn-sm" :disabled="s.deciding"
-                                                  @click="approveStep(s, 'deny')"><i data-lucide="x"></i> Deny</button>
-                                          <button class="btn-ghost btn-sm" :disabled="s.deciding"
-                                                  @click="approveStep(s, 'approve', true)"
-                                                  x-text="'Always allow ' + s.tool"></button>
-                                          <button class="btn-ghost btn-sm" :disabled="s.deciding"
-                                                  x-show="s.tool === 'write_file' || s.tool === 'edit_file'"
-                                                  @click="approveStep(s, 'approve', true, 'writes')"> Always allow all writes</button>
-                                        </div>
-                                      </div>
-                                    </template>
                                     <!-- live shell output while the command runs -->
                                     <template x-if="s.tool === 'run_shell' && s.liveOutput && !s.result">
                                       <pre class="step-term" :id="'term-' + s.id" x-text="s.liveOutput"></pre>
@@ -553,7 +525,7 @@ try {
                         <i data-lucide="git-merge"></i>采用
                       </button>
                       <button class="fork-btn" @click="forkFromHere(m.id)"
-                              title="Fork from here：从这个节点分叉；发送时工作区会先恢复到此节点的快照">
+                              title="Fork from here：从这个节点分叉；之后「交给 agent」会在该节点快照的独立工作区里执行（不动真实目录）">
                         <i data-lucide="git-branch"></i>从此分叉
                       </button>
                     </span>
@@ -667,12 +639,6 @@ try {
                 ? 'shell commands run in a ' + (agent.sandbox === 'seatbelt' ? 'macOS Seatbelt (sandbox-exec)' : 'bubblewrap') + ' sandbox · network ' + (agent.shell_network ? 'ON' : 'OFF')
                 : (agent.sandbox_warning || 'shell commands are NOT sandboxed')"
               x-text="(agent.sandbox === 'bwrap' || agent.sandbox === 'seatbelt') ? ('sandbox: ' + agent.sandbox + (agent.shell_network ? '' : ' · no net')) : 'no sandbox'"></span>
-        <!-- session auto-approvals for this conversation; click to reset -->
-        <button class="ctx-map-btn auto-approve-pill" x-show="agentMode && sessionAutoApprove.length"
-                @click="resetAutoApprove()"
-                :title="'Auto-approving in this conversation: ' + sessionAutoApprove.join(', ') + ' — click to reset'">
-          <i data-lucide="zap"></i><span x-text="'auto: ' + sessionAutoApprove.join(', ')"></span><i data-lucide="x"></i>
-        </button>
       </div>
       <div class="mode-hint mode-hint-chat" x-show="composerMode === 'chat' && agent.available && chatOnAgentBranch">
         <i data-lucide="info"></i>
@@ -1217,7 +1183,7 @@ try {
                       <i data-lucide="git-merge"></i>
                     </button>
                     <button class="map-del-btn" @click.stop="mapForkFrom(mn.replyId || mn.id)"
-                            title="Fork from here：从此节点分叉（发送前恢复它的快照）">
+                            title="Fork from here：从此节点分叉（之后「交给 agent」会在该节点快照的独立工作区里执行，不动真实目录）">
                       <i data-lucide="git-branch"></i>
                     </button>
                   </span>
@@ -1890,8 +1856,7 @@ function chatable() {
     totals: {turns: 0, in: 0, out: 0, cache_read: 0, cache_creation: 0},
 
     // Agent mode (workspace file/shell tools; see docs/agent-api.md). `agent`
-    // is the server status from /api/config; `agentMode` is the toggle for the
-    // current conversation (mirrored to the server for existing conversations).
+    // is the server status from /api/config.
     agent: {available: false, reason: '', workspace: '', auto_approve: []},
     // CHA-5: one switch — 'chat' (plain reply) or 'agent' (isolated run).
     composerMode: 'chat',
@@ -1900,9 +1865,6 @@ function chatable() {
     executorOrder: ['builtin', 'kimi', 'claude', 'codex'],
     mapSel: [],
     mapHint: false,
-    agentMode: false,
-    // Tools auto-approved ("always") for the current conversation's session.
-    sessionAutoApprove: [],
     // Step detail/diff modal (chat timeline "View diff", mind-map step detail).
     stepModal: {open: false, isNode: false, files: [], title: '', diff: '', result: '', ws_commit: null,
                 nodeId: null, loading: false},
@@ -2824,7 +2786,6 @@ function chatable() {
       // Default scroll lands at the END of the node's reply (conversation bottom).
       const resolved = this.forkParentId(id);
       this.selectedId = resolved;
-      this.syncAgentApprovals();  // grants are branch-scoped; refresh the pill
       this.drawerOpen = false;
       await this.loadPath(resolved, scrollMode);
       // Reveal the selection inside the default-collapsed tree: expand its
@@ -2880,7 +2841,6 @@ function chatable() {
     newTrunk() { this.selectedId = null; this.messages = []; },
     forkFromHere(id) {
       this.selectedId = id;
-      this.syncAgentApprovals();  // grants are branch-scoped; refresh the pill
       this.refreshIcons();
       this.$nextTick(() => { const el = this.$refs.composerInput; if (el) el.focus(); });
     },
@@ -3306,7 +3266,7 @@ function chatable() {
                            m.id, 'Continue the task from where you stopped.', []);
     },
 
-    // ---- agent mode (workspace tools, steps, approvals, snapshots) ---------
+    // ---- agent mode (workspace tools, steps, snapshots) --------------------
 
     // ---- CHA-5: 对话 | 交给 agent ------------------------------------------
     loadComposerMode() {
@@ -3337,7 +3297,6 @@ function chatable() {
         return;
       }
       this.composerMode = m;
-      this.agentMode = false;   // the old in-place agent loop is retired from the UI
       try { localStorage.setItem('chatable.composerMode', m); } catch (e) {}
       if (m === 'agent' && !Object.keys(this.executors).length) this.loadExecutors();
       this.refreshIcons();
@@ -3502,82 +3461,6 @@ function chatable() {
       try { localStorage.setItem('chatable.mapHintSeen', '1'); } catch (e) {}
     },
 
-    agentTooltip() {
-      if (!this.agent.available) {
-        return this.agent.reason || 'Agent mode is unavailable';
-      }
-      const base = this.agentMode ? 'Agent mode ON — model can edit files and run commands in the workspace'
-                                  : 'Agent mode OFF — toggle to let the model work in the workspace';
-      return this.agent.workspace ? base + '\nworkspace: ' + this.agent.workspace : base;
-    },
-
-    async toggleAgentMode() {
-      if (!this.agent.available) {
-        toast(this.agent.reason || 'Agent mode is unavailable', 'error');
-        return;
-      }
-      const next = !this.agentMode;
-      this.agentMode = next;
-      // Existing conversation: persist the toggle on its trunk metadata so it
-      // survives reloads. New trunk: the flag rides along with /api/send.
-      const anchor = this.messages.length ? this.messages[0].id : this.selectedId;
-      if (anchor) {
-        try {
-          const r = await fetch('/api/agent/mode', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({node_id: anchor, enabled: next}),
-          });
-          if (!r.ok) throw new Error(await this.errDetail(r));
-        } catch (e) {
-          this.agentMode = !next;
-          toast('Agent mode: ' + (e && e.message ? e.message : e), 'error');
-        }
-      }
-      this.refreshIcons();
-    },
-
-    // Reflect the conversation's persisted agent_mode after switching branches.
-    async syncAgentMode() {
-      if (!this.messages.length) return;
-      const trunkId = this.messages[0].id;
-      try {
-        const d = await (await fetch('/api/node/' + encodeURIComponent(trunkId))).json();
-        // CHA-5: the in-place agent loop is retired from the UI; the composer
-        // switch (对话 | 交给 agent) decides per message.
-        this.agentMode = false; void d;
-      } catch (e) { /* best-effort; keep the current toggle */ }
-      await this.syncAgentApprovals();
-    },
-
-    // The effective session auto-approvals at the current fork point (they're
-    // branch-scoped server-side: grants walk the path from the fork point).
-    async syncAgentApprovals() {
-      const anchor = this.selectedId ||
-        (this.messages.length ? this.messages[this.messages.length - 1].id : null);
-      if (!this.agentMode || !anchor) { this.sessionAutoApprove = []; return; }
-      try {
-        const a = await (await fetch('/api/agent/approvals?node=' + encodeURIComponent(anchor))).json();
-        this.sessionAutoApprove = a.always || [];
-      } catch (e) { this.sessionAutoApprove = []; }
-    },
-
-    async resetAutoApprove() {
-      const anchor = this.selectedId ||
-        (this.messages.length ? this.messages[0].id : null);
-      if (!anchor) return;
-      try {
-        const r = await fetch('/api/agent/approvals/reset', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({node_id: anchor}),
-        });
-        if (!r.ok) throw new Error(await this.errDetail(r));
-        this.sessionAutoApprove = [];
-        toast('Auto-approvals cleared for this branch', 'success');
-      } catch (e) {
-        toast('Reset failed: ' + (e && e.message ? e.message : e), 'error');
-      }
-    },
-
     // The step timeline of an assistant row: live steps while streaming, else
     // the persisted ones attached by loadPath.
     agentStepsFor(m) {
@@ -3679,28 +3562,6 @@ function chatable() {
       this.refreshIcons();
     },
 
-    async approveStep(s, decision, always = false, scope = 'tool') {
-      if (s.deciding) return;
-      s.deciding = true;
-      try {
-        const r = await fetch('/api/agent/approve', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({step_id: s.id, decision, always, scope}),
-        });
-        if (!r.ok) throw new Error(await this.errDetail(r));
-        // The SSE approval_resolved/step_done events confirm the final state.
-        s.status = decision === 'approve' ? 'approved' : 'denied';
-        if (always) {
-          const tools = scope === 'writes' ? ['write_file', 'edit_file'] : [s.tool];
-          this.sessionAutoApprove = [...new Set([...this.sessionAutoApprove, ...tools])].sort();
-        }
-      } catch (e) {
-        toast('Approval failed: ' + (e && e.message ? e.message : e), 'error');
-      } finally {
-        s.deciding = false;
-      }
-    },
-
     // Node "View diff": everything the agent turn changed — the node's
     // end-of-turn snapshot vs the workspace state the turn started from.
     async viewNodeDiff(nodeId) {
@@ -3727,8 +3588,9 @@ function chatable() {
 
 
     // Mind-map "fork from here" on a step: the chat view switches to the
-    // step's branch and the composer forks from it (an agent send restores
-    // the workspace to the step's snapshot server-side).
+    // step's branch and the composer forks from it (a 「交给 agent」 run from
+    // there executes in an isolated worktree of the node's snapshot, leaving
+    // the real directory untouched).
     mapForkFrom(id) {
       this.mindmap.open = false;
       this.select(id);
@@ -4766,7 +4628,6 @@ function chatable() {
         msgs.push(msg);
       }
       this.messages = msgs;
-      this.syncAgentMode();
       this.refreshIcons();
       // Replies that finished unseen (tab closed mid-stream, server buffer
       // reaped) never got their follow-up suggestions. Generate them for the
@@ -4922,7 +4783,6 @@ function chatable() {
           body: JSON.stringify({
             content, parent_id: parentId,
             attachments: ready.map(a => ({filename: a.filename, path: a.path, mime: a.mime})),
-            agent: this.agentMode,
           }),
           signal: st.abortCtrl.signal,
         });
@@ -5076,7 +4936,6 @@ function chatable() {
       // a new conversation. (Only when the turn's branch is being viewed.)
       if (st.agent && !st.run && assistantId && onView && onView()) {
         this.selectedId = assistantId;
-        this.syncAgentApprovals();
       }
 
       if (assistantId) {
@@ -5321,7 +5180,7 @@ function chatable() {
       // Any concrete progress (reasoning/text/tool/finish) ends the "planning"
       // indicator; a fresh `planning` event re-arms it for the next round.
       if (['reasoning', 'delta', 'tool_call', 'tool_result', 'tool_skipped', 'done', 'error', 'reset',
-           'step_start', 'step_done', 'approval_required', 'approval_resolved'].includes(evt.type)) {
+           'step_start', 'step_done'].includes(evt.type)) {
         st.planning = false;
       }
       switch (evt.type) {
@@ -5375,30 +5234,6 @@ function chatable() {
             s.status = evt.status;
             if (evt.duration_ms) s.duration_ms = evt.duration_ms;
             if (evt.touched_files && evt.touched_files.length) s.touched_files = evt.touched_files;
-          }
-          follow();
-          break;
-        }
-        case 'approval_required': {
-          const s = st.steps.find(x => x.id === evt.step_id);
-          if (s) {
-            s.status = 'pending_approval';
-            s.preview_diff = evt.preview_diff || '';
-          }
-          this.refreshIcons();
-          follow();
-          // Pending approvals must be seen: bring the card into view even
-          // when the user scrolled away from the bottom.
-          this.$nextTick(() => {
-            const el = document.getElementById('step-' + evt.step_id);
-            if (el && onView && onView()) el.scrollIntoView({block: 'center', behavior: 'smooth'});
-          });
-          break;
-        }
-        case 'approval_resolved': {
-          const s = st.steps.find(x => x.id === evt.step_id);
-          if (s && s.status === 'pending_approval') {
-            s.status = evt.decision === 'approve' ? 'approved' : 'denied';
           }
           follow();
           break;

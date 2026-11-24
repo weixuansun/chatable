@@ -1,4 +1,8 @@
-"""Agent loop: step nodes, snapshots, limits, restore-on-send, token gate.
+"""Agent loop: step nodes, snapshots, limits, token gate.
+
+Agent turns are internal to the orchestrator: ``start_turn(agent=True)``
+requires ``agent_overrides`` pointing at an isolated Workspace+ShadowGit
+(the way orch/executors.py's BuiltinExecutor runs it).
 
 The model backend is faked exactly like tests/test_core.py does: a scripted
 generator of ("delta"|"tool_calls"|"done") events patched over
@@ -15,7 +19,7 @@ import pytest
 
 import service as service_mod
 from service import ChatService
-from store import ROOT_ID, TreeStore
+from store import TreeStore
 from tools import ToolResult
 from workspace import WorkspaceError
 
@@ -43,8 +47,18 @@ def make_fake(script):
     return fake_stream, calls
 
 
+def agent_overrides(svc, auto_approve=True):
+    """Isolated workspace+shadow for start_turn(agent=True), the way the
+    orchestrator's BuiltinExecutor passes them. Both live under tmp_path:
+    the workspace via CHATTABLE_WORKSPACE, the shadow repo under the data dir."""
+    return {"workspace": svc.workspace(), "shadow": svc.shadow_git(),
+            "auto_approve": auto_approve}
+
+
 def run_turn(svc, script, content="do it", **kwargs):
     kwargs.setdefault("agent", True)
+    if kwargs["agent"]:
+        kwargs.setdefault("agent_overrides", agent_overrides(svc))
     fake, calls = make_fake(script)
     with patch.object(service_mod, "stream_backend", fake):
         info = svc.start_turn(content, kwargs.pop("parent_id", None), **kwargs)
@@ -65,6 +79,25 @@ ANSWER = [("delta", "all done"), ("done", {"input": 1, "output": 1})]
 
 
 # ---------------------------------------------------------------------- basics
+
+def test_agent_turn_requires_overrides(svc):
+    """agent=True is orch-internal: it refuses without an isolated
+    workspace+shadow in agent_overrides, and persists nothing."""
+    for bad in (None, {}, {"workspace": svc.workspace()},
+                {"shadow": svc.shadow_git()}):
+        with pytest.raises(ValueError, match="agent_overrides"):
+            svc.start_turn("do it", None, agent=True, agent_overrides=bad)
+    assert svc.store.all_nodes() == []
+
+
+def test_agent_turn_with_full_overrides_runs(svc):
+    info, _events, _calls = run_turn(svc, [ANSWER])
+    node = svc.store.get(info["assistant_id"])
+    assert node.content == "all done"
+    assert node.metadata["agent"] is True
+    # …and the turn ran against the overridden workspace, not the main one.
+    assert info["agent"] is True
+
 
 def test_agent_turn_persists_step_nodes_chained(svc):
     info, events, calls = run_turn(svc, [
@@ -145,16 +178,6 @@ def test_path_messages_expands_steps_below_the_assistant_node(svc):
     assert [m["role"] for m in msgs2] == ["user", "assistant", "step", "step"]
     assert [m["id"] for m in msgs2] == [msgs[0]["id"], msgs[1]["id"],
                                         steps[0].id, steps[1].id]
-
-
-def test_first_agent_send_marks_the_conversation(svc):
-    """agent:true on a brand-new trunk persists agent_mode on its metadata."""
-    info, _events, _calls = run_turn(svc, [ANSWER])
-    trunk = svc.store.get(info["user_id"])
-    assert trunk.parent_id == ROOT_ID
-    assert trunk.metadata["agent_mode"] is True
-    # A later plain send in this conversation still runs as agent.
-    assert svc._conversation_agent_mode(info["assistant_id"]) is True
 
 
 def test_context_excludes_step_nodes_but_stays_valid(svc):
@@ -307,23 +330,7 @@ def test_old_step_level_snapshots_still_resolve(svc):
     assert msgs[1]["ws_commit"] == commit
     d = svc.node_diff(info["assistant_id"])
     assert "+v1" in d["diff"]
-    assert svc.step_diff(step.id)["ws_commit"] == commit
     assert shadow.available
-
-
-@git_required
-def test_send_from_assistant_node_restores_its_snapshot(svc):
-    """Fork from an older node = time travel: the workspace follows it."""
-    info1, _e, _c = run_turn(svc, [
-        tool_call("write_file", path="a.txt", content="v1\n"), ANSWER])
-    info2, _e, _c = run_turn(svc, [
-        tool_call("write_file", path="a.txt", content="v2\n"), ANSWER],
-        parent_id=info1["assistant_id"])
-    target = os.path.join(svc.workspace().root, "a.txt")
-    assert open(target).read() == "v2\n"
-    _info3, _e3, _c3 = run_turn(svc, [ANSWER], content="try again from v1",
-                                parent_id=info1["assistant_id"])
-    assert open(target).read() == "v1\n"
 
 
 @git_required
@@ -335,7 +342,8 @@ def test_crashed_turn_still_snapshots_the_node(svc):
                                "arguments": {"path": "a.txt", "content": "x\n"}}])
         yield ("done", {"input": 1, "output": 1})
     with patch.object(service_mod, "stream_backend", boom):
-        info = svc.start_turn("go", None, agent=True)
+        info = svc.start_turn("go", None, agent=True,
+                              agent_overrides=agent_overrides(svc))
         list(svc.subscribe(info["assistant_id"], 0))
     md = svc.store.get(info["assistant_id"]).metadata
     assert md.get("ws_commit")
@@ -346,33 +354,12 @@ def test_crashed_turn_still_snapshots_the_node(svc):
 @git_required
 def test_readonly_turn_records_a_base_snapshot(svc):
     """Every agent turn snapshots the pre-turn workspace onto the user node,
-    so even a turn with no writes can be restored to."""
+    so even a turn with no writes has a base its diff is computed against."""
     info, _events, _calls = run_turn(svc, [ANSWER])
     trunk = svc.store.get(info["user_id"])
     base = trunk.metadata.get("ws_commit")
     assert base
-    res = svc.restore_workspace(info["assistant_id"])
-    assert res["restored"] and res["commit"] == base
-
-
-@git_required
-def test_fork_from_readonly_step_restores_pre_turn_state(svc):
-    """A read-only step before the first write restores to the turn's base."""
-    with open(os.path.join(svc.workspace().root, "existing.txt"), "w") as fh:
-        fh.write("orig\n")
-    _info, _events, _calls = run_turn(svc, [
-        tool_call("read_file", path="existing.txt"),
-        tool_call("write_file", path="new.txt", content="n\n"),
-        ANSWER,
-    ])
-    read_step, _write_step = step_nodes(svc)
-    assert read_step.metadata["tool"] == "read_file"
-    assert "ws_commit" not in read_step.metadata  # steps never snapshot
-    res = svc.restore_workspace(read_step.id)
-    assert res["restored"]
-    assert not os.path.exists(os.path.join(svc.workspace().root, "new.txt"))
-    with open(os.path.join(svc.workspace().root, "existing.txt")) as fh:
-        assert fh.read() == "orig\n"
+    assert svc.node_diff(info["assistant_id"])["ok"]
 
 
 # ------------------------------------------------------------- mode + token
@@ -409,38 +396,6 @@ def test_agent_mode_requires_token(tmp_path, monkeypatch):
     status = svc.agent_status()
     assert status["available"] is False
     assert "CHATTABLE_AUTH_TOKEN" in status["reason"]
-
-
-def test_conversation_level_agent_mode(tmp_path, monkeypatch):
-    """The per-conversation toggle lives on the trunk node's metadata."""
-    monkeypatch.setenv("CHATTABLE_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("CHATTABLE_AGENT_AUTO_APPROVE", "all")
-    monkeypatch.setenv("CHATTABLE_WORKSPACE", str(tmp_path / "ws"))
-    svc = ChatService(TreeStore(str(tmp_path / "chat.jsonl")))
-
-    with patch.object(service_mod, "stream_backend", make_fake([ANSWER])[0]):
-        info = svc.start_turn("hello", None)  # normal turn
-        list(svc.subscribe(info["assistant_id"], 0))
-
-    res = svc.set_agent_mode(info["user_id"], True)
-    assert res["agent_mode"] is True and res["trunk_id"] == info["user_id"]
-
-    # Next turn in this conversation runs as agent WITHOUT the per-send flag.
-    info2, events2, _calls2 = run_turn(svc, [
-        tool_call("write_file", path="m.txt", content="x\n"),
-        ANSWER,
-    ], parent_id=info["assistant_id"])
-    assert info2["agent"] is True
-    assert len(step_nodes(svc)) == 1
-    assert svc.store.get(info2["user_id"]).metadata["agent"] is True
-
-    # Toggling off returns to normal turns.
-    svc.set_agent_mode(info["user_id"], False)
-    with patch.object(service_mod, "stream_backend", make_fake([ANSWER])[0]):
-        info3 = svc.start_turn("normal again", info2["assistant_id"])
-        list(svc.subscribe(info3["assistant_id"], 0))
-    assert info3["agent"] is False
-    assert len(step_nodes(svc)) == 1  # unchanged
 
 
 def test_agent_status_reports_workspace(svc, tmp_path):

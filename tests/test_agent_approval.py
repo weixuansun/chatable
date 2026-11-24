@@ -9,7 +9,7 @@ import service as service_mod
 from service import ChatService
 from store import TreeStore
 
-from test_agent_loop import ANSWER, make_fake, step_nodes, tool_call
+from test_agent_loop import ANSWER, agent_overrides, make_fake, step_nodes, tool_call
 
 
 @pytest.fixture
@@ -25,8 +25,10 @@ def drive(svc, script, on_approval, **kwargs):
     """Run an agent turn, resolving each approval_required event via callback."""
     fake, calls = make_fake(script)
     approvals = []
+    overrides = agent_overrides(svc, auto_approve=False)
     with patch.object(service_mod, "stream_backend", fake):
-        info = svc.start_turn("do it", kwargs.get("parent_id"), agent=True)
+        info = svc.start_turn("do it", kwargs.get("parent_id"), agent=True,
+                              agent_overrides=overrides)
         for ev in svc.subscribe(info["assistant_id"], 0):
             if ev["type"] == "approval_required":
                 approvals.append(ev)
@@ -81,7 +83,8 @@ def test_approval_timeout_counts_as_denied(svc, monkeypatch):
         ANSWER,
     ])
     with patch.object(service_mod, "stream_backend", fake):
-        info = svc.start_turn("do it", None, agent=True)
+        info = svc.start_turn("do it", None, agent=True,
+                              agent_overrides=agent_overrides(svc, auto_approve=False))
         events = list(svc.subscribe(info["assistant_id"], 0))
     assert time.monotonic() - started < 5  # the 10-minute default did NOT apply
     (step,) = step_nodes(svc)
@@ -132,7 +135,8 @@ def test_stop_denies_a_pending_approval(svc):
         ANSWER,
     ])
     with patch.object(service_mod, "stream_backend", fake):
-        info = svc.start_turn("do it", None, agent=True)
+        info = svc.start_turn("do it", None, agent=True,
+                              agent_overrides=agent_overrides(svc, auto_approve=False))
         for ev in svc.subscribe(info["assistant_id"], 0):
             if ev["type"] == "approval_required":
                 assert svc.request_stop(info["assistant_id"]) is True

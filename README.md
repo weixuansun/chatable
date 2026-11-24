@@ -33,7 +33,7 @@ chatable 是一个树状的 AI 对话工具：每条消息是一个节点，可�
 
 - 已完成：树状对话、两种模式、多 agent 并行、节点快照、合并与采用、沙箱（Linux 上用 bwrap，默认不联网）。
 - 内置 agent（DeepSeek）已验证；Claude Code、Codex、Kimi Code 已接入，尚未完整实测。
-- 已知限制：Mac 上的 Seatbelt 沙箱未实测；外部 CLI 尚未套沙箱；旧版 agent 模式入口仍会直接改写项目目录，计划移除；旧运行目录不会自动清理。
+- 已知限制：Mac 上的 Seatbelt 沙箱未实测；外部 CLI 尚未套沙箱；旧运行目录不会自动清理。
 
 ## Screenshots
 
@@ -165,74 +165,6 @@ in [docs/agent-api.md](docs/agent-api.md); design notes in
   claude, codex) are **not** wrapped — they need network to their APIs and
   use their own permission modes; they are isolated only by running in a
   throwaway worktree (the real workspace changes only on Adopt).
-
-### Legacy agent mode (planned for removal)
-
-> **Legacy.** Use 交给 agent above instead. This older toggle runs the agent
-> directly in your workspace directory (continuing a branch restores that
-> directory in place), so it does not keep changes in an isolated copy. It
-> will be removed. The shell sandbox described below also applies to the
-> built-in agent in 交给 agent runs.
-
-Agent mode lets the model work autonomously in a dedicated workspace
-(workspace file tools + shell, per-step tree nodes, shadow-git snapshots,
-approvals). Steps stream live with their own diff / output (shell steps also
-list the files they touched) but have no buttons; when the task finishes the
-reply becomes a **node** with exactly one workspace snapshot and five
-actions: **View diff** (改动, the whole task's change), **Compare** (对比),
-**Files** (文件), **Adopt** (采用 — make the workspace match this node,
-backed up and undoable) and **Fork from here** (从此分叉 — continuing from an
-older node restores its files first). The mind map and the sidebar tree show only
-these nodes (question + reply, with status and files-changed count); the
-individual steps appear only in the main chat, and branches hang off the
-reply node. It is **off by default** (the toggle lives in the composer); like
-交给 agent it needs `CHATTABLE_AUTH_TOKEN` only when serving beyond localhost. See
-[docs/agent-api.md](docs/agent-api.md) for the full API. After an agent
-reply, typing again continues the same branch by default (the ✕ on the
-composer pill starts a new conversation); "always allow" approvals are
-scoped to the branch they were granted on.
-
-Shell commands run through two safety layers:
-
-- **Sandbox (real boundary).** When `bwrap` (bubblewrap) is installed,
-  `run_shell` commands execute confined: read-only system dirs, the workspace
-  read-write at its real path, private `/tmp`, hidden home and data
-  directories, a synthetic `HOME`, no network by default. PATH directories
-  stay available read-only — narrowly: a PATH entry's parent is bound only
-  for real venv/conda roots (`pyvenv.cfg` / `conda-meta/`), and non-venv
-  PATH dirs under `$HOME` are skipped unless
-  `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`.
-  - **macOS:** the same policy via Seatbelt (`/usr/bin/sandbox-exec`, built
-    in): writes only to the workspace, a per-run temp dir (`TMPDIR`) and a
-    synthetic `HOME`; `/Users`, `$HOME` and the data dir are unreadable except
-    the workspace and the toolchain (venv roots on PATH + the base Python they
-    point at); no network at all (IP and unix sockets) by default; clean env.
-    The badge shows `sandbox: seatbelt · no net`. **The Seatbelt profile is
-    covered only by mocked unit tests on Linux CI — please report anything
-    that breaks on macOS.** Quick check from the repo dir (expect `ok` and
-    `done` with no `LEAK` lines):
-
-    ```
-    python3 -c "import os,subprocess,shell_sandbox as s;H=os.environ['HOME'];rt=s.make_run_tmp();a,e=s.build_seatbelt_argv(f'echo ok; touch {H}/sb-x 2>/dev/null && echo WRITE-LEAK; ls {H}/Desktop >/dev/null 2>&1 && echo READ-LEAK; curl -sI -m5 https://example.com >/dev/null 2>&1 && echo NET-LEAK; touch sb-ok && rm sb-ok && echo done',os.getcwd(),rt);print(subprocess.run(a,env=e,capture_output=True,text=True).stdout)"
-    ```
-  - `CHATTABLE_AGENT_SANDBOX=auto|bwrap|seatbelt|off` (default `auto`: bwrap
-    on Linux, seatbelt on macOS, when available; `/api/agent/status` and the
-    composer badge warn when none is in effect).
-  - `CHATTABLE_AGENT_SHELL_NET=1` allows network access inside the sandbox.
-- **Denials are explained.** When a sandboxed command fails because the
-  sandbox blocked it (no network, a path outside the workspace, a tool under
-  your home dir), the agent gets a `[sandbox]` note telling it not to retry,
-  and the chat shows which switch allows it (`CHATTABLE_AGENT_SHELL_NET=1`,
-  `CHATTABLE_AGENT_SANDBOX_PATH_HOME=1`). Defaults are not relaxed.
-- **Nested repositories are snapshotted as files.** A `git clone` / `git init`
-  the agent runs inside the workspace is stored file-by-file (honouring that
-  repo's own `.gitignore`; its `.git` is not stored), so follow-ups, forks and
-  parallel runs see the code instead of an empty directory.
-- **Deny-list (advisory tripwire).** Obviously destructive commands
-  (`rm -rf /`, `sudo`, `curl | sh`, `dd of=/dev/…`, `mkfs`, fork bombs,
-  `git push --force`, writes to `~/.ssh`…) are refused outright.
-  `CHATTABLE_AGENT_SHELL_DENYLIST=off` disables it — note the sandbox, not
-  the deny-list, is the real protection.
 
 ## License
 

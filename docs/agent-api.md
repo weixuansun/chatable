@@ -1,43 +1,36 @@
-# Agent Mode API (prototype)
+# Agent API (prototype)
 
-Agent mode gives a conversation a coding-agent loop: workspace-confined file
-and shell tools, a persisted **step node** per tool call, shadow-git
-workspace snapshots, and human approval for mutating calls. It is **off by
-default** per conversation. No access token is needed while the server
-listens on loopback (the default `127.0.0.1`); when it is bound beyond
-loopback (`--host 0.0.0.0`, a LAN address…) without `CHATTABLE_AUTH_TOKEN`,
-every agent entry point refuses (`400`/`403`, reason "Agent mode is off
-because the server listens beyond localhost without CHATTABLE_AUTH_TOKEN…").
-When agent mode is off, chat behaviour, tool limits and dedupe are exactly
-the pre-agent behaviour.
+Agent work in chatable runs as **agent runs** (the UI's 「交给 agent」): each
+run executes a coding-agent loop in an isolated git worktree checked out from
+a conversation node's file snapshot, and the result is stored as a snapshot
+on the run's reply node. The real workspace changes only on **Adopt**. The
+built-in agent loop (workspace-confined file and shell tools, a persisted
+**step node** per tool call, shadow-git snapshots) is retained as the engine
+of the orchestrator's `builtin` executor, running inside the run's isolated
+worktree. The legacy in-place agent mode — toggling the loop to run directly
+in the main workspace from a chat message, restoring that workspace in place
+on follow-ups — has been removed; agent turns are internal to the
+orchestrator and always work on a throwaway copy.
 
-## Enabling agent mode
-
-Two ways, either is enough:
-
-- **Per send:** `POST /api/send` with `"agent": true`.
-- **Per conversation:** `POST /api/agent/mode {"node_id": <any node in the
-  conversation>, "enabled": true}`. Stored as `metadata.agent_mode` on the
-  conversation's trunk (root) node, so it survives reloads and applies to
-  every later send in that conversation until disabled.
+No access token is needed while the server listens on loopback (the default
+`127.0.0.1`); when it is bound beyond loopback (`--host 0.0.0.0`, a LAN
+address…) without `CHATTABLE_AUTH_TOKEN`, agent runs and the `/api/agent/*`
+endpoints refuse (`403`, reason "Agent mode is off because the server
+listens beyond localhost without CHATTABLE_AUTH_TOKEN…").
 
 ## Endpoints
 
-All endpoints sit behind the existing `SecurityMiddleware` (Host allowlist,
+The `/api/agent/*` endpoints below serve the **snapshot nodes** produced by
+agent runs: viewing a node's changes, comparing two nodes, browsing the
+files at a snapshot, and adopting a snapshot into the real workspace. All
+endpoints sit behind the existing `SecurityMiddleware` (Host allowlist,
 Origin/Referer CSRF check, bearer/cookie token). When a token is configured
 it is required for these routes like any other.
 
 | Method & path | Body / query | Description |
 |---|---|---|
 | `GET /api/agent/status` | — | `{available, reason, workspace, auto_approve, git}` — `available=false` (with `reason`) when no token is set; `workspace` is the resolved workspace root (created on demand); `git` reports shadow-snapshot availability. |
-| `POST /api/agent/mode` | `{node_id, enabled}` | Toggle agent mode for the conversation owning `node_id`. Returns `{ok, trunk_id, agent_mode}`. |
-| `POST /api/send` | `{content, parent_id?, attachments?, agent?}` | Unchanged, plus the `agent` flag. Agent turns stream the extra SSE events below. **Sending from a node in agent mode first restores the workspace to that node's nearest snapshot** (restore-on-checkout), so files always match the branch being continued. **Follow-ups and forks hang off the reply node:** with an assistant node as parent, the new user node is its child (steps are display-only). The full turn — replay plus final answer — stays in context, and "always allow" grants made on that turn's steps still apply (an earlier reply on the path contributes its step chain's grants). Older conversations whose follow-ups were stored under the step-chain tail keep working unchanged. Restoring uses the reply's snapshot, i.e. the turn's final workspace state. |
-| `POST /api/agent/approve` | `{step_id, decision, always?, scope?}` | `decision`: `"approve"` \| `"deny"`. `always: true` records the grant **on that step node** (in-memory): `scope: "tool"` (default) auto-approves this tool, `scope: "writes"` auto-approves write_file+edit_file. Grants are branch-scoped — a call needs approval unless a matching grant exists on an ancestor-or-self of the current position, so a fork from before the grant asks again. `404` when no approval is pending for `step_id` (e.g. it timed out or the turn was stopped — a stop resolves pending approvals as denied). |
-| `GET /api/agent/approvals?node=` | — | `{always: [tool…], grants: [{node_id, tools}]}` — the effective grants at that node (an assistant node resolves to its step-chain tail; grants on earlier replies' steps along the path count too), with their origins. |
-| `POST /api/agent/approvals/reset` | `{node_id}` | Clear grants made along that node's current branch. |
-| `POST /api/agent/restore` | `{node_id}` | (API only — the UI uses Adopt, which also backs up first.) Reset the workspace to the snapshot of the nearest ancestor-or-self node with `ws_commit`. Files absent from the snapshot are deleted; any `.git` directory inside the workspace is left untouched. Returns `{ok, restored, commit}` or `{ok: false, restored: false, reason}` when the path has no snapshot. |
 | `GET /api/agent/node/{node_id}/diff` | — | Node **View diff**: `{ok, node_id, commit, base_commit, diff, files: [{path, status, additions, deletions}]}` — everything the agent turn changed: the node's end-of-turn snapshot vs `ws_parent_commit` (the workspace when the turn started). |
-| `GET /api/agent/step/{step_id}/diff` | — | Legacy: `{id, tool, status, ws_commit, diff}` — a step's stored edit diff, else (old conversations with per-step snapshots) the shadow-git diff `ws_parent_commit..ws_commit`. |
 | `GET /api/agent/compare?a=&b=` | — | Branch compare: `{ok, a_commit, b_commit, diff, files: [{path, status, additions, deletions}]}` between the snapshots nearest the two nodes. |
 | `GET /api/agent/files?node=` | — | `{ok, commit, files: [path…]}` — files tracked in the snapshot nearest the node. |
 | `GET /api/agent/file?node=&path=` | — | `{ok, commit, path, content, truncated}` — one file at that snapshot (200KB cap, path confined). |
@@ -53,8 +46,8 @@ it is required for these routes like any other.
 | `POST /api/run/merge` | `{node_ids: [id…≥2], agent?, test?}` | 3-way merge of the nodes' snapshots under their lowest common ancestor → a new merge node (`orch_merge`, `merged_from`, `run_status` ok/conflict/tests_failed/failed). On conflict or new test failures a resolver run with `agent` starts automatically from the merge node. Returns `{user_id, assistant_id, parent_id}`. |
 | `POST /api/stop/{assistant_id}` | — | On a run node: cancel it (queued → cancelled at once; running → stopped, partial work is still snapshotted). |
 
-`POST /api/send` with `agent: false` is always plain chat, even in a
-conversation whose legacy `agent_mode` flag is on. The old orchestrator
+`POST /api/send` is always plain chat — it no longer accepts an `agent`
+flag; agent work goes through `POST /api/run` above. The old orchestrator
 overlay is gone from the UI; `/api/orch/*` is kept for API use.
 
 `GET /api/agent/compare?a=&b=` also accepts `a=workspace` (current workspace
@@ -90,7 +83,7 @@ state, snapshotted on the spot) — used by the adopt dialog's preview.
 2. **Deny-list (advisory).** `rm -rf /|~`, `sudo`, `curl|sh`, recursive
    `chmod 777` on `/`/`~`, `dd of=/dev/…`, `mkfs`, fork bombs,
    `git push --force`, and writes into `.ssh`/`.aws`/`.gnupg` are refused
-   outright (before any approval prompt). `CHATTABLE_AGENT_SHELL_DENYLIST=off`
+   outright, before the command runs. `CHATTABLE_AGENT_SHELL_DENYLIST=off`
    disables it. It is a tripwire, not a boundary — the sandbox is.
 
 Every shell runs with a scrubbed environment: credentials
@@ -110,7 +103,7 @@ lifting any children of step nodes (legacy follow-ups) onto the owning reply
 so branches always hang off reply nodes. Agent assistant nodes in
 `/api/tree` carry `agent`, `stop_reason` and `files_changed`.
 
-## SSE events (agent turns only, in addition to the existing ones)
+## SSE events (agent run turns only, in addition to the existing ones)
 
 Existing events (`user_node`, `assistant_node`, `assistant_start`,
 `reasoning`, `delta`, `tool_call`, `tool_result`, `reset`, `error`, `done`)
@@ -119,8 +112,6 @@ are unchanged. `assistant_start` gains `agent: true` and `workspace`.
 ```json
 {"type": "step_start", "id", "parent_id", "tool", "args", "args_summary"}
 {"type": "step_output", "step_id", "chunk"}
-{"type": "approval_required", "step_id", "tool", "args", "preview_diff"}
-{"type": "approval_resolved", "step_id", "decision"}
 {"type": "step_done", "id", "status", "tool", "ok", "duration_ms", "touched_files"}   // no per-step ws_commit (node-level snapshots)
 {"type": "plan", "step_id", "items": [{"content", "status"}]}
 {"type": "notice", "text"}
@@ -129,13 +120,7 @@ are unchanged. `assistant_start` gains `agent: true` and `workspace`.
 - `step_output` streams `run_shell` stdout/stderr incrementally while the
   command runs (the persisted step keeps head+tail 8KB with an omission
   note). Stop kills the shell's whole process group.
-- `approval_required` is emitted for `write_file`/`edit_file`/`run_shell`
-  unless policy auto-approves them; `preview_diff` carries the unified diff
-  the write/edit *would* produce (empty for shell). The turn thread then
-  blocks until `POST /api/agent/approve` arrives or the 10-minute timeout
-  treats it as denied.
-- Denied calls are folded back to the model as a tool result saying the user
-  denied it; the loop continues.
+- Run turns auto-approve every tool call, so no approval events are emitted.
 - `plan` carries the latest `update_plan` checklist; the final plan is also
   persisted on the assistant node metadata as `plan`.
 - `notice` signals loop-level events — currently the round-limit fuse: after
@@ -161,7 +146,7 @@ the base) lives on the assistant node's metadata.
     "call_id": "call_0_1",
     "args": {"path": "src/a.py", "content": "…"},
     "args_summary": "write_file src/a.py",
-    "status": "pending_approval | denied | ok | error",
+    "status": "ok | error",      // "pending_approval"/"denied" only in legacy conversations
     "result": "…tool output, truncated to 4000 chars…",
     "error": "…only when status == error…",
     "diff": "…unified diff, write/edit only…",
@@ -185,18 +170,18 @@ follow-up/fork) or covers the turn's WHOLE chain (legacy follow-ups stored
 under the step-chain tail), the full replay and the final answer are
 kept — truncation only happens on mid-turn forks.
 
-## Agent tools (model-facing, agent mode only)
+## Agent tools (model-facing, builtin agent loop)
 
-| Tool | read_only | Approval default | Notes |
-|---|---|---|---|
-| `list_dir(path?, depth?)` | yes | auto | flat workspace-relative paths (dirs end with `/`), default depth 2, skips noise dirs (`.git`, `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `dist`, `build`, …) and root `.gitignore`, capped at 500 entries |
-| `glob(pattern, path?)` | yes | auto | `**/*.py`-style file finding, newest first, capped with a "N more matches" note |
-| `read_file(path, offset?, limit?)` | yes | auto | line numbers, 200KB cap with truncation note, binary refused |
-| `grep(pattern, path?, glob?, ignore_case?, context?)` | yes | auto | pure-Python regex; `path:line: text` output (context lines use `-`), capped with a "N more matches" note |
-| `write_file(path, content)` | no | ask | creates parents, ≤1MB, returns unified diff |
-| `edit_file(path, old_string, new_string, replace_all?, expected_replacements?)` | no | ask | not-found errors show the most similar region with line numbers; non-unique errors list occurrence line numbers; returns unified diff |
-| `run_shell(command, timeout?)` | no | ask | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, credentials env vars scrubbed, **sandboxed when available (bwrap on Linux, Seatbelt on macOS)** (no network by default), deny-list refuses destructive commands outright |
-| `update_plan(items)` | yes | auto | TodoWrite-style plan checklist; latest plan emitted as `plan` SSE and persisted on the assistant node |
+| Tool | read_only | Notes |
+|---|---|---|
+| `list_dir(path?, depth?)` | yes | flat workspace-relative paths (dirs end with `/`), default depth 2, skips noise dirs (`.git`, `__pycache__`, `.pytest_cache`, `node_modules`, `.venv`, `dist`, `build`, …) and root `.gitignore`, capped at 500 entries |
+| `glob(pattern, path?)` | yes | `**/*.py`-style file finding, newest first, capped with a "N more matches" note |
+| `read_file(path, offset?, limit?)` | yes | line numbers, 200KB cap with truncation note, binary refused |
+| `grep(pattern, path?, glob?, ignore_case?, context?)` | yes | pure-Python regex; `path:line: text` output (context lines use `-`), capped with a "N more matches" note |
+| `write_file(path, content)` | no | creates parents, ≤1MB, returns unified diff |
+| `edit_file(path, old_string, new_string, replace_all?, expected_replacements?)` | no | not-found errors show the most similar region with line numbers; non-unique errors list occurrence line numbers; returns unified diff |
+| `run_shell(command, timeout?)` | no | cwd=workspace, streams output as `step_output` events, head+tail 8KB kept, timeout default 120s / max 600s, stop kills the whole process group, credentials env vars scrubbed, **sandboxed when available (bwrap on Linux, Seatbelt on macOS)** (no network by default), deny-list refuses destructive commands outright |
+| `update_plan(items)` | yes | TodoWrite-style plan checklist; latest plan emitted as `plan` SSE and persisted on the assistant node |
 
 All paths are confined to the workspace: real paths must stay under the
 workspace realpath (`..`, absolute paths outside, and symlink escapes are
@@ -211,8 +196,7 @@ Agent loop limits: up to 40 rounds (`CHATTABLE_AGENT_MAX_ROUNDS`), up to 8
 tool calls per round (`CHATTABLE_AGENT_MAX_CALLS_PER_ROUND`), and **no**
 cross-round dedupe of repeated calls. Consecutive read-only calls of a round
 execute concurrently (`CHATTABLE_AGENT_PARALLEL_READS`, default 4); mutating
-calls and approvals stay sequential, and results always fold back in call
-order. Normal mode keeps its 3-calls/round, 10-round, dedupe behaviour
+calls stay sequential, and results always fold back in call order. Normal mode keeps its 3-calls/round, 10-round, dedupe behaviour
 untouched. When the round limit is hit the model gets one final no-tools
 round to summarize (plus a `notice` event): the wrap-up prompt contains a
 **server-computed factual record** — the files actually changed this turn
@@ -230,7 +214,7 @@ affected; persisted step results stay full.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CHATTABLE_AUTH_TOKEN` | (unset) | Optional on loopback; **required for agent mode when the server binds beyond loopback.** Also the existing server auth token. |
+| `CHATTABLE_AUTH_TOKEN` | (unset) | Optional on loopback; **required for agent runs and the `/api/agent/*` endpoints when the server binds beyond loopback.** Also the existing server auth token. |
 | `CHATTABLE_WORKSPACE` | `<data_dir>/workspace` | Agent workspace root (created if missing). |
 | `CHATTABLE_AGENT_AUTO_APPROVE` | (unset) | Comma-separated: `writes` (write_file+edit_file), `shell` (run_shell), `all`. |
 | `CHATTABLE_AGENT_MAX_ROUNDS` | `40` | Agent loop round cap. |
@@ -263,9 +247,8 @@ ancestor-or-self one (a step resolves to its turn's base: the assistant
 node's end-of-turn commit is in its steps' future). **Backward
 compatibility:** conversations saved with per-step snapshots still load —
 an assistant node without `ws_commit` falls back to its last step's commit
-(also surfaced as `ws_commit` in `/api/path` and the mind-map data), and
-`/api/agent/step/{id}/diff` still serves old step snapshots. If git is not
-installed, snapshots degrade to no-ops (`ws_commit` absent) and
+(also surfaced as `ws_commit` in `/api/path` and the mind-map data). If git
+is not installed, snapshots degrade to no-ops (`ws_commit` absent) and
 restore/diff calls return a clear error.
 
 **UI.** Steps stream live with their inline diff / output but carry no
@@ -273,9 +256,8 @@ buttons. Under a finished agent reply (and on its mind-map card) the node
 offers: **View diff** (改动 — the whole turn vs its base,
 `/api/agent/node/{id}/diff`), **Compare** (对比), **Files** (文件),
 **Adopt** (采用 — restore the workspace to this node, backed up first and
-undoable; this replaces the old separate "Restore workspace" button) and
-**Fork from here** (从此分叉 — sending from an older node restores its
-snapshot first).
+undoable) and **Fork from here** (从此分叉 — continue the conversation from
+this node; a new agent run starts from its snapshot in its own worktree).
 
 Shell commands can still cause effects outside the workspace (network,
 global installs); those are **not** rolled back by restores.

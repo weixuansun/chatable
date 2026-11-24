@@ -101,10 +101,11 @@ def _is_transient_stream_error(e: Exception) -> bool:
 # with the previous turn's — the whole investigation stays cache-hittable.
 NATIVE_TOOL_HISTORY = os.environ.get("CHATTABLE_NATIVE_TOOL_HISTORY", "1").lower() not in ("0", "false", "no")
 
-# Agent mode (off by default; per-send `agent` flag or per-conversation
-# "agent_mode" metadata). Agent turns get their own tool set (workspace file
-# tools + shell), higher limits, no call dedupe, per-call step nodes and
-# shadow-git workspace snapshots.
+# Agent loop (internal): only reachable via start_turn(agent=True) with
+# agent_overrides pointing at an isolated workspace+shadow — the way the
+# orchestrator's builtin executor runs it. Agent turns get their own tool set
+# (workspace file tools + shell), higher limits, no call dedupe, per-call
+# step nodes and shadow-git workspace snapshots.
 AGENT_MAX_ROUNDS = int(os.environ.get("CHATTABLE_AGENT_MAX_ROUNDS", "40"))
 AGENT_MAX_CALLS_PER_ROUND = int(os.environ.get("CHATTABLE_AGENT_MAX_CALLS_PER_ROUND", "8"))
 AGENT_PARALLEL_READS = int(os.environ.get("CHATTABLE_AGENT_PARALLEL_READS", "4"))
@@ -874,30 +875,6 @@ class ChatService:
             "shell_denylist": denylist_enabled(),
         }
 
-    def set_agent_mode(self, node_id: str, enabled: bool) -> dict:
-        """Toggle agent mode for the conversation owning *node_id*."""
-        if enabled and not agent_available():
-            raise ValueError(AGENT_TOKEN_MESSAGE)
-        if node_id == ROOT_ID:
-            raise ValueError("send a message first, then toggle agent mode on the conversation")
-        path = self.store.path_to_root(node_id)  # raises NodeNotFoundError
-        trunk = path[0]
-        self.store.update_metadata(trunk.id, {"agent_mode": bool(enabled)})
-        return {"ok": True, "trunk_id": trunk.id, "agent_mode": bool(enabled)}
-
-    def _conversation_agent_mode(self, parent_id: str) -> bool:
-        """True when the conversation owning *parent_id* has agent mode on."""
-        if parent_id == ROOT_ID:
-            return False
-        try:
-            path = self.store.path_to_root(parent_id)
-        except NodeNotFoundError:
-            return False
-        if not path:
-            return False
-        md = path[0].metadata
-        return bool(isinstance(md, dict) and md.get("agent_mode"))
-
     def _grant_holder_ids(self, anchor_id: str) -> list[str]:
         """Node ids whose "always allow" grants apply at *anchor_id*: its
         ancestors-or-self, plus — for every earlier agent turn on the path
@@ -1125,32 +1102,6 @@ class ChatService:
             for nid in self._grant_holder_ids(anchor):
                 self._grant_nodes.pop(nid, None)
         return {"ok": True}
-
-    def restore_workspace(self, node_id: str) -> dict:
-        """Reset the workspace to the snapshot of the node nearest *node_id*."""
-        if node_id == ROOT_ID:
-            return {"ok": False, "restored": False, "reason": "root has no snapshot"}
-        if not self.store.exists(node_id):
-            raise NodeNotFoundError(node_id)
-        commit = self.nearest_ws_commit(node_id)
-        if not commit:
-            return {"ok": False, "restored": False,
-                    "reason": "no workspace snapshot on this node's path"}
-        self.shadow_git().restore(commit)
-        return {"ok": True, "restored": True, "commit": commit, "node_id": node_id}
-
-    def step_diff(self, step_id: str) -> dict:
-        """The diff a step produced: its stored edit diff, else its snapshot diff."""
-        node = self.store.get(step_id)  # raises NodeNotFoundError
-        md = node.metadata if isinstance(node.metadata, dict) else {}
-        diff = md.get("diff") or ""
-        if not diff and md.get("ws_commit"):
-            diff = self.shadow_git().diff(
-                str(md["ws_commit"]),
-                str(md["ws_parent_commit"]) if md.get("ws_parent_commit") else None,
-            )
-        return {"id": step_id, "tool": md.get("tool"), "status": md.get("status"),
-                "ws_commit": md.get("ws_commit"), "diff": diff}
 
     def agent_compare(self, a_id: str, b_id: str) -> dict:
         """Diff the workspace snapshots nearest two nodes (branch compare).
@@ -2539,11 +2490,12 @@ class ChatService:
         ``attachments`` (uploaded files, e.g. images) are persisted on the user
         node's metadata — only descriptors, the bytes live in the uploads dir.
 
-        With ``agent=True`` (or the conversation's agent_mode metadata set) the
-        turn runs the agent loop instead; agent mode requires
-        CHATTABLE_AUTH_TOKEN and raises ValueError otherwise. Sending from a
-        node in agent mode first restores the workspace to that node's nearest
-        snapshot, so the files match the branch the user is continuing.
+        With ``agent=True`` the turn runs the agent loop instead — internal
+        use only (the orchestrator's builtin executor): ``agent_overrides``
+        must then carry the isolated ``workspace`` and ``shadow`` the loop
+        runs against, and raises ValueError otherwise. The retired in-place
+        agent mode (agent turns on the main workspace, restored on send) is
+        gone: nothing here ever touches the main workspace.
         """
         # Under _rebind_lock: rebind_store refuses to swap the store while a
         # stream is active, so turn creation must not straddle a swap either.
@@ -2552,24 +2504,17 @@ class ChatService:
             parent_id = parent_id or ROOT_ID
             if not self.store.exists(parent_id):
                 parent_id = ROOT_ID
-            # agent=None: follow the conversation's persisted agent mode
-            # (legacy). An explicit False (the unified composer's 对话 mode)
-            # is always a plain chat turn.
-            if agent is None:
-                agent_mode = self._conversation_agent_mode(parent_id)
-            else:
-                agent_mode = bool(agent)
+            agent_mode = bool(agent)
             if agent_mode:
                 if not agent_available():
                     raise ValueError(AGENT_TOKEN_MESSAGE)
-                # Restore-on-checkout: the workspace follows the fork point.
-                # (Computed BEFORE the tail redirect below: an assistant node's
-                # nearest snapshot is its turn's final state — exactly what a
-                # continuation needs; the redirect only moves the attachment
-                # point of the new user node to the end of the step chain.)
-                commit = self.nearest_ws_commit(parent_id)
-                if commit:
-                    self.shadow_git().restore(commit)
+                if not isinstance(agent_overrides, dict) \
+                        or agent_overrides.get("workspace") is None \
+                        or agent_overrides.get("shadow") is None:
+                    raise ValueError(
+                        "agent turns are internal to the orchestrator and "
+                        "require agent_overrides with an isolated workspace "
+                        "and shadow")
             # A follow-up / fork from an agent reply hangs off the REPLY node
             # (node granularity: steps are display-only). The full turn replay
             # stays in context (_expand_path) and grants made on its steps
@@ -2578,12 +2523,6 @@ class ChatService:
             parent = self.store.get(parent_id)
 
             user_node = Node.new(role="user", content=content, parent_id=parent.id)
-            if agent_mode:
-                user_node.metadata = {**(user_node.metadata or {}), "agent": True}
-                # A brand-new conversation started in agent mode stays in agent
-                # mode: the toggle persists on the trunk from the first send.
-                if parent.id == ROOT_ID:
-                    user_node.metadata["agent_mode"] = True
             if attachments:
                 # Attachment descriptors come from the client, so their paths
                 # are untrusted: only files the server itself accepted (the
@@ -2979,7 +2918,7 @@ class ChatService:
             return self._generate_agent_loop(turn, user_node, assistant_node, overrides)
         except Exception:
             try:
-                shadow = (overrides or {}).get("shadow") or self.shadow_git()
+                shadow = overrides["shadow"]  # validated by start_turn
                 umd = self.store.get(user_node.id).metadata or {}
                 base = umd.get("ws_commit") if isinstance(umd, dict) else None
                 md = {"agent": True, "stop_reason": "error"}
@@ -2997,13 +2936,14 @@ class ChatService:
         tool set, higher limits (AGENT_MAX_ROUNDS rounds / per-round call
         cap), no cross-round call dedupe (re-reading a file after editing it
         is legitimate), and a persisted step node per executed call.
-        ``overrides`` (used by the orchestrator's builtin executor) can point
-        the loop at a different workspace/shadow and force auto-approve.
+        ``overrides`` (used by the orchestrator's builtin executor; required
+        by start_turn) points the loop at the run's isolated workspace/shadow
+        and forces auto-approve.
         """
         overrides = overrides or {}
         emit = turn.append
-        ws = overrides.get("workspace") or self.workspace()
-        shadow = overrides.get("shadow") or self.shadow_git()
+        ws = overrides["workspace"]
+        shadow = overrides["shadow"]
         tool_results: list[dict] = []
         context = self._live_context(user_node.id, tool_results)
         loop_messages = list(context["messages"])

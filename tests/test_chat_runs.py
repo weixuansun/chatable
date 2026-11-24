@@ -197,13 +197,14 @@ def test_stop_cancels_a_running_run_and_keeps_a_node(tmp_path, monkeypatch):
 
 
 def test_explicit_agent_false_is_plain_chat_in_an_agent_conversation(tmp_path, monkeypatch):
+    """Stale agent_mode metadata on old nodes is ignored: agent=False (the
+    default for chat sends) always runs a plain chat turn."""
     monkeypatch.setenv("CHATTABLE_AUTH_TOKEN", "t")
     chat = ChatService(TreeStore(str(tmp_path / "chat.jsonl")))
     from models import Node
     u = Node.new(role="user", content="q", parent_id=ROOT_ID)
-    u.metadata = {"agent_mode": True}
+    u.metadata = {"agent_mode": True}  # legacy conversation-level flag
     chat.store.add(u)
-    assert chat._conversation_agent_mode(u.id) is True
     import service as service_mod
     from unittest.mock import patch
 

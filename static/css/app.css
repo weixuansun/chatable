@@ -1239,15 +1239,6 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .step-body .diff-view { margin-top: 8px; }
 /* .step-actions removed: steps have no buttons (node-level snapshots) */
 
-/* ---- approval card (inside a pending step) -------------------------------- */
-.approval-card { margin-top: 10px; padding: 10px 12px;
-                 background: var(--branch-soft);
-                 border: 1px solid var(--branch); border-radius: 10px; }
-.approval-head { display: flex; align-items: center; gap: 7px; font-weight: 600;
-                 font-size: 13px; margin-bottom: 8px; }
-.approval-head .lucide { width: 14px; height: 14px; color: var(--branch); }
-.approval-card .tool-out { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 8px; }
-.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
 
 /* ---- unified diff view (escaped lines, colored) --------------------------- */
@@ -1386,10 +1377,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
               border-radius: 999px; color: var(--accent-2);
               background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
 
-/* agent v4: session auto-approve pill, binary compare rows */
-.auto-approve-pill { color: var(--branch); background: var(--branch-soft);
-                     border-color: transparent; }
-.auto-approve-pill:hover { color: var(--fail); background: var(--fail-soft); }
+/* agent v4: binary compare rows */
 .compare-stats { display: inline-flex; gap: 6px; flex: none; }
 .file-stat.binary { color: var(--dim-2); font-style: italic; }
 

@@ -1,4 +1,9 @@
-"""Agent HTTP endpoints: token gating, status, approve/restore validation.
+"""Agent HTTP endpoints: token gating, status, node diff / adopt validation.
+
+Only the run-result endpoints remain (status, node diff, compare, files,
+file, adopt, undo-adopt) — the in-conversation agent-mode endpoints (mode
+toggle, approve, restore, step diff) are gone with the retired in-place
+agent mode.
 
 Imports server with an isolated CHATTABLE_DATA_DIR (same pattern as
 tests/test_server_security.py) so no real user data is touched.
@@ -39,8 +44,8 @@ def _client() -> TestClient:
 
 
 class AgentTokenGateTests(unittest.TestCase):
-    """Exposed beyond loopback without CHATTABLE_AUTH_TOKEN, agent mode must
-    refuse everywhere."""
+    """Exposed beyond loopback without CHATTABLE_AUTH_TOKEN, the agent
+    endpoints must refuse."""
 
     def setUp(self):
         self._saved = {k: os.environ.get(k)
@@ -57,12 +62,6 @@ class AgentTokenGateTests(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def test_send_agent_refused_without_token(self):
-        r = _client().post("/api/send", json={"content": "do agent things",
-                                              "agent": True}, headers=ORIGIN)
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("CHATTABLE_AUTH_TOKEN", r.json()["detail"])
-
     def test_status_reports_unavailable(self):
         r = _client().get("/api/agent/status")
         self.assertEqual(r.status_code, 200)
@@ -71,24 +70,18 @@ class AgentTokenGateTests(unittest.TestCase):
         self.assertIn("CHATTABLE_AUTH_TOKEN", body["reason"])
         self.assertTrue(body["workspace"])
 
-    def test_mode_toggle_refused_without_token(self):
-        r = _client().post("/api/agent/mode",
-                           json={"node_id": "whatever", "enabled": True},
-                           headers=ORIGIN)
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("CHATTABLE_AUTH_TOKEN", r.json()["detail"])
-
-    def test_approve_refused_without_token(self):
-        r = _client().post("/api/agent/approve",
-                           json={"step_id": "x", "decision": "approve"},
-                           headers=ORIGIN)
-        self.assertEqual(r.status_code, 403)
-        self.assertIn("CHATTABLE_AUTH_TOKEN", r.json()["detail"])
-
-    def test_restore_refused_without_token(self):
-        r = _client().post("/api/agent/restore",
-                           json={"node_id": "x"}, headers=ORIGIN)
-        self.assertEqual(r.status_code, 403)
+    def test_mutating_endpoints_refused_without_token(self):
+        refused = [
+            _client().post("/api/agent/adopt", json={"node_id": "x"}, headers=ORIGIN),
+            _client().post("/api/agent/undo-adopt", json={"previous_commit": "x"},
+                           headers=ORIGIN),
+            _client().get("/api/agent/compare?a=x&b=y", headers=ORIGIN),
+            _client().get("/api/agent/files?node=x", headers=ORIGIN),
+            _client().get("/api/agent/file?node=x&path=a.txt", headers=ORIGIN),
+        ]
+        for r in refused:
+            self.assertEqual(r.status_code, 403)
+            self.assertIn("CHATTABLE_AUTH_TOKEN", r.json()["detail"])
 
 
 class AgentEndpointValidationTests(unittest.TestCase):
@@ -117,35 +110,16 @@ class AgentEndpointValidationTests(unittest.TestCase):
     def test_endpoints_require_the_token_when_set(self):
         # Middleware-level: no credentials at all -> 401.
         self.assertEqual(_client().get("/api/agent/status").status_code, 401)
-        r = _client().post("/api/agent/approve",
-                           json={"step_id": "x", "decision": "approve"},
-                           headers=ORIGIN)
+        r = _client().post("/api/agent/adopt", json={"node_id": "x"}, headers=ORIGIN)
         self.assertEqual(r.status_code, 401)
 
-    def test_approve_unknown_step_404(self):
-        r = _client().post("/api/agent/approve",
-                           json={"step_id": "nope", "decision": "approve"},
-                           headers={**ORIGIN, **self.auth})
-        self.assertEqual(r.status_code, 404)
-
-    def test_approve_bad_decision_400(self):
-        r = _client().post("/api/agent/approve",
-                           json={"step_id": "nope", "decision": "maybe"},
-                           headers={**ORIGIN, **self.auth})
-        self.assertEqual(r.status_code, 400)
-
-    def test_restore_unknown_node_404(self):
-        r = _client().post("/api/agent/restore",
-                           json={"node_id": "nope"},
+    def test_adopt_unknown_node_404(self):
+        r = _client().post("/api/agent/adopt", json={"node_id": "nope"},
                            headers={**ORIGIN, **self.auth})
         self.assertEqual(r.status_code, 404)
 
     def test_node_diff_unknown_404(self):
         r = _client().get("/api/agent/node/nope/diff", headers=self.auth)
-        self.assertEqual(r.status_code, 404)
-
-    def test_step_diff_unknown_404(self):
-        r = _client().get("/api/agent/step/nope/diff", headers=self.auth)
         self.assertEqual(r.status_code, 404)
 
 
