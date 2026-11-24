@@ -144,11 +144,22 @@ try {
               </div>
               <div class="fs-err" x-show="fsPicker.error" x-text="fsPicker.error"></div>
               <div class="fs-foot">
-                <button class="btn-primary" @click="settings.data_dir = fsPicker.path; fsPicker.open=false">Select this folder</button>
+                <button class="btn-primary" @click="settings[fsPicker.target || 'data_dir'] = fsPicker.path; fsPicker.open=false">Select this folder</button>
               </div>
             </div>
           </template>
           <p class="hint">Holds <code>chatable.jsonl</code>. Switching loads that folder's history and is remembered on the next launch.</p>
+
+          <label class="fld">
+            <span>项目目录 (agent workspace)</span>
+            <div class="path-row">
+              <input type="text" x-model="settings.workspace_dir" :disabled="workspaceLocked"
+                     placeholder="留空 = 默认（数据目录下的 workspace/）" spellcheck="false" />
+              <button type="button" class="btn-ghost" :disabled="workspaceLocked"
+                      @click="fsBrowse(settings.workspace_dir, 'workspace_dir')">Browse…</button>
+            </div>
+          </label>
+          <p class="hint">「交给 agent」在此目录运行。当前生效：<code x-text="(config.agent && config.agent.workspace) || '—'"></code><template x-if="workspaceLocked"><span>（由环境变量 CHATTABLE_WORKSPACE 指定，此处只读）</span></template><template x-if="!workspaceLocked && config.agent && config.agent.workspace_source === 'settings'"><span>（来自此设置）</span></template></p>
 
           <template x-if="settingsError">
             <div class="modal-err" x-text="settingsError"></div>
@@ -1834,8 +1845,8 @@ function chatable() {
       this.applyAppearance();
     },
     // Storage-folder browser state (settings modal).
-    fsPicker: {open: false, path: '', parent: null, dirs: [], showHidden: false, loading: false, error: ''},
-    settings: {base_url: '', api_key: '', model: '', data_dir: ''},
+    fsPicker: {open: false, path: '', parent: null, dirs: [], showHidden: false, loading: false, error: '', target: 'data_dir'},
+    settings: {base_url: '', api_key: '', model: '', data_dir: '', workspace_dir: ''},
     // Bookmarks sidebar
     bookmarksOpen: true,
     bookmarks: [],
@@ -2187,6 +2198,9 @@ function chatable() {
         api_key: '',
         model: llm.model || '',
         data_dir: (this.config && this.config.data_dir) || '',
+        // The configured project directory ("" = default); the effective path
+        // is shown next to the field.
+        workspace_dir: (this.config && this.config.agent && this.config.agent.workspace_configured) || '',
       };
       this.settingsError = '';
       this._preModalFocus = document.activeElement;
@@ -2205,9 +2219,16 @@ function chatable() {
       if (el && el.isConnected) this.$nextTick(() => el.focus());
     },
 
-    // Browse the server's local filesystem for the storage-folder setting.
-    async fsBrowse(path) {
+    // Workspace fixed by CHATTABLE_WORKSPACE → the settings field is read-only.
+    get workspaceLocked() {
+      return !!(this.config && this.config.agent && this.config.agent.workspace_source === 'env');
+    },
+
+    // Browse the server's local filesystem for a settings path field
+    // ('data_dir' storage folder or 'workspace_dir' project directory).
+    async fsBrowse(path, target) {
       const p = this.fsPicker;
+      p.target = target || 'data_dir';
       p.open = true;  // open immediately so errors are visible too
       p.loading = true;
       p.error = '';
@@ -2247,6 +2268,9 @@ function chatable() {
       this.settingsError = '';
       const s = this.settings;
       const body = {data_dir: s.data_dir || ''};
+      // Project directory; "" restores the default. Pinned by the env var →
+      // the field is read-only and not sent.
+      if (!this.workspaceLocked) body.workspace_dir = s.workspace_dir || '';
       // Only send model settings if a model is provided.
       if (s.model && s.model.trim()) {
         body.base_url = s.base_url;
@@ -2261,11 +2285,15 @@ function chatable() {
         const data = await resp.json();
         if (!resp.ok) { this.settingsError = data.detail || ('HTTP ' + resp.status); return; }
         this.config = data;
+        // The workspace shown in the composer / agent areas comes from config.
+        if (this.config.agent) this.agent = this.config.agent;
         this.closeSettings();
         toast('Settings saved', 'success');
         // Storage may have changed → reload the tree/view.
         this.selectedId = null; this.messages = [];
         await this.refreshTree();
+        // The orchestrator board keys runs/nodes off the project directory.
+        if (this.orch.open) { this.orch.selected = null; this.refreshOrch(); }
       } catch (e) {
         this.settingsError = String(e);
       } finally {

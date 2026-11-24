@@ -261,12 +261,14 @@ def _update_settings(mutate) -> None:
         _write_settings_atomic(data)
 
 
-def persist_config(data_dir: str = "") -> None:
+def persist_config(data_dir: str = "", workspace_dir: Optional[str] = None) -> None:
     """Write the live config to SETTINGS_PATH.
 
     The file holds the API key, so it is created with 0600 permissions.
     Merges with the existing file: a model-only save keeps the persisted
     storage folder, and a folder-only save keeps the model fields.
+    ``workspace_dir`` None leaves the persisted project directory untouched,
+    "" removes it (back to the default).
     Best-effort: a write failure never breaks the running process.
     """
     def _merge(data: dict) -> None:
@@ -277,6 +279,11 @@ def persist_config(data_dir: str = "") -> None:
         })
         if data_dir:
             data["data_dir"] = data_dir
+        if workspace_dir is not None:
+            if workspace_dir:
+                data["workspace_dir"] = workspace_dir
+            else:
+                data.pop("workspace_dir", None)
     _update_settings(_merge)
 
 
@@ -325,6 +332,11 @@ def _thinking_kwargs() -> dict[str, Any]:
 def load_persisted_data_dir() -> str:
     """The storage folder persisted by the web settings UI, or "" if none."""
     return str(_load_persisted_config().get("data_dir") or "")
+
+
+def load_persisted_workspace_dir() -> str:
+    """The agent project directory persisted by the web settings UI, or "" if none."""
+    return str(_load_persisted_config().get("workspace_dir") or "")
 
 
 # ---- vision capability probe ------------------------------------------------

@@ -839,17 +839,53 @@ class ChatService:
     def data_dir(self) -> str:
         return os.path.dirname(os.path.abspath(self.store.db_path))
 
-    def workspace(self) -> Workspace:
-        """The agent workspace: CHATTABLE_WORKSPACE, else <data_dir>/workspace."""
+    def workspace_source(self) -> tuple[str, str]:
+        """(path, source) of the agent workspace. Priority:
+        CHATTABLE_WORKSPACE env > workspace_dir persisted from the settings
+        UI > <data_dir>/workspace."""
         path = os.environ.get("CHATTABLE_WORKSPACE", "").strip()
-        if not path:
-            path = default_workspace_path(self.data_dir())
+        if path:
+            return path, "env"
+        path = main.load_persisted_workspace_dir().strip()
+        if path:
+            return path, "settings"
+        return default_workspace_path(self.data_dir()), "default"
+
+    def workspace(self) -> Workspace:
+        """The agent workspace (see ``workspace_source``)."""
+        path, _source = self.workspace_source()
         root = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
         ws = self._ws_cache.get(root)
         if ws is None:
             ws = Workspace(root)
             self._ws_cache[root] = ws
         return ws
+
+    def validate_workspace_dir(self, raw: str) -> str:
+        """Resolve a settings-entered project directory to an absolute path.
+
+        "" means "back to the default". Raises ValueError when the path does
+        not exist, is not a directory, or is the data folder itself / its
+        orch or shadow-git directories.
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return ""
+        path = os.path.realpath(os.path.abspath(os.path.expanduser(raw)))
+        if not os.path.exists(path):
+            raise ValueError(f"directory does not exist: {path}")
+        if not os.path.isdir(path):
+            raise ValueError(f"not a directory: {path}")
+        data = os.path.realpath(self.data_dir())
+        forbidden = {
+            data: "the data folder itself",
+            os.path.realpath(os.path.join(data, "orch")):
+                "the data folder's orch directory",
+            os.path.realpath(default_shadow_git_dir(data)): "the shadow git directory",
+        }
+        if path in forbidden:
+            raise ValueError(f"the project directory cannot be {forbidden[path]}: {path}")
+        return path
 
     def shadow_git(self) -> ShadowGit:
         """The shadow snapshot repo for the current workspace."""
@@ -867,6 +903,8 @@ class ChatService:
             "available": ok,
             "reason": "" if ok else AGENT_TOKEN_MESSAGE,
             "workspace": self.workspace().root,
+            "workspace_source": self.workspace_source()[1],
+            "workspace_configured": main.load_persisted_workspace_dir(),
             "auto_approve": sorted(_agent_auto_approve()),
             "git": self.shadow_git().available,
             "sandbox": sandbox_mode(),

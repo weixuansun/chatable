@@ -84,6 +84,9 @@ point.
 `DEEPSEEK_MODEL`, `CHATTABLE_WEB_HOST` / `CHATTABLE_WEB_PORT` (bind address),
 and more — the in-app settings panel covers model, base URL, API key, and
 storage folder.
+- The agent project directory (the workspace 「交给 agent」 runs in) is chosen
+in the same settings panel (项目目录); it defaults to `<data-dir>/workspace`
+and `CHATTABLE_WORKSPACE` still overrides it when set.
 
 ### Exposing the server (optional)
 

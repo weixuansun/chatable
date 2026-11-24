@@ -44,7 +44,7 @@ import main as llm
 from service import ChatService
 from store import NodeNotFoundError, resolve_db_path, TreeStore
 from bookmark_store import BookmarkStore, resolve_bookmarks_path, BookmarkNotFoundError
-from workspace import WorkspaceError
+from workspace import WorkspaceError, default_workspace_path
 from orch.service import OrchService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -259,6 +259,8 @@ class SettingsBody(BaseModel):
     model: Optional[str] = None
     # Storage folder (optional — only rebind if given).
     data_dir: Optional[str] = None
+    # Agent project directory (optional; "" restores <data_dir>/workspace).
+    workspace_dir: Optional[str] = None
 
 
 class EffortBody(BaseModel):
@@ -298,14 +300,14 @@ def api_effort(body: EffortBody) -> dict:
 
 @app.post("/api/settings")
 def api_settings(body: SettingsBody) -> dict:
-    """Apply model/storage settings entered in the web UI.
+    """Apply model/storage/workspace settings entered in the web UI.
 
     The model config (base_url/api_key/model) is persisted to
     ``main.SETTINGS_PATH`` and reloaded on the next launch; the storage
-    folder switch remains session-only. Refuses (409) while any reply or
-    survey report is generating, so a switch never orphans a background job. Applies storage
-    first, then the model config; either is optional. Returns the fresh
-    config on success.
+    folder and the agent project directory are persisted the same way.
+    Refuses (409) while any reply or survey report is generating — or, for a
+    workspace switch, while an agent run is queued/running — so a switch
+    never orphans a background job. Returns the fresh config on success.
     """
     if service.has_active_streams():
         raise HTTPException(
@@ -327,6 +329,30 @@ def api_settings(body: SettingsBody) -> dict:
             )
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"storage: {e}")
+
+    # Agent project directory ("" restores <data_dir>/workspace). Ignored when
+    # CHATTABLE_WORKSPACE pins the workspace — the env var wins.
+    if body.workspace_dir is not None:
+        if os.environ.get("CHATTABLE_WORKSPACE", "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="workspace: pinned by CHATTABLE_WORKSPACE; unset it to choose one here")
+        try:
+            target = service.validate_workspace_dir(body.workspace_dir)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"workspace: {e}")
+        new_root = target or os.path.realpath(
+            os.path.abspath(default_workspace_path(service.data_dir())))
+        if new_root != service.workspace().root and orch.busy():
+            raise HTTPException(
+                status_code=409,
+                detail="an agent run is queued or running; stop it before changing "
+                       "the project directory")
+        llm.persist_config(workspace_dir=target)
+        try:
+            orch.rebind()
+        except RuntimeError as e:  # a run slipped in between the check and now
+            raise HTTPException(status_code=409, detail=str(e))
 
     # Model / credentials.
     if body.model is not None and body.model.strip():
