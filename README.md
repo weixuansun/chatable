@@ -158,7 +158,8 @@ in [docs/agent-api.md](docs/agent-api.md); design notes in
 - Per-agent concurrency: `CHATTABLE_ORCH_LIMITS` (default
   `kimi=2,claude=2,codex=2,builtin=3`). Run/test timeouts:
   `CHATTABLE_ORCH_RUN_TIMEOUT_S` (1800), `CHATTABLE_ORCH_TEST_TIMEOUT_S` (300).
-- Requires `CHATTABLE_AUTH_TOKEN` like agent mode.
+- No access token needed on the default localhost bind; when serving beyond
+  localhost, agent runs require `CHATTABLE_AUTH_TOKEN`.
 - Sandboxing: `builtin` runs use the agent shell sandbox (bwrap on Linux,
   Seatbelt on macOS) confined to the run's worktree. External CLIs (kimi,
   claude, codex) are **not** wrapped — they need network to their APIs and
@@ -184,8 +185,8 @@ backed up and undoable) and **Fork from here** (从此分叉 — continuing from
 older node restores its files first). The mind map and the sidebar tree show only
 these nodes (question + reply, with status and files-changed count); the
 individual steps appear only in the main chat, and branches hang off the
-reply node. It is **off by default** and only available when
-`CHATTABLE_AUTH_TOKEN` is set — the toggle lives in the composer. See
+reply node. It is **off by default** (the toggle lives in the composer); like
+交给 agent it needs `CHATTABLE_AUTH_TOKEN` only when serving beyond localhost. See
 [docs/agent-api.md](docs/agent-api.md) for the full API. After an agent
 reply, typing again continues the same branch by default (the ✕ on the
 composer pill starts a new conversation); "always allow" approvals are

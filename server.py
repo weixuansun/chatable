@@ -624,11 +624,11 @@ def api_stop(assistant_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _require_agent() -> None:
-    """Agent endpoints are dead without the token that makes agent mode safe."""
-    if not _auth_token():
-        raise HTTPException(
-            status_code=403,
-            detail="Agent mode requires CHATTABLE_AUTH_TOKEN to be set")
+    """Agent endpoints are dead when agent mode is unsafe: the server listens
+    beyond loopback without CHATTABLE_AUTH_TOKEN (see service.agent_available)."""
+    import service as _svc_mod
+    if not _svc_mod.agent_available():
+        raise HTTPException(status_code=403, detail=_svc_mod.AGENT_TOKEN_MESSAGE)
 
 
 @app.get("/api/agent/status")
@@ -814,7 +814,7 @@ class RunMergeBody(BaseModel):
 @app.get("/api/run/executors")
 def api_run_executors() -> dict:
     """Which agents can take an instruction (unavailable ones say why)."""
-    return {"executors": orch.executors_status(), "agent_ok": bool(_auth_token()),
+    return {"executors": orch.executors_status(), "agent_ok": __import__("service").agent_available(),
             "workspace": orch.workspace.root}
 
 
@@ -1058,6 +1058,7 @@ def main() -> None:
     # the CHATTABLE_WEB_HOST env fallback captured at import time).
     global _BIND_HOST
     _BIND_HOST = args.host
+    os.environ["CHATTABLE_BIND_HOST"] = args.host  # read by agent_available()
 
     bind = _normalize_host(args.host)
     try:

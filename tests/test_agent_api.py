@@ -39,13 +39,16 @@ def _client() -> TestClient:
 
 
 class AgentTokenGateTests(unittest.TestCase):
-    """Without CHATTABLE_AUTH_TOKEN, agent mode must refuse everywhere."""
+    """Exposed beyond loopback without CHATTABLE_AUTH_TOKEN, agent mode must
+    refuse everywhere."""
 
     def setUp(self):
         self._saved = {k: os.environ.get(k)
-                       for k in ("CHATTABLE_AUTH_TOKEN", "CHATABLE_AUTH_TOKEN")}
+                       for k in ("CHATTABLE_AUTH_TOKEN", "CHATABLE_AUTH_TOKEN",
+                                 "CHATTABLE_BIND_HOST")}
         for k in self._saved:
             os.environ.pop(k, None)
+        os.environ["CHATTABLE_BIND_HOST"] = "0.0.0.0"
 
     def tearDown(self):
         for k, v in self._saved.items():

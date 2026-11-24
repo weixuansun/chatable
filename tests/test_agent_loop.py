@@ -377,12 +377,32 @@ def test_fork_from_readonly_step_restores_pre_turn_state(svc):
 
 # ------------------------------------------------------------- mode + token
 
+def test_agent_mode_available_on_loopback_without_token(tmp_path, monkeypatch):
+    """Default bind (127.0.0.1): agent mode needs no access token."""
+    monkeypatch.delenv("CHATTABLE_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CHATABLE_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CHATTABLE_BIND_HOST", raising=False)
+    monkeypatch.delenv("CHATTABLE_WEB_HOST", raising=False)
+    monkeypatch.setenv("CHATTABLE_WORKSPACE", str(tmp_path / "ws"))
+    svc = ChatService(TreeStore(str(tmp_path / "chat.jsonl")))
+    assert svc.agent_status()["available"] is True
+    for host in ("localhost", "::1", "[::1]", "127.0.0.2"):
+        monkeypatch.setenv("CHATTABLE_BIND_HOST", host)
+        assert service_mod.agent_available() is True, host
+    for host in ("0.0.0.0", "192.168.1.5", "::", "myhost"):
+        monkeypatch.setenv("CHATTABLE_BIND_HOST", host)
+        assert service_mod.agent_available() is False, host
+    monkeypatch.setenv("CHATTABLE_AUTH_TOKEN", "t")
+    assert service_mod.agent_available() is True
+
+
 def test_agent_mode_requires_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHATTABLE_BIND_HOST", "0.0.0.0")
     monkeypatch.delenv("CHATTABLE_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("CHATABLE_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("CHATTABLE_WORKSPACE", str(tmp_path / "ws"))
     svc = ChatService(TreeStore(str(tmp_path / "chat.jsonl")))
-    with pytest.raises(ValueError, match="requires CHATTABLE_AUTH_TOKEN"):
+    with pytest.raises(ValueError, match="CHATTABLE_AUTH_TOKEN"):
         svc.start_turn("do agent things", None, agent=True)
     # Nothing was persisted for the refused turn.
     assert svc.store.all_nodes() == []

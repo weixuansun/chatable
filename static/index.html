@@ -645,7 +645,7 @@ try {
                   title="对话：模型直接回答你，不会改动任何文件">
             <i data-lucide="message-circle"></i>对话</button>
           <button :class="{on: composerMode === 'agent', off: !agent.available}" @click="setComposerMode('agent')"
-                  :title="agent.available ? '交给 agent：把你的消息当作指令，在独立工作区里执行，完成后生成一个可查看改动 / 对比 / 采用的节点' : (agent.reason || '需要设置 CHATTABLE_AUTH_TOKEN')">
+                  :title="agent.available ? '交给 agent：把你的消息当作指令，在独立工作区里执行，完成后生成一个可查看改动 / 对比 / 采用的节点' : (agent.reason || 'agent 不可用')">
             <i data-lucide="bot"></i>交给 agent</button>
         </div>
         <template x-if="composerMode === 'agent'">
@@ -3333,7 +3333,7 @@ function chatable() {
     },
     setComposerMode(m) {
       if (m === 'agent' && !this.agent.available) {
-        toast(this.agent.reason || '交给 agent 需要设置 CHATTABLE_AUTH_TOKEN', 'error');
+        toast(this.agent.reason || '交给 agent 不可用', 'error');
         return;
       }
       this.composerMode = m;
@@ -3504,7 +3504,7 @@ function chatable() {
 
     agentTooltip() {
       if (!this.agent.available) {
-        return this.agent.reason || 'Agent mode requires CHATTABLE_AUTH_TOKEN to be set';
+        return this.agent.reason || 'Agent mode is unavailable';
       }
       const base = this.agentMode ? 'Agent mode ON — model can edit files and run commands in the workspace'
                                   : 'Agent mode OFF — toggle to let the model work in the workspace';
@@ -3513,7 +3513,7 @@ function chatable() {
 
     async toggleAgentMode() {
       if (!this.agent.available) {
-        toast(this.agent.reason || 'Agent mode requires CHATTABLE_AUTH_TOKEN to be set', 'error');
+        toast(this.agent.reason || 'Agent mode is unavailable', 'error');
         return;
       }
       const next = !this.agentMode;

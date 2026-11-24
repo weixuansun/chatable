@@ -3,9 +3,11 @@
 Agent mode gives a conversation a coding-agent loop: workspace-confined file
 and shell tools, a persisted **step node** per tool call, shadow-git
 workspace snapshots, and human approval for mutating calls. It is **off by
-default** and only available when the server is started with
-`CHATTABLE_AUTH_TOKEN` — without a token every agent entry point refuses
-(`400`/`403` with `"Agent mode requires CHATTABLE_AUTH_TOKEN to be set"`).
+default** per conversation. No access token is needed while the server
+listens on loopback (the default `127.0.0.1`); when it is bound beyond
+loopback (`--host 0.0.0.0`, a LAN address…) without `CHATTABLE_AUTH_TOKEN`,
+every agent entry point refuses (`400`/`403`, reason "Agent mode is off
+because the server listens beyond localhost without CHATTABLE_AUTH_TOKEN…").
 When agent mode is off, chat behaviour, tool limits and dedupe are exactly
 the pre-agent behaviour.
 
@@ -228,7 +230,7 @@ affected; persisted step results stay full.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CHATTABLE_AUTH_TOKEN` | (unset) | **Required for agent mode.** Also the existing server auth token. |
+| `CHATTABLE_AUTH_TOKEN` | (unset) | Optional on loopback; **required for agent mode when the server binds beyond loopback.** Also the existing server auth token. |
 | `CHATTABLE_WORKSPACE` | `<data_dir>/workspace` | Agent workspace root (created if missing). |
 | `CHATTABLE_AGENT_AUTO_APPROVE` | (unset) | Comma-separated: `writes` (write_file+edit_file), `shell` (run_shell), `all`. |
 | `CHATTABLE_AGENT_MAX_ROUNDS` | `40` | Agent loop round cap. |

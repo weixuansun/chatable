@@ -147,14 +147,35 @@ def _agent_auth_token() -> str:
             or os.environ.get("CHATABLE_AUTH_TOKEN") or "").strip()
 
 
+def _bind_host_is_loopback() -> bool:
+    """Whether the web server listens on a loopback address only.
+
+    server.main() records the actual bind host in CHATTABLE_BIND_HOST; before
+    that (tests, embedding) CHATTABLE_WEB_HOST or the 127.0.0.1 default is used.
+    """
+    import ipaddress
+    host = (os.environ.get("CHATTABLE_BIND_HOST")
+            or os.environ.get("CHATTABLE_WEB_HOST") or "127.0.0.1").strip()
+    host = host.strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def agent_available() -> bool:
-    """Agent mode is only offered when the server is token-protected: the
-    agent's shell/write tools would otherwise be a local RCE channel for any
-    process that can reach the (loopback-exempt) port."""
-    return bool(_agent_auth_token())
+    """Agent mode needs no password when the server listens on loopback only
+    (the default): the Host allowlist and cross-origin checks keep other
+    devices and web pages out. When it is exposed beyond loopback, the agent's
+    shell/write tools would be reachable from the network, so agent mode then
+    requires CHATTABLE_AUTH_TOKEN."""
+    return _bind_host_is_loopback() or bool(_agent_auth_token())
 
 
-AGENT_TOKEN_MESSAGE = "Agent mode requires CHATTABLE_AUTH_TOKEN to be set"
+AGENT_TOKEN_MESSAGE = ("Agent mode is off because the server listens beyond localhost "
+                       "without CHATTABLE_AUTH_TOKEN; set it or bind to 127.0.0.1")
 
 
 def _agent_auto_approve() -> set[str]:
