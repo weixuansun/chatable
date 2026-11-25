@@ -1260,7 +1260,7 @@ try {
                   <span class="map-status-dot"></span>
                   <span x-text="mapNodeStatus(mn).label"></span>
                   <template x-if="mn.filesChanged"><span class="map-status-files" x-text="'· ' + mn.filesChanged + ' 个文件改动'"></span></template>
-                  <template x-if="mn.test"><span class="map-status-files" x-text="'· ' + (mn.test.new_failures ? ('新失败 ' + mn.test.new_failures) : (mn.test.ok ? '测试通过' : '测试失败'))"></span></template>
+                  <template x-if="mn.test"><span class="map-status-files" x-text="'· ' + (mn.test.ran === false ? '测试没能运行' : mn.test.new_failures ? ('新失败 ' + mn.test.new_failures) : (mn.test.ok ? '测试通过' : '测试失败'))"></span></template>
                   <template x-if="mn.replyId && (mn.runStatus === 'running' || mn.runStatus === 'queued')">
                     <button class="map-cancel" @click.stop="cancelRun(mn.replyId)" title="取消这个任务"><i data-lucide="x"></i></button>
                   </template>
@@ -1560,7 +1560,7 @@ try {
                 <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test">
                   <p><b>Test:</b> <code x-text="orchSelectedNode.facts.test.cmd"></code>
                     → <span :class="orchSelectedNode.facts.test.ok ? 'add' : 'del'"
-                            x-text="(orchSelectedNode.facts.test.passed || 0) + ' passed, ' + (orchSelectedNode.facts.test.failed || 0) + ' failed (baseline ' + (orchSelectedNode.facts.test.baseline ? orchSelectedNode.facts.test.baseline.failed : 0) + ')'"></span></p>
+                            x-text="orchSelectedNode.facts.test.ran === false ? 'could not run' : ((orchSelectedNode.facts.test.passed || 0) + ' passed, ' + (orchSelectedNode.facts.test.failed || 0) + ' failed (baseline ' + (orchSelectedNode.facts.test.baseline ? orchSelectedNode.facts.test.baseline.failed : 0) + ')')"></span></p>
                 </template>
                 <template x-if="orchSelectedNode.facts && orchSelectedNode.facts.test && (orchSelectedNode.facts.test.new_failures || []).length">
                   <p><b>New failures:</b> <span class="del" x-text="orchSelectedNode.facts.test.new_failures.join(', ')"></span></p>
@@ -3213,6 +3213,7 @@ function chatable() {
     orchTestChip(node) {
       const t = node.facts && node.facts.test;
       if (!t) return null;
+      if (t.ran === false) return {cls: 'warn', text: '● tests not run', summary: t.summary || ''};
       const fresh = (t.new_failures || []).length;
       if (fresh) {
         return {cls: 'bad', text: '✗ ' + fresh + ' new failure' + (fresh > 1 ? 's' : ''),
@@ -3542,7 +3543,8 @@ function chatable() {
       const fc = Array.isArray(m.files_changed) ? m.files_changed.length : m.files_changed;
       if (typeof fc === 'number' && (m.run_status && m.run_status !== 'queued' && m.run_status !== 'running')) bits.push(fc ? ('改了 ' + fc + ' 个文件') : '没有改文件');
       const t = m.test;
-      if (t) bits.push(t.new_failures ? ('新失败 ' + t.new_failures) : (t.ok ? ('测试通过' + (t.passed != null ? ' ' + t.passed : '')) : ('测试失败 ' + (t.failed || ''))));
+      if (t && t.ran === false) bits.push('测试没能运行');
+      else if (t) bits.push(t.new_failures ? ('新失败 ' + t.new_failures) : (t.ok ? ('测试通过' + (t.passed != null ? ' ' + t.passed : '')) : ('测试失败 ' + (t.failed || ''))));
       return bits.length ? ' · ' + bits.join(' · ') : '';
     },
     // ---- 单次运行详情面板（GET /api/run/{run_id}）----

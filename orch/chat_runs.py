@@ -382,7 +382,9 @@ class ChatRunsMixin:
                             + "。已自动派一个 agent 去解决。",
                 "tests_failed": f"已合并 {len(nodes)} 个分支，但测试出现新的失败。已自动派一个 agent 去修。",
                 "failed": f"合并失败：{error}"}[status]
-        if test_fact:
+        if test_fact and test_fact.get("ran") is False:
+            head += f"\n\n测试没能运行（{test_fact['cmd']}）。"
+        elif test_fact:
             head += f"\n\n测试：{test_fact['passed']} 通过，{test_fact['failed']} 失败" + (
                 f"（新失败 {len(test_fact['new_failures'])}）" if test_fact["new_failures"] else "")
         content = head + "\n\n## 合并的分支\n\n" + "\n\n".join(lines)

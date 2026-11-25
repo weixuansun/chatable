@@ -1039,7 +1039,8 @@ class ChatService:
             out["files_changed"] = md.get("files_changed")
         test = ((md.get("facts") or {}).get("test")) or None
         if test:
-            out["test"] = {"ok": test.get("ok"), "passed": test.get("passed"),
+            out["test"] = {"ok": test.get("ok"), "ran": test.get("ran", True),
+                           "passed": test.get("passed"),
                            "failed": test.get("failed"),
                            "new_failures": len(test.get("new_failures") or [])}
         return out

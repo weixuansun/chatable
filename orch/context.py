@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import re
 from typing import Optional
 
@@ -22,6 +23,12 @@ PROMPT_TEMPLATE = (
 )
 
 
+def _py() -> str:
+    """`python` where it exists, else `python3` (macOS / Debian ship only
+    python3 by default)."""
+    return "python" if shutil.which("python") else "python3"
+
+
 def detect_test_cmd(wt: str) -> Optional[str]:
     """Best-effort test command for a checked-out project."""
     if os.path.isfile(os.path.join(wt, "package.json")):
@@ -30,9 +37,9 @@ def detect_test_cmd(wt: str) -> Optional[str]:
         return "go test ./..."
     for marker in ("pytest.ini", "conftest.py", "setup.cfg", "pyproject.toml"):
         if os.path.isfile(os.path.join(wt, marker)):
-            return "python -m pytest -q"
+            return f"{_py()} -m pytest -q"
     if os.path.isdir(os.path.join(wt, "tests")) or os.path.isdir(os.path.join(wt, "test")):
-        return "python -m pytest -q"
+        return f"{_py()} -m pytest -q"
     # Config-less pytest projects: test_*.py / *_test.py anywhere near the root.
     try:
         candidates = [os.path.join(wt, n) for n in os.listdir(wt)]
@@ -46,7 +53,7 @@ def detect_test_cmd(wt: str) -> Optional[str]:
         name = os.path.basename(path)
         if os.path.isfile(path) and (name.startswith("test_") or name.endswith("_test.py")) \
                 and name.endswith(".py"):
-            return "python -m pytest -q"
+            return f"{_py()} -m pytest -q"
     makefile = os.path.join(wt, "Makefile")
     if os.path.isfile(makefile):
         try:

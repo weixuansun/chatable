@@ -572,7 +572,7 @@ class OrchService(ChatRunsMixin):
                 self._chat_notice(run, f"运行测试：{test_cmd}")
             fact = self._build_test_fact(wt, test_cmd, parent["snapshot"])
             facts["test"] = fact
-            if not fact["ok"]:
+            if fact["ok"] is False:
                 status = "failed"
                 facts["error"] = "new test failures vs the parent baseline"
 
@@ -690,12 +690,24 @@ class OrchService(ChatRunsMixin):
                          baseline_commit: Optional[str]) -> dict:
         """Run tests in *wt* and shape facts.test, baseline-relative."""
         result = run_test_cmd(wt, test_cmd, TEST_TIMEOUT_S)
+        if not result.get("exit_ok") and not result["passed"] and not result["failed"]:
+            # Non-zero exit with nothing parsed: the runner itself could not
+            # run (command missing, no tests collected, import error before
+            # collection). Report that honestly instead of a vacuous pass.
+            return {
+                "cmd": test_cmd, "ran": False, "ok": None,
+                "passed": 0, "failed": 0, "failed_ids": [],
+                "baseline": {"passed": 0, "failed": 0},
+                "new_failures": [], "fixed": [],
+                "summary": result["summary"],
+            }
         baseline = (self.baseline_test_result(baseline_commit, test_cmd)
                     if baseline_commit else
                     {"passed": 0, "failed": 0, "failed_ids": []})
         delta = compare_to_baseline(result, baseline)
         return {
             "cmd": test_cmd,
+            "ran": True,
             "ok": not delta["new_failures"],
             "passed": result["passed"],
             "failed": result["failed"],
@@ -739,7 +751,7 @@ class OrchService(ChatRunsMixin):
                 if test_cmd:
                     # Baseline = the merge base's result: red only on NEW failures.
                     test_fact = self._build_test_fact(wt, test_cmd, base)
-                    if not test_fact["ok"]:
+                    if test_fact["ok"] is False:
                         status = "tests_failed"
             merge_commit = commit_worktree_tree(
                 self.shadow, wt, commits,

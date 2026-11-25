@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from orch.context import detect_test_cmd, parse_conclusion, write_context
+from orch.context import _py, detect_test_cmd, parse_conclusion, write_context
 from orch.service import OrchService
 from orch.store import OrchStore
 from orch.worktree import facts_files, worktree_create, worktree_remove, worktree_snapshot
@@ -127,15 +127,15 @@ def test_detect_test_cmd(tmp_path):
     assert detect_test_cmd(str(tmp_path)) == "npm test"
     (tmp_path / "package.json").unlink()
     (tmp_path / "conftest.py").write_text("")
-    assert detect_test_cmd(str(tmp_path)) == "python -m pytest -q"
+    assert detect_test_cmd(str(tmp_path)) == f"{_py()} -m pytest -q"
     (tmp_path / "conftest.py").unlink()
     # Config-less pytest projects: bare test files count too.
     (tmp_path / "calc.py").write_text("x = 1\n")
     (tmp_path / "test_calc.py").write_text("def test_x():\n    assert True\n")
-    assert detect_test_cmd(str(tmp_path)) == "python -m pytest -q"
+    assert detect_test_cmd(str(tmp_path)) == f"{_py()} -m pytest -q"
     (tmp_path / "test_calc.py").unlink()
     (tmp_path / "tests").mkdir()
-    assert detect_test_cmd(str(tmp_path)) == "python -m pytest -q"
+    assert detect_test_cmd(str(tmp_path)) == f"{_py()} -m pytest -q"
 
 
 def test_context_file_layers(tmp_path):

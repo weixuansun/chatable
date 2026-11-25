@@ -219,3 +219,22 @@ def test_merge_baseline_new_failure_is_tests_failed(tmp_path, monkeypatch):
     run = ChatOrchWait(svc).wait(res["run_id"])
     m2 = svc.store.nodes[run["node_id"]]
     assert m2["status"] == "ok"
+
+
+@git_required
+def test_test_command_that_cannot_run_is_not_a_pass(tmp_path, monkeypatch):
+    """A missing runner (exit != 0, nothing parsed) is reported as "not run",
+    never as a vacuous pass, and doesn't fail the run either."""
+    svc, _tmp = _orch(tmp_path, monkeypatch)
+    root = svc.store.root_node()
+    parent = _make_child(svc, root, {"README.md": "x\n"}, "base")
+    svc.store.set_meta(test_cmd="definitely-not-a-test-runner-xyz")
+    svc.executors["fake"] = ResolvingFake({"NOTES.md": "docs\n"})
+    rid = svc.submit_runs(parent["id"], [{"instruction": "docs",
+                                          "agents": ["fake"]}])[0]
+    run = ChatOrchWait(svc).wait(rid)
+    node = svc.store.nodes[run["node_id"]]
+    assert node["status"] == "ok"
+    fact = node["facts"]["test"]
+    assert fact["ran"] is False and fact["ok"] is None
+    assert fact["new_failures"] == []
