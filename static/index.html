@@ -1143,19 +1143,34 @@ try {
           <template x-if="adoptModal.error">
             <div class="modal-err" x-text="adoptModal.error"></div>
           </template>
+          <template x-if="adoptModal.counts">
+            <p class="adopt-summary">将新增 <b x-text="adoptModal.counts.added"></b>、修改
+              <b x-text="adoptModal.counts.modified"></b>、删除
+              <b class="sum-del" x-text="adoptModal.counts.deleted"></b> 个文件<template
+                x-if="adoptModal.counts.local_edits">；其中 <b class="sum-local"
+                x-text="adoptModal.counts.local_edits"></b> 个文件你手动改过，会被覆盖</template><template
+                x-if="adoptModal.risky">。采用后可立即撤销。</template></p>
+          </template>
           <template x-if="adoptModal.files">
             <div class="compare-files" x-show="adoptModal.files.length">
               <template x-for="f in adoptModal.files" :key="f.path">
-                <div class="compare-file">
-                  <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
-                  <span class="file-path" :title="f.path" x-text="f.path"></span>
-                  <span class="file-stat binary" x-show="f.binary">binary</span>
-                  <template x-if="!f.binary">
-                    <span class="compare-stats">
-                      <span class="file-stat add" x-text="'+' + f.additions"></span>
-                      <span class="file-stat del" x-text="'-' + f.deletions"></span>
-                    </span>
-                  </template>
+                <div class="compare-file-wrap">
+                  <div class="compare-file adopt-file" @click="f.open = !f.open"
+                       :title="f.open ? '收起 diff' : '查看该文件的 diff'">
+                    <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
+                    <span class="file-path" :title="f.path" x-text="f.path"></span>
+                    <span class="adopt-badge badge-delete" x-show="f.will_delete">将删除</span>
+                    <span class="adopt-badge badge-local" x-show="f.local_edit">你改过·将被覆盖</span>
+                    <span class="file-stat binary" x-show="f.binary">binary</span>
+                    <template x-if="!f.binary">
+                      <span class="compare-stats">
+                        <span class="file-stat add" x-text="'+' + f.additions"></span>
+                        <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                      </span>
+                    </template>
+                  </div>
+                  <pre class="adopt-file-diff" x-show="f.open"
+                       x-text="adoptModal.diffByFile[f.path] || '(无文本 diff)'"></pre>
                 </div>
               </template>
             </div>
@@ -1165,8 +1180,10 @@ try {
         </div>
         <div class="modal-foot">
           <button class="btn-ghost" @click="adoptModal.open = false">Cancel</button>
-          <button class="btn-primary" :disabled="adoptModal.loading || !!adoptModal.error"
-                  @click="confirmAdopt()"><i data-lucide="git-merge"></i> Adopt this branch's files</button>
+          <button class="btn-primary" :class="{'btn-warn': adoptModal.risky}"
+                  :disabled="adoptModal.loading || !!adoptModal.error"
+                  @click="confirmAdopt()"><i data-lucide="git-merge"></i>
+            <span x-text="adoptModal.risky ? '确认采用（含删除/覆盖）' : 'Adopt this branch\'s files'"></span></button>
         </div>
       </div>
     </div>
@@ -1664,19 +1681,34 @@ try {
               <p class="hint">The workspace is restored to that node's snapshot. Your current state is snapshotted first — undo is one click after.</p>
               <template x-if="orch.adopt.loading"><div class="planning"><span class="spin"></span><span>computing changes…</span></div></template>
               <template x-if="orch.adopt.error"><div class="modal-err" x-text="orch.adopt.error"></div></template>
+              <template x-if="orch.adopt.counts">
+                <p class="adopt-summary">将新增 <b x-text="orch.adopt.counts.added"></b>、修改
+                  <b x-text="orch.adopt.counts.modified"></b>、删除
+                  <b class="sum-del" x-text="orch.adopt.counts.deleted"></b> 个文件<template
+                    x-if="orch.adopt.counts.local_edits">；其中 <b class="sum-local"
+                    x-text="orch.adopt.counts.local_edits"></b> 个文件你手动改过，会被覆盖</template><template
+                    x-if="orch.adopt.risky">。采用后可立即撤销。</template></p>
+              </template>
               <template x-if="orch.adopt.files">
                 <div class="compare-files" x-show="orch.adopt.files.length">
                   <template x-for="f in orch.adopt.files" :key="f.path">
-                    <div class="compare-file">
-                      <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
-                      <span class="file-path" :title="f.path" x-text="f.path"></span>
-                      <span class="file-stat binary" x-show="f.binary">binary</span>
-                      <template x-if="!f.binary">
-                        <span class="compare-stats">
-                          <span class="file-stat add" x-text="'+' + f.additions"></span>
-                          <span class="file-stat del" x-text="'-' + f.deletions"></span>
-                        </span>
-                      </template>
+                    <div class="compare-file-wrap">
+                      <div class="compare-file adopt-file" @click="f.open = !f.open"
+                           :title="f.open ? '收起 diff' : '查看该文件的 diff'">
+                        <span class="file-status" :class="'fs-' + f.status" x-text="f.status"></span>
+                        <span class="file-path" :title="f.path" x-text="f.path"></span>
+                        <span class="adopt-badge badge-delete" x-show="f.will_delete">将删除</span>
+                        <span class="adopt-badge badge-local" x-show="f.local_edit">你改过·将被覆盖</span>
+                        <span class="file-stat binary" x-show="f.binary">binary</span>
+                        <template x-if="!f.binary">
+                          <span class="compare-stats">
+                            <span class="file-stat add" x-text="'+' + f.additions"></span>
+                            <span class="file-stat del" x-text="'-' + f.deletions"></span>
+                          </span>
+                        </template>
+                      </div>
+                      <pre class="adopt-file-diff" x-show="f.open"
+                           x-text="orch.adopt.diffByFile[f.path] || '(无文本 diff)'"></pre>
                     </div>
                   </template>
                 </div>
@@ -1685,8 +1717,10 @@ try {
             </div>
             <div class="modal-foot">
               <button class="btn-ghost" @click="orch.adopt.open = false">Cancel</button>
-              <button class="btn-primary" :disabled="orch.adopt.loading || !!orch.adopt.error"
-                      @click="orchConfirmAdopt()"><i data-lucide="git-merge"></i> Adopt</button>
+              <button class="btn-primary" :class="{'btn-warn': orch.adopt.risky}"
+                      :disabled="orch.adopt.loading || !!orch.adopt.error"
+                      @click="orchConfirmAdopt()"><i data-lucide="git-merge"></i>
+                <span x-text="orch.adopt.risky ? '确认采用（含删除/覆盖）' : 'Adopt'"></span></button>
             </div>
           </div>
         </div>
@@ -2016,7 +2050,8 @@ function chatable() {
     filesModal: {open: false, nodeId: null, commit: '', files: [], loading: false,
                  error: '', current: '', content: '', contentLoading: false},
     // Adopt-branch confirm dialog (file-level preview vs current workspace).
-    adoptModal: {open: false, nodeId: null, loading: false, error: '', files: null},
+    adoptModal: {open: false, nodeId: null, loading: false, error: '', files: null,
+                 counts: null, risky: false, diffByFile: {}},
 
     // Orchestrator overlay (external coding agents over a snapshot DAG).
     orch: {open: false, nodes: [], runs: [], executors: {}, limits: {},
@@ -2024,7 +2059,8 @@ function chatable() {
            selected: null, mergeSel: {}, mergeAgent: 'builtin',
            composer: [], lastEvent: {}, sseAbort: null, panelTab: 'detail',
            compare: {open: false, a: null, b: null, loading: false, error: '', data: null},
-           adopt: {open: false, nodeId: null, loading: false, error: '', files: null}},
+           adopt: {open: false, nodeId: null, loading: false, error: '', files: null,
+                   counts: null, risky: false, diffByFile: {}}},
     orchView: {tx: 0, ty: 0, scale: 1, dragging: false, _suppress: false},
 
     // True when any reply is streaming. Derived; never a send gate.
@@ -3337,12 +3373,16 @@ function chatable() {
     },
 
     async orchAdopt(nodeId) {
-      this.orch.adopt = {open: true, nodeId, loading: true, error: '', files: null};
+      this.orch.adopt = {open: true, nodeId, loading: true, error: '', files: null,
+                         counts: null, risky: false, diffByFile: {}};
       try {
-        const r = await fetch('/api/orch/compare?a=workspace&b=' + encodeURIComponent(nodeId));
+        const r = await fetch('/api/orch/node/' + encodeURIComponent(nodeId) + '/adopt-preview');
         const data = await r.json();
         if (!data.ok) throw new Error(data.reason || ('HTTP ' + r.status));
-        this.orch.adopt.files = data.files || [];
+        this.orch.adopt.files = this._adoptSortFiles(data.files || []);
+        this.orch.adopt.counts = data.counts || null;
+        this.orch.adopt.risky = !!(data.counts && (data.counts.deleted || data.counts.local_edits));
+        this.orch.adopt.diffByFile = this._splitDiffByFile(data.diff || '');
       } catch (e) {
         this.orch.adopt.error = e && e.message ? e.message : String(e);
       } finally {
@@ -3840,18 +3880,40 @@ function chatable() {
 
     // ---- adopt branch ("use this node's files") ----------------------------
 
+    // Adopt preview: files the adopt would delete or overwrite go first.
+    _adoptSortFiles(files) {
+      const rank = f => f.will_delete ? 2 : (f.local_edit ? 1 : 0);
+      return files.slice().sort((a, b) => rank(b) - rank(a));
+    },
+
+    // Split a unified diff into per-file chunks, keyed by the "b" path.
+    _splitDiffByFile(diffText) {
+      const out = {};
+      let cur = null;
+      for (const line of (diffText || '').split('\n')) {
+        const m = line.match(/^diff --git a\/.+ b\/(.+)$/);
+        if (m) { cur = m[1]; out[cur] = line; continue; }
+        if (cur) out[cur] += '\n' + line;
+      }
+      return out;
+    },
+
     // Open the confirm dialog with the file-level preview of what adopting
     // would change vs the CURRENT workspace.
     async adoptBranch(nodeId) {
       this.compareModal.open = false;
       this.mindmap.open = false;
-      this.adoptModal = {open: true, nodeId, loading: true, error: '', files: null};
+      this.adoptModal = {open: true, nodeId, loading: true, error: '', files: null,
+                         counts: null, risky: false, diffByFile: {}};
       this.refreshIcons();
       try {
-        const r = await fetch('/api/agent/compare?a=workspace&b=' + encodeURIComponent(nodeId));
+        const r = await fetch('/api/agent/node/' + encodeURIComponent(nodeId) + '/adopt-preview');
         const data = await r.json();
         if (!r.ok || data.ok === false) throw new Error(data.detail || data.reason || ('HTTP ' + r.status));
-        this.adoptModal.files = data.files || [];
+        this.adoptModal.files = this._adoptSortFiles(data.files || []);
+        this.adoptModal.counts = data.counts || null;
+        this.adoptModal.risky = !!(data.counts && (data.counts.deleted || data.counts.local_edits));
+        this.adoptModal.diffByFile = this._splitDiffByFile(data.diff || '');
       } catch (e) {
         this.adoptModal.error = e && e.message ? e.message : String(e);
       } finally {

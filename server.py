@@ -722,6 +722,20 @@ def api_agent_node_diff(node_id: str) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/agent/node/{node_id}/adopt-preview")
+def api_agent_node_adopt_preview(node_id: str) -> dict:
+    """Preview of adopting a node's snapshot: the file changes it would make
+    to the CURRENT workspace, flagging files it would delete and files the
+    user edited locally that the adopt would overwrite."""
+    _require_agent()
+    try:
+        return service.adopt_preview(node_id)
+    except NodeNotFoundError:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/agent/compare")
 def api_agent_compare(a: str, b: str) -> dict:
     """Diff the workspace snapshots nearest nodes ``a`` and ``b`` (branch
@@ -871,6 +885,20 @@ def api_orch_node(node_id: str) -> dict:
         return orch.node_detail(node_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+
+
+@app.get("/api/orch/node/{node_id}/adopt-preview")
+def api_orch_node_adopt_preview(node_id: str) -> dict:
+    """Preview of adopting an orchestrator node's snapshot: the file changes
+    it would make to the CURRENT workspace, with will_delete / local_edit
+    flags and summary counts."""
+    _require_agent()
+    try:
+        return orch.adopt_preview(node_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    except WorkspaceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/orch/compare")

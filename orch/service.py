@@ -23,7 +23,7 @@ from orch.worktree import (
     worktree_remove,
     worktree_snapshot,
 )
-from workspace import WorkspaceError
+from workspace import WorkspaceError, adopt_preview_files
 
 TEST_TIMEOUT_S = int(os.environ.get("CHATTABLE_ORCH_TEST_TIMEOUT_S", "300"))
 _EVENT_CAP_PER_RUN = 300
@@ -84,12 +84,12 @@ def _live_worktree_files(wt: str, base: str) -> list[dict]:
 
     try:
         status = {}
-        for line in git("diff", "--name-status", base).splitlines():
+        for line in git("diff", "--no-renames", "--name-status", base).splitlines():
             parts = line.split("\t")
             if len(parts) >= 2:
                 status[parts[-1]] = parts[0][:1]
         files = []
-        for line in git("diff", "--numstat", base).splitlines():
+        for line in git("diff", "--no-renames", "--numstat", base).splitlines():
             parts = line.split("\t")
             if len(parts) < 3:
                 continue
@@ -826,6 +826,27 @@ class OrchService(ChatRunsMixin):
         with self._cond:
             self._cond.notify_all()
         return run["id"]
+
+    def adopt_preview(self, node_id: str) -> dict:
+        """Preview of adopting a node's snapshot into the CURRENT workspace:
+        per-file changes with will_delete/local_edit flags and counts (see
+        ``workspace.adopt_preview_files``). ``base_commit`` is the snapshot of
+        the node's first parent (the run's starting point); null for the root
+        node — then no file can be flagged ``local_edit``."""
+        node = self.store.nodes.get(node_id)
+        if not node:
+            raise KeyError(node_id)
+        current = self.shadow.snapshot("current workspace state", allow_empty=True)
+        if not current:
+            return {"ok": False, "reason": "workspace snapshots unavailable"}
+        parents = node.get("parents") or []
+        parent = self.store.nodes.get(parents[0]) if parents else None
+        base = (parent or {}).get("snapshot")
+        target = node["snapshot"]
+        return {"ok": True, "node_id": node_id, "workspace_commit": current,
+                "target_commit": target, "base_commit": base,
+                "diff": self.shadow.diff(target, current),
+                **adopt_preview_files(self.shadow, current, target, base)}
 
     def adopt(self, node_id: str) -> dict:
         node = self.store.nodes.get(node_id)

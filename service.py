@@ -67,6 +67,7 @@ from workspace import (
     ShadowGit,
     Workspace,
     WorkspaceError,
+    adopt_preview_files,
     default_shadow_git_dir,
     default_workspace_path,
 )
@@ -1171,6 +1172,41 @@ class ChatService:
             "diff": shadow.diff(cb, ca),
             "files": shadow.diff_numstat(ca, cb),
         }
+
+    def adopt_preview(self, node_id: str) -> dict:
+        """Preview of adopting *node_id*'s snapshot into the CURRENT workspace.
+
+        Same snapshot-vs-workspace diff the adopt dialog shows, plus per-file
+        ``will_delete`` / ``local_edit`` flags and summary counts (see
+        ``workspace.adopt_preview_files``). ``base_commit`` is the snapshot the
+        node's turn started from (``ws_parent_commit``, falling back to the
+        nearest snapshot on the user node); null when unknown — then no file
+        can be flagged ``local_edit``.
+        """
+        if not self.store.exists(node_id):
+            raise NodeNotFoundError(node_id)
+        node = self.store.get(node_id)
+        target = self.nearest_ws_commit(node_id)
+        if not target:
+            return {"ok": False, "reason": "no workspace snapshot on this node's path",
+                    "node_id": node_id}
+        shadow = self.shadow_git()
+        current = shadow.snapshot("current workspace state", allow_empty=True)
+        if not current:
+            return {"ok": False, "reason": "workspace snapshots unavailable (git?)",
+                    "node_id": node_id}
+        md = node.metadata if isinstance(node.metadata, dict) else {}
+        base = md.get("ws_parent_commit")
+        if not base and node.role == "assistant" \
+                and node.parent_id and node.parent_id != ROOT_ID:
+            # The turn's base snapshot lives on its user node.
+            base = self.nearest_ws_commit(node.parent_id)
+        return {"ok": True, "node_id": node_id, "workspace_commit": current,
+                "target_commit": target,
+                "base_commit": str(base) if base else None,
+                "diff": shadow.diff(target, current),
+                **adopt_preview_files(shadow, current, target,
+                                      str(base) if base else None)}
 
     def adopt_snapshot(self, node_id: str) -> dict:
         """Restore the workspace to *node_id*'s snapshot ("adopt this branch").

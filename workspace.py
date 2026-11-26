@@ -306,7 +306,7 @@ class ShadowGit:
         with self._lock:
             self._ensure_init()
             if parent:
-                return self._git("diff", parent, commit).stdout
+                return self._git("diff", "--no-renames", parent, commit).stdout
             proc = self._git("diff-tree", "--root", "-p", commit)
             return proc.stdout
 
@@ -315,8 +315,8 @@ class ShadowGit:
         self._require_git()
         with self._lock:
             self._ensure_init()
-            stats = self._git("diff", "--numstat", a, b).stdout
-            status = self._git("diff", "--name-status", a, b).stdout
+            stats = self._git("diff", "--no-renames", "--numstat", a, b).stdout
+            status = self._git("diff", "--no-renames", "--name-status", a, b).stdout
         status_map: dict[str, str] = {}
         for line in status.splitlines():
             parts = line.split("\t")
@@ -366,3 +366,34 @@ class ShadowGit:
         if truncated:
             data = data[:cap]
         return data.decode("utf-8", errors="replace"), truncated
+
+
+def adopt_preview_files(shadow: "ShadowGit", workspace_commit: str, target_commit: str,
+                        base_commit: Optional[str]) -> dict:
+    """File list + counts for an adopt preview (workspace → target changes).
+
+    Each file gains two flags on top of ``diff_numstat``:
+      - ``will_delete``: present in the current workspace, gone after the adopt;
+      - ``local_edit``: changed in the workspace since *base_commit* (the node's
+        starting snapshot) and the adopt would change it too — i.e. local work
+        the adopt silently overwrites. Always False when *base_commit* is None
+        (no starting snapshot to compare against).
+    """
+    files = shadow.diff_numstat(workspace_commit, target_commit)
+    edited: set[str] = set()
+    if base_commit and base_commit != workspace_commit:
+        edited = {f["path"] for f in shadow.diff_numstat(base_commit, workspace_commit)}
+    counts = {"added": 0, "modified": 0, "deleted": 0, "local_edits": 0}
+    for f in files:
+        status = str(f.get("status") or "M")
+        f["will_delete"] = status.startswith("D")
+        f["local_edit"] = f["path"] in edited
+        if status.startswith("A"):
+            counts["added"] += 1
+        elif status.startswith("D"):
+            counts["deleted"] += 1
+        else:
+            counts["modified"] += 1
+        if f["local_edit"]:
+            counts["local_edits"] += 1
+    return {"files": files, "counts": counts}

@@ -32,6 +32,7 @@ it is required for these routes like any other.
 | `GET /api/agent/status` | — | `{available, reason, workspace, auto_approve, git}` — `available=false` (with `reason`) when no token is set; `workspace` is the resolved workspace root (created on demand); `git` reports shadow-snapshot availability. |
 | `GET /api/agent/node/{node_id}/diff` | — | Node **View diff**: `{ok, node_id, commit, base_commit, diff, files: [{path, status, additions, deletions}]}` — everything the agent turn changed: the node's end-of-turn snapshot vs `ws_parent_commit` (the workspace when the turn started). |
 | `GET /api/agent/compare?a=&b=` | — | Branch compare: `{ok, a_commit, b_commit, diff, files: [{path, status, additions, deletions}]}` between the snapshots nearest the two nodes. |
+| `GET /api/agent/node/{node_id}/adopt-preview` | — | Adopt preview (what the adopt dialog shows): `{ok, node_id, workspace_commit, target_commit, base_commit, diff, files, counts}`. `files` are the current-workspace → node changes (`diff_numstat` fields plus `will_delete`: the file exists locally but not in the snapshot; `local_edit`: the file changed locally since the node's starting snapshot and the adopt would overwrite that local edit). `base_commit` is the node's starting snapshot (`ws_parent_commit`, else the nearest snapshot on its user node); `null` when unknown — then no file is flagged `local_edit`. `counts` is `{added, modified, deleted, local_edits}`. |
 | `GET /api/agent/files?node=` | — | `{ok, commit, files: [path…]}` — files tracked in the snapshot nearest the node. |
 | `GET /api/agent/file?node=&path=` | — | `{ok, commit, path, content, truncated}` — one file at that snapshot (200KB cap, path confined). |
 | `POST /api/agent/adopt` | `{node_id}` | Adopt the node's snapshot into the workspace: snapshots the current state first, restores, records `adopted_at`/`adopted_commit`/`previous_commit` on the node. Returns `{ok, adopted_commit, previous_commit, files}`. |
@@ -53,6 +54,11 @@ overlay is gone from the UI; `/api/orch/*` is kept for API use.
 
 `GET /api/agent/compare?a=&b=` also accepts `a=workspace` (current workspace
 state, snapshotted on the spot) — used by the adopt dialog's preview.
+
+`GET /api/orch/node/{node_id}/adopt-preview` is the orchestrator counterpart
+of the agent adopt preview above: same response shape, except `base_commit`
+is the snapshot of the node's first parent (the run's starting point), and it
+404s on an unknown node id like the other `/api/orch/*` endpoints.
 
 ## Shell safety
 

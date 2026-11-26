@@ -1360,6 +1360,27 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .file-stat.add { color: var(--ok); }
 .file-stat.del { color: var(--fail); }
 
+/* adopt preview: risk summary, delete/local-edit badges, per-file diff */
+.adopt-summary { font-size: 12.5px; color: var(--dim); margin: 0 0 10px; line-height: 1.55; }
+.adopt-summary b { color: var(--fg); font-weight: 600; }
+.adopt-summary .sum-del { color: var(--fail); }
+.adopt-summary .sum-local { color: var(--branch); }
+.compare-file-wrap { display: flex; flex-direction: column; }
+.compare-file.adopt-file { cursor: pointer; }
+.adopt-badge { flex: none; font-size: 10px; font-weight: 600; padding: 1px 6px;
+               border-radius: 4px; line-height: 1.4; white-space: nowrap; }
+.adopt-badge.badge-delete { color: var(--fail); background: var(--fail-soft);
+                            border: 1px solid var(--fail); }
+.adopt-badge.badge-local { color: var(--branch); background: var(--branch-soft);
+                           border: 1px solid var(--branch); }
+.adopt-file-diff { margin: 2px 0 6px 24px; padding: 8px 10px; max-height: 260px;
+                   overflow: auto; background: var(--code-bg); color: var(--code-fg);
+                   border: 1px solid var(--code-border); border-radius: var(--radius-sm);
+                   font-family: var(--font-mono); font-size: 11px; line-height: 1.45;
+                   white-space: pre; }
+.btn-primary.btn-warn { background: var(--fail); color: #fff; }
+.btn-primary.btn-warn:hover:not(:disabled) { background: var(--fail); filter: brightness(1.1); }
+
 /* snapshot file browser */
 .files-list { display: flex; flex-direction: column; gap: 1px; max-height: 180px;
               overflow-y: auto; margin-bottom: 10px; }
