@@ -9,6 +9,7 @@ _cond, _cancelled, _build_test_fact).
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -17,9 +18,11 @@ from typing import Optional
 from models import Node
 from orch.context import detect_test_cmd
 from orch.store import new_id
-from orch.worktree import commit_worktree_tree, merge_base, merge_into_worktree, worktree_remove
+from orch.worktree import commit_worktree_tree, merge_base, merge_into_worktree
 
 STEP_RESULT_CAP = 4000
+
+log = logging.getLogger(__name__)
 
 
 def _args_summary(name: str, args) -> str:
@@ -111,6 +114,25 @@ class ChatRunsMixin:
         if not run_id:
             return False
         return self.cancel_run(run_id)
+
+    def chat_nodes_deleted(self, deleted: list[dict]) -> None:
+        """ChatService.delete_subtree hook: for every deleted node tied to a
+        run, cancel the run when it is still queued/running (its dir is wiped
+        when the run ends) or drop the leftover run dir of a finished one."""
+        for item in deleted:
+            run_id = item.get("run_id") or self._chat_run_by_asst.get(item.get("id") or "")
+            if not run_id:
+                continue
+            run = self.store.runs.get(run_id)
+            if run is None:
+                continue
+            try:
+                if run.get("status") in ("queued", "running"):
+                    self.cancel_run(run_id)
+                else:
+                    self._cleanup_run_dir(run_id)
+            except Exception as e:  # noqa: BLE001 - deletion must not fail on cleanup
+                log.warning("run cleanup on node delete failed for %s: %s", run_id, e)
 
     # ------------------------------------------------------------------ #
     # run hooks (called from OrchService._run_one)
@@ -210,7 +232,10 @@ class ChatRunsMixin:
 
     def _chat_should_stop(self, run: dict) -> bool:
         turn = self._chat_turns.get(run["id"])
-        return bool(turn and turn.stop_requested)
+        if turn and turn.stop_requested:
+            return True
+        aid = (run.get("chat") or {}).get("assistant_id")
+        return bool(aid) and not self.chat.store.exists(aid)  # node deleted mid-run
 
     def _chat_run_finished(self, run: dict, *, status: str, end_commit: str, base: str,
                            files: list, facts: dict, conclusion: dict,
@@ -218,6 +243,15 @@ class ChatRunsMixin:
                            usage: dict, error: str) -> None:
         chat = self.chat
         aid = run["chat"]["assistant_id"]
+        turn = self._chat_turns.pop(run["id"], None)
+        self._chat_run_by_asst.pop(aid, None)
+        if not chat.store.exists(aid):
+            # The user deleted the node mid-run: nothing to persist, just
+            # wind the live turn down.
+            if turn is not None:
+                turn.finish()
+                chat.live.remove(aid)
+            return
         # Close steps that never got a result (killed/cancelled runs).
         for sid in [s for s in self._open_steps(aid)]:
             chat.store.update_metadata(sid, {"status": "error", "result": "(no result)"})
@@ -237,8 +271,6 @@ class ChatRunsMixin:
         if run["chat"].get("merged_from"):
             md["merged_from"] = run["chat"]["merged_from"]
         chat.store.finalize_node(aid, content, usage or {}, md)
-        turn = self._chat_turns.pop(run["id"], None)
-        self._chat_run_by_asst.pop(aid, None)
         if turn is not None:
             turn.append({"type": "done", "id": aid, "content": content,
                          "usage": usage or {}, "stats": "", "elapsed": facts.get("duration_s"),
@@ -343,7 +375,9 @@ class ChatRunsMixin:
                        agent, run_tests) -> None:
         chat = self.chat
         t0 = time.monotonic()
-        wt = os.path.join(self.runs_dir, f"merge-{new_id()}", "wt")
+        name = f"merge-{new_id()}"
+        self._scratch_in_use.add(name)
+        wt = os.path.join(self.runs_dir, name, "wt")
         status, conflict_files, test_fact, merge_commit, error = "failed", [], None, None, ""
         try:
             try:
@@ -355,12 +389,13 @@ class ChatRunsMixin:
                     if test_cmd:
                         turn.append({"type": "notice", "text": f"运行测试：{test_cmd}"})
                         test_fact = self._build_test_fact(wt, test_cmd, base_commit)
-                        if not test_fact["ok"]:
+                        if test_fact["ok"] is False:  # None = could not run
                             status = "tests_failed"
                 merge_commit = commit_worktree_tree(
                     self.shadow, wt, commits, f"chat merge of {len(commits)} nodes")
             finally:
-                worktree_remove(self.shadow, wt)
+                self._cleanup_run_dir(name)
+                self._scratch_in_use.discard(name)
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
             status = "failed"

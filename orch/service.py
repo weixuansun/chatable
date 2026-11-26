@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -29,6 +31,8 @@ TEST_TIMEOUT_S = int(os.environ.get("CHATTABLE_ORCH_TEST_TIMEOUT_S", "300"))
 _EVENT_CAP_PER_RUN = 300
 _STEP_CAP_PER_RUN = 200
 _STEP_OUTPUT_CAP = 300
+
+log = logging.getLogger(__name__)
 
 
 def _record_step(steps: list[dict], ev: dict) -> bool:
@@ -146,8 +150,12 @@ class OrchService(ChatRunsMixin):
         # CHA-5 chat-native runs: run id → live chat turn; assistant id → run id.
         self._chat_turns: dict = {}
         self._chat_run_by_asst: dict[str, str] = {}
+        # baseline-*/merge-* scratch dirs in use by this process (the sweep
+        # must not delete them out from under a concurrent merge).
+        self._scratch_in_use: set[str] = set()
         self._ensure_root()
         self._recover_chat_runs()
+        self.sweep_run_dirs()
         threading.Thread(target=self._queue_loop, daemon=True).start()
 
     # ------------------------------------------------------------------ #
@@ -202,6 +210,9 @@ class OrchService(ChatRunsMixin):
             self._chat_run_by_asst.clear()
             self._ensure_root()
             self._recover_chat_runs()
+            # Under the lock: the queue loop can't start a run (and create
+            # its dir) between the sweep's active-run read and its deletes.
+            self.sweep_run_dirs()
             self._cond.notify_all()
 
     def _recover_chat_runs(self) -> None:
@@ -223,6 +234,80 @@ class OrchService(ChatRunsMixin):
                         "files_changed": 0, "stop_reason": "error"})
             except Exception:  # noqa: BLE001
                 pass
+
+    # ------------------------------------------------------------------ #
+    # run dir cleanup
+    # ------------------------------------------------------------------ #
+
+    def _cleanup_run_dir(self, name: str) -> None:
+        """Delete ``<runs_dir>/<name>`` entirely: the worktree (with its git
+        worktree metadata) plus any scratch the executor left there (the
+        builtin executor keeps its own shadow repo/chat log inside). Only
+        call this once the run's snapshot is committed to the shadow repo —
+        the snapshot is the result, the dir is scratch. Best-effort."""
+        run_dir = os.path.join(self.runs_dir, name)
+        if os.path.dirname(os.path.normpath(run_dir)) != os.path.normpath(self.runs_dir):
+            return
+        try:
+            worktree_remove(self.shadow, os.path.join(run_dir, "wt"))
+        except Exception as e:  # noqa: BLE001 - cleanup is best-effort
+            log.warning("worktree remove failed for %s: %s", name, e)
+        try:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        except OSError as e:
+            log.warning("run dir cleanup failed for %s: %s", name, e)
+
+    def _active_run_ids(self) -> set[str]:
+        """Ids of runs queued/running in ANY project store under this data
+        dir (runs_dir is shared by every project)."""
+        ids: set[str] = set()
+        orch_dir = os.path.dirname(self.store.path)
+        try:
+            paths = [os.path.join(orch_dir, f) for f in os.listdir(orch_dir)
+                     if f.endswith(".jsonl")]
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                store = (self.store if os.path.abspath(path) == os.path.abspath(self.store.path)
+                         else OrchStore(path))
+                for run in store.runs.values():
+                    if run.get("status") in ("queued", "running"):
+                        ids.add(run["id"])
+            except Exception as e:  # noqa: BLE001 - one bad store must not stop the sweep
+                log.warning("could not read orch store %s: %s", path, e)
+        return ids
+
+    def sweep_run_dirs(self) -> None:
+        """Startup/rebind sweep: drop run dirs no live run can still need.
+
+        A dir is kept only while some project's store marks that run
+        queued/running (a queued run recreates the dir when it starts;
+        baseline-*/merge-* scratch dirs are never in use at sweep time).
+        Afterwards ``git worktree prune`` drops the shadow repo's stale
+        worktree metadata. Never touches objects/refs — node snapshots must
+        survive. Best-effort: errors are logged, never raised."""
+        try:
+            active = self._active_run_ids()
+        except Exception as e:  # noqa: BLE001
+            log.warning("run dir sweep: could not list active runs: %s", e)
+            return
+        try:
+            names = os.listdir(self.runs_dir)
+        except OSError:
+            names = []
+        for name in names:
+            if name in active or name in self._scratch_in_use:
+                continue
+            if not os.path.isdir(os.path.join(self.runs_dir, name)):
+                continue
+            self._cleanup_run_dir(name)
+        try:
+            subprocess.run(["git", f"--git-dir={self.shadow.git_dir}",
+                            "worktree", "prune"],
+                           capture_output=True, timeout=60)
+        except Exception as e:  # noqa: BLE001
+            log.warning("git worktree prune failed: %s", e)
 
     def _emit(self, ev: dict) -> None:
         with self._cond:
@@ -539,84 +624,84 @@ class OrchService(ChatRunsMixin):
             self._cancelled.discard(run_id)
             self._procs.pop(run_id, None)
 
-        # Snapshot whatever state the run left (failed/cancelled included).
-        end_commit = None
-        if os.path.isdir(wt):
-            try:
-                end_commit = worktree_snapshot(self.shadow, wt,
-                                               f"orch run {run_id}")
-            except WorkspaceError:
-                end_commit = None
-        if end_commit is None:
-            end_commit = parent["snapshot"]
-        files = facts_files(self.shadow, parent["snapshot"], end_commit)
+        # Snapshot whatever state the run left (failed/cancelled included) —
+        # before the finally below wipes the worktree and the run dir.
+        try:
+            end_commit = None
+            if os.path.isdir(wt):
+                try:
+                    end_commit = worktree_snapshot(self.shadow, wt,
+                                                   f"orch run {run_id}")
+                except WorkspaceError:
+                    end_commit = None
+            if end_commit is None:
+                end_commit = parent["snapshot"]
+            files = facts_files(self.shadow, parent["snapshot"], end_commit)
 
-        status = ("cancelled" if cancelled
-                  else "ok" if result.get("exit_code") == 0 and not error else "failed")
-        facts = {
-            "files": files,
-            "exit_code": result.get("exit_code"),
-            "duration_s": round(time.monotonic() - t0, 1),
-            "usage": result.get("usage") or {},
-        }
-        if error:
-            facts["error"] = error
-        if result.get("killed"):
-            facts["killed"] = result["killed"]
+            status = ("cancelled" if cancelled
+                      else "ok" if result.get("exit_code") == 0 and not error else "failed")
+            facts = {
+                "files": files,
+                "exit_code": result.get("exit_code"),
+                "duration_s": round(time.monotonic() - t0, 1),
+                "usage": result.get("usage") or {},
+            }
+            if error:
+                facts["error"] = error
+            if result.get("killed"):
+                facts["killed"] = result["killed"]
 
-        # Post-run test, RELATIVE to the parent snapshot's baseline: a run is
-        # red only when it introduces NEW failures — pre-existing failures
-        # (e.g. a bug being fixed on a sibling branch) don't count.
-        if status == "ok" and test_cmd and os.path.isdir(wt):
+            # Post-run test, RELATIVE to the parent snapshot's baseline: a run is
+            # red only when it introduces NEW failures — pre-existing failures
+            # (e.g. a bug being fixed on a sibling branch) don't count.
+            if status == "ok" and test_cmd and os.path.isdir(wt):
+                if chat:
+                    self._chat_notice(run, f"运行测试：{test_cmd}")
+                fact = self._build_test_fact(wt, test_cmd, parent["snapshot"])
+                facts["test"] = fact
+                if fact["ok"] is False:
+                    status = "failed"
+                    facts["error"] = "new test failures vs the parent baseline"
+
+            conclusion = parse_conclusion(result.get("final_text") or error or "")
             if chat:
-                self._chat_notice(run, f"运行测试：{test_cmd}")
-            fact = self._build_test_fact(wt, test_cmd, parent["snapshot"])
-            facts["test"] = fact
-            if fact["ok"] is False:
-                status = "failed"
-                facts["error"] = "new test failures vs the parent baseline"
-
-        conclusion = parse_conclusion(result.get("final_text") or error or "")
-        if chat:
-            self.store.update_run(run_id, status=status, node_id=chat["assistant_id"],
+                self.store.update_run(run_id, status=status, node_id=chat["assistant_id"],
+                                      finished_at=time.time(), error=error,
+                                      events=events[-_EVENT_CAP_PER_RUN:],
+                                      steps=list(steps), steps_done=steps_done)
+                try:
+                    self._chat_run_finished(
+                        run, status=status, end_commit=end_commit, base=parent["snapshot"],
+                        files=files, facts=facts, conclusion=conclusion,
+                        final_text=result.get("final_text") or "",
+                        session_id=result.get("session_id"),
+                        usage=result.get("usage") or {}, error=error)
+                finally:
+                    self._emit({"type": "run_finished", "run_id": run_id,
+                                "status": status, "node_id": None})
+                return
+            node = {
+                "id": new_id(), "snapshot": end_commit,
+                "instruction": run["instruction"], "parents": [parent["id"]],
+                "agent": run["agent"], "model": None,
+                "status": status, "adopted": False,
+                "conclusion": conclusion, "facts": facts,
+                "session_id": result.get("session_id"),
+                "events": events[-_EVENT_CAP_PER_RUN:],
+                "created_at": time.time(),
+            }
+            self.store.add_node(node)
+            self.store.update_run(run_id, status=status, node_id=node["id"],
                                   finished_at=time.time(), error=error,
                                   events=events[-_EVENT_CAP_PER_RUN:],
                                   steps=list(steps), steps_done=steps_done)
-            try:
-                self._chat_run_finished(
-                    run, status=status, end_commit=end_commit, base=parent["snapshot"],
-                    files=files, facts=facts, conclusion=conclusion,
-                    final_text=result.get("final_text") or "",
-                    session_id=result.get("session_id"),
-                    usage=result.get("usage") or {}, error=error)
-            finally:
-                self._emit({"type": "run_finished", "run_id": run_id,
-                            "status": status, "node_id": None})
-                worktree_remove(self.shadow, wt)
-                with self._cond:
-                    self._cond.notify_all()
-            return
-        node = {
-            "id": new_id(), "snapshot": end_commit,
-            "instruction": run["instruction"], "parents": [parent["id"]],
-            "agent": run["agent"], "model": None,
-            "status": status, "adopted": False,
-            "conclusion": conclusion, "facts": facts,
-            "session_id": result.get("session_id"),
-            "events": events[-_EVENT_CAP_PER_RUN:],
-            "created_at": time.time(),
-        }
-        self.store.add_node(node)
-        self.store.update_run(run_id, status=status, node_id=node["id"],
-                              finished_at=time.time(), error=error,
-                              events=events[-_EVENT_CAP_PER_RUN:],
-                              steps=list(steps), steps_done=steps_done)
-        self._emit({"type": "run_finished", "run_id": run_id,
-                    "status": status, "node_id": node["id"]})
-        self._emit({"type": "node_created", "node": node})
-        worktree_remove(self.shadow, wt)
-        with self._cond:
-            self._cond.notify_all()
+            self._emit({"type": "run_finished", "run_id": run_id,
+                        "status": status, "node_id": node["id"]})
+            self._emit({"type": "node_created", "node": node})
+        finally:
+            self._cleanup_run_dir(run_id)
+            with self._cond:
+                self._cond.notify_all()
 
     # ------------------------------------------------------------------ #
     # compare / adopt
@@ -677,12 +762,15 @@ class OrchService(ChatRunsMixin):
         cached = self._test_cache.get(commit)
         if cached and cached.get("cmd") == test_cmd:
             return cached
-        wt = os.path.join(self.runs_dir, f"baseline-{new_id()}", "wt")
+        name = f"baseline-{new_id()}"
+        self._scratch_in_use.add(name)
+        wt = os.path.join(self.runs_dir, name, "wt")
         worktree_create(self.shadow, commit, wt)
         try:
             result = run_test_cmd(wt, test_cmd, TEST_TIMEOUT_S)
         finally:
-            worktree_remove(self.shadow, wt)
+            self._cleanup_run_dir(name)
+            self._scratch_in_use.discard(name)
         self._test_cache[commit] = result
         return result
 
@@ -736,7 +824,9 @@ class OrchService(ChatRunsMixin):
         self._emit({"type": "merge_started", "nodes": node_ids,
                     "instruction": instruction})
         t0 = time.monotonic()
-        wt = os.path.join(self.runs_dir, f"merge-{new_id()}", "wt")
+        name = f"merge-{new_id()}"
+        self._scratch_in_use.add(name)
+        wt = os.path.join(self.runs_dir, name, "wt")
         base = None
         conflict_files: list[str] = []
         test_fact = None
@@ -757,7 +847,8 @@ class OrchService(ChatRunsMixin):
                 self.shadow, wt, commits,
                 f"orchestrator merge of {len(commits)} nodes")
         finally:
-            worktree_remove(self.shadow, wt)
+            self._cleanup_run_dir(name)
+            self._scratch_in_use.discard(name)
 
         instr_lines = ["- " + " ".join((n.get("instruction") or "?").split())[:80]
                        for n in nodes]

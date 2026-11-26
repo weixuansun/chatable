@@ -1718,22 +1718,49 @@ class ChatService:
         self.store.update_metadata(node_id, {"title_locked": bool(title)})
         return {"ok": True, "id": node_id, "title": title}
 
+    def _subtree_run_refs(self, nid: str) -> list[dict]:
+        """Nodes in the subtree that reference an orchestrator run — handed
+        to the subtree_deleted_hook so run dirs can be cleaned up."""
+        cmap = self.store.children_map()
+        out: list[dict] = []
+        stack = [nid]
+        seen: set[str] = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or not self.store.exists(cur):
+                continue
+            seen.add(cur)
+            md = self.store.get(cur).metadata
+            if isinstance(md, dict) and md.get("run_id"):
+                out.append({"id": cur, "run_id": md["run_id"]})
+            stack.extend(cmap.get(cur, ()))
+        return out
+
     def delete_subtree(self, nid: str) -> int:
         """Delete a node and its descendants (used to discard an interrupted turn).
 
         Deleting a whole conversation also drops its survey report and stops a
-        report job still running for it.
+        report job still running for it. Nodes referencing an orchestrator run
+        are reported to the subtree_deleted_hook (run dir cleanup / cancel).
         """
         if not self.store.exists(nid):
             return 0
+        run_refs = self._subtree_run_refs(nid)
         if self.store.get(nid).parent_id != ROOT_ID:
-            return self.store.delete_subtree(nid)
-        with self._report_lock:
-            job = self.reports.get(nid)
-            if job is not None:
-                job.request_stop()
             removed = self.store.delete_subtree(nid)
-            report_store.delete(self._reports_dir(), nid)
+        else:
+            with self._report_lock:
+                job = self.reports.get(nid)
+                if job is not None:
+                    job.request_stop()
+                removed = self.store.delete_subtree(nid)
+                report_store.delete(self._reports_dir(), nid)
+        hook = getattr(self, "subtree_deleted_hook", None)
+        if hook is not None and run_refs:
+            try:
+                hook(run_refs)
+            except Exception:  # noqa: BLE001 - cleanup hooks are best-effort
+                pass
         return removed
 
     def export_tree_markdown(self, trunk_id: str) -> tuple[str, str]:

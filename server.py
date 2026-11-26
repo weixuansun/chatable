@@ -65,6 +65,8 @@ llm.init_vision_flag()
 orch = OrchService(service)
 # Stop on an agent-run reply cancels the queued/running orchestrator run.
 service.run_stop_hook = orch.stop_chat_run
+# Deleting a chat node cleans up (or cancels) the orchestrator run behind it.
+service.subtree_deleted_hook = orch.chat_nodes_deleted
 
 
 # ---------------------------------------------------------------------------
