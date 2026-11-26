@@ -1,5 +1,6 @@
 """Run dir cleanup: end-of-run wipe (ok/failed/cancelled/crashed), the
 node-delete hook, and the startup sweep over the shared runs dir."""
+import hashlib
 import os
 import subprocess
 import threading
@@ -7,6 +8,7 @@ import time
 
 import pytest
 
+from models import Node
 from orch.service import OrchService
 from orch.store import OrchStore
 from orch.worktree import worktree_create
@@ -202,7 +204,8 @@ def test_startup_sweep(tmp_path, monkeypatch):
                  "extra_context": ""},
     })
     os.makedirs(os.path.join(orch.runs_dir, "deadchat1234", "wt"))
-    # Another project sharing runs_dir, with runs still queued/running.
+    # Another project sharing runs_dir, with stale queued/running runs.
+    # Recovery treats those as interrupted too (they are not live here).
     other = OrchStore(os.path.join(chat.data_dir(), "orch", "otherproject0.jsonl"))
     for rid, status in (("otherrunning1", "running"), ("otherqueued1", "queued")):
         other.add_run({"id": rid, "from_node": None, "instruction": "x",
@@ -213,10 +216,16 @@ def test_startup_sweep(tmp_path, monkeypatch):
     orch2 = OrchService(chat, executors={"a": WriterExecutor("a.txt")})
     for gone in (crashed, os.path.join(orch.runs_dir, "baseline-x"),
                  os.path.join(orch.runs_dir, "merge-y"),
-                 os.path.join(orch.runs_dir, "deadchat1234")):
+                 os.path.join(orch.runs_dir, "deadchat1234"),
+                 os.path.join(orch.runs_dir, "otherrunning1"),
+                 os.path.join(orch.runs_dir, "otherqueued1")):
         assert not os.path.exists(gone), gone
-    for kept in ("otherrunning1", "otherqueued1"):
-        assert os.path.isdir(os.path.join(orch.runs_dir, kept)), kept
+    # Other-project queued/running runs were not live in this process, so
+    # recovery marks them failed (and the sweep then drops their dirs).
+    other2 = OrchStore(os.path.join(chat.data_dir(), "orch", "otherproject0.jsonl"))
+    assert other2.runs["otherrunning1"]["status"] == "failed"
+    assert other2.runs["otherqueued1"]["status"] == "failed"
+    assert other2.runs["otherrunning1"]["error"] == "interrupted: server restarted"
     # The crashed worktree's metadata was pruned from the shadow repo.
     out = subprocess.run(["git", f"--git-dir={orch.shadow.git_dir}",
                           "worktree", "list", "--porcelain"],
@@ -248,3 +257,144 @@ def test_sweep_skips_scratch_dirs_in_use(tmp_path, monkeypatch):
     orch.sweep_run_dirs()
     assert os.path.isdir(live)
     assert not os.path.exists(os.path.dirname(stale))
+
+
+
+# ------------------------------------------------ interrupted-run recovery
+
+def _planted(tmp_path, monkeypatch):
+    """A chat service and an on-disk orch store with no queue loop yet."""
+    monkeypatch.setenv("CHATTABLE_AUTH_TOKEN", "t")
+    monkeypatch.setenv("CHATTABLE_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.setenv("CHATTABLE_ORCH_LIMITS", "a=2,fake=2")
+    monkeypatch.setenv("CHATTABLE_RETAIN_FINISHED_TURN_S", "60")
+    chat = ChatService(TreeStore(str(tmp_path / "chat.jsonl")))
+    os.makedirs(chat.workspace().root, exist_ok=True)
+    with open(os.path.join(chat.workspace().root, "base.txt"), "w") as fh:
+        fh.write("base\n")
+    snap = chat.shadow_git().snapshot("test root", allow_empty=True)
+    pid = hashlib.sha1(chat.workspace().root.encode()).hexdigest()[:12]
+    store = OrchStore(os.path.join(chat.data_dir(), "orch", f"{pid}.jsonl"))
+    root = {"id": "rootplant000", "root": True, "snapshot": snap,
+            "instruction": None, "parents": [], "agent": None,
+            "status": "ok", "adopted": False, "conclusion": {}, "facts": {},
+            "created_at": time.time()}
+    store.add_node(root)
+    return chat, store, snap, root
+
+
+@git_required
+def test_interrupted_orch_run_marked_failed_and_dir_removed(tmp_path, monkeypatch):
+    """An orchestrator-view (non-chat) run left 'running' or 'queued' after a
+    crash is marked failed on the next OrchService start; its dir is swept
+    and any linked DAG node is flipped from running to failed."""
+    chat, store, snap, root = _planted(tmp_path, monkeypatch)
+    running, queued, node_id = "orchrunning01", "orchqueued001", "orchnode00001"
+    store.add_node({
+        "id": node_id, "snapshot": snap, "instruction": "half done",
+        "parents": [root["id"]], "agent": "a", "status": "running",
+        "adopted": False, "conclusion": {}, "facts": {},
+        "created_at": time.time(),
+    })
+    store.add_run({
+        "id": running, "from_node": root["id"], "instruction": "half done",
+        "agent": "a", "after": None, "status": "running",
+        "created_at": time.time(), "started_at": time.time(),
+        "finished_at": None, "node_id": node_id, "events": [], "error": "",
+        "steps": [], "steps_done": 0,
+    })
+    store.add_run({
+        "id": queued, "from_node": root["id"], "instruction": "never started",
+        "agent": "a", "after": None, "status": "queued",
+        "created_at": time.time(), "started_at": None,
+        "finished_at": None, "node_id": None, "events": [], "error": "",
+        "steps": [], "steps_done": 0,
+    })
+    runs_dir = os.path.join(chat.data_dir(), "orch", "runs")
+    worktree_create(chat.shadow_git(), snap, os.path.join(runs_dir, running, "wt"))
+    os.makedirs(os.path.join(runs_dir, queued, "wt"))
+
+    orch = OrchService(chat, executors={"a": WriterExecutor("a.txt")})
+    for rid in (running, queued):
+        run = orch.store.runs[rid]
+        assert run["status"] == "failed", run
+        assert run["error"] == "interrupted: server restarted"
+        assert run.get("finished_at")
+        assert not os.path.exists(os.path.join(orch.runs_dir, rid))
+    node = orch.store.nodes[node_id]
+    assert node["status"] == "failed"
+    assert node["facts"]["error"] == "interrupted: server restarted"
+    proc = subprocess.run(["git", f"--git-dir={orch.shadow.git_dir}",
+                           "cat-file", "-e", snap], capture_output=True)
+    assert proc.returncode == 0
+    (new_id,) = orch.submit_runs(root["id"], [{"instruction": "write a.txt",
+                                               "agents": ["a"]}])
+    done = ChatOrchWait(orch).wait(new_id)
+    assert done["status"] == "ok"
+    new_node = orch.store.nodes[done["node_id"]]
+    assert new_node["status"] == "ok" and new_node["snapshot"]
+
+
+@git_required
+def test_interrupted_chat_run_queued_or_running_is_finalized(tmp_path, monkeypatch):
+    """Chat-path runs left queued or running (server killed) finalize their
+    assistant node as failed and do not auto-resume after restart."""
+    chat, store, snap, root = _planted(tmp_path, monkeypatch)
+    runs_dir = os.path.join(chat.data_dir(), "orch", "runs")
+    planted = []
+    for rid, status in (("deadchatrun01", "running"), ("deadchatqueue1", "queued")):
+        user = Node.new(role="user", content=f"do {status}", parent_id=ROOT_ID)
+        user.metadata = {"orch_run": True, "executor": "a", "ws_commit": snap}
+        chat.store.add(user)
+        asst = Node.new(role="assistant", content="", parent_id=user.id)
+        asst.metadata = {"agent": True, "orch_run": True, "executor": "a",
+                         "run_id": rid, "run_status": status,
+                         "ws_parent_commit": snap}
+        chat.store.add(asst)
+        store.add_run({
+            "id": rid, "from_node": None, "instruction": f"do {status}",
+            "agent": "a", "after": None, "status": status,
+            "created_at": time.time(), "started_at": time.time() if status == "running" else None,
+            "finished_at": None, "node_id": None, "events": [], "error": "",
+            "steps": [], "steps_done": 0,
+            "chat": {"user_id": user.id, "assistant_id": asst.id,
+                     "parent_id": ROOT_ID, "base_commit": snap, "extra_context": ""},
+        })
+        os.makedirs(os.path.join(runs_dir, rid, "wt"))
+        planted.append((rid, asst.id))
+
+    orch = OrchService(chat, executors={"a": WriterExecutor("a.txt")})
+    for rid, aid in planted:
+        run = orch.store.runs[rid]
+        assert run["status"] == "failed", run
+        assert run["error"] == "interrupted: server restarted"
+        md = chat.store.get(aid).metadata or {}
+        assert md.get("run_status") == "failed"
+        assert md.get("stop_reason") == "error"
+        assert "运行被中断" in (chat.store.get(aid).content or "")
+        assert not os.path.exists(os.path.join(orch.runs_dir, rid))
+    # A new chat run still works after recovery.
+    (fresh,) = orch.start_chat_runs("write a.txt", None, ["a"])
+    _wait(chat, fresh["assistant_id"])
+    assert orch.store.runs[fresh["run_id"]]["status"] == "ok"
+    assert (chat.store.get(fresh["assistant_id"]).metadata or {}).get("run_status") == "ok"
+
+
+@git_required
+def test_recover_leaves_live_run_alone(tmp_path, monkeypatch):
+    """A run this process is actually executing is not marked failed."""
+    chat, orch = _svc(tmp_path, monkeypatch, {"a": BlockingExecutor()})
+    block = orch.executors["a"]
+    (r,) = orch.start_chat_runs("hold", None, ["a"])
+    assert block.started.wait(5)
+    assert orch.store.runs[r["run_id"]]["status"] == "running"
+    wt = os.path.join(orch.runs_dir, r["run_id"], "wt")
+    _wait_dir(wt)
+    orch._recover_interrupted_runs()
+    orch.sweep_run_dirs()
+    assert orch.store.runs[r["run_id"]]["status"] == "running"
+    assert os.path.isdir(wt)
+    assert (chat.store.get(r["assistant_id"]).metadata or {}).get("run_status") == "running"
+    block.release.set()
+    _wait(chat, r["assistant_id"])
+    assert orch.store.runs[r["run_id"]]["status"] == "ok"

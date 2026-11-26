@@ -153,8 +153,11 @@ class OrchService(ChatRunsMixin):
         # baseline-*/merge-* scratch dirs in use by this process (the sweep
         # must not delete them out from under a concurrent merge).
         self._scratch_in_use: set[str] = set()
+        # Run ids this process is currently executing (_queue_loop adds,
+        # _run_one removes). Startup/rebind recovery leaves these alone.
+        self._inflight: set[str] = set()
         self._ensure_root()
-        self._recover_chat_runs()
+        self._recover_interrupted_runs()
         self.sweep_run_dirs()
         threading.Thread(target=self._queue_loop, daemon=True).start()
 
@@ -208,32 +211,79 @@ class OrchService(ChatRunsMixin):
             self._test_cache.clear()
             self._chat_turns.clear()
             self._chat_run_by_asst.clear()
+            self._inflight.clear()
             self._ensure_root()
-            self._recover_chat_runs()
+            self._recover_interrupted_runs()
             # Under the lock: the queue loop can't start a run (and create
             # its dir) between the sweep's active-run read and its deletes.
             self.sweep_run_dirs()
             self._cond.notify_all()
 
-    def _recover_chat_runs(self) -> None:
-        """Chat runs interrupted by a server restart: mark them failed so
-        their nodes don't spin forever (queued ones simply run again)."""
-        for run in list(self.store.runs.values()):
-            if not run.get("chat") or run.get("status") != "running":
+    _INTERRUPTED = "interrupted: server restarted"
+
+    def _live_run_ids(self) -> set[str]:
+        """Runs this process is actually executing right now."""
+        return set(self._inflight) | set(self._procs) | set(self._chat_turns)
+
+    def _recover_interrupted_runs(self) -> None:
+        """Startup/rebind: persisted queued/running runs that this process
+        is not executing were interrupted (the previous server was killed).
+        Mark them failed so they don't sit on 'running' forever, then the
+        sweep can drop their dirs. Best-effort — never fails startup."""
+        try:
+            with self._cond:
+                live = self._live_run_ids()
+                self._recover_store_runs(self.store, live, update_chat=True)
+                orch_dir = os.path.dirname(self.store.path)
+                try:
+                    names = [f for f in os.listdir(orch_dir) if f.endswith(".jsonl")]
+                except OSError:
+                    names = []
+                for name in names:
+                    path = os.path.join(orch_dir, name)
+                    if os.path.abspath(path) == os.path.abspath(self.store.path):
+                        continue
+                    try:
+                        self._recover_store_runs(OrchStore(path), live, update_chat=False)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("could not recover orch store %s: %s", path, e)
+        except Exception as e:  # noqa: BLE001
+            log.warning("interrupted-run recovery failed: %s", e)
+
+    def _recover_store_runs(self, store, live: set[str], *, update_chat: bool) -> None:
+        for run in list(store.runs.values()):
+            if run.get("status") not in ("queued", "running"):
                 continue
-            self.store.update_run(run["id"], status="failed", finished_at=time.time(),
-                                  error="server restarted during the run")
+            if run["id"] in live:
+                continue
+            store.update_run(run["id"], status="failed", finished_at=time.time(),
+                             error=self._INTERRUPTED)
+            nid = run.get("node_id")
+            if nid and nid in store.nodes:
+                node = store.nodes[nid]
+                if node.get("status") in (None, "queued", "running"):
+                    facts = dict(node.get("facts") or {})
+                    facts["error"] = self._INTERRUPTED
+                    store.update_node(nid, status="failed", facts=facts)
+            if not (update_chat and run.get("chat")):
+                continue
             aid = run["chat"].get("assistant_id")
             try:
                 if aid and self.chat.store.exists(aid):
-                    self.chat.store.finalize_node(aid, "运行被中断（服务重启）。", {}, {
-                        "agent": True, "orch_run": True, "executor": run.get("agent"),
-                        "run_id": run["id"], "run_status": "failed",
-                        "ws_commit": run["chat"].get("base_commit"),
-                        "ws_parent_commit": run["chat"].get("base_commit"),
-                        "files_changed": 0, "stop_reason": "error"})
-            except Exception:  # noqa: BLE001
-                pass
+                    md = self.chat.store.get(aid).metadata or {}
+                    if md.get("run_status") in (None, "queued", "running"):
+                        self.chat.store.finalize_node(
+                            aid, "运行被中断（服务重启）。", {}, {
+                                "agent": True, "orch_run": True,
+                                "executor": run.get("agent"),
+                                "run_id": run["id"], "run_status": "failed",
+                                "ws_commit": md.get("ws_commit") or run["chat"].get("base_commit"),
+                                "ws_parent_commit": run["chat"].get("base_commit"),
+                                "files_changed": md.get("files_changed") or 0,
+                                "facts": {**(md.get("facts") or {}), "error": self._INTERRUPTED},
+                                "stop_reason": "error"})
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not finalize interrupted chat node %s: %s", aid, e)
 
     # ------------------------------------------------------------------ #
     # run dir cleanup
@@ -526,6 +576,7 @@ class OrchService(ChatRunsMixin):
                 continue
             self.store.update_run(run["id"], status="running",
                                   started_at=time.time())
+            self._inflight.add(run["id"])
             self._emit({"type": "run_started", "run_id": run["id"],
                         "agent": run["agent"], "instruction": run["instruction"]})
             if run.get("chat"):
@@ -699,6 +750,7 @@ class OrchService(ChatRunsMixin):
                         "status": status, "node_id": node["id"]})
             self._emit({"type": "node_created", "node": node})
         finally:
+            self._inflight.discard(run_id)
             self._cleanup_run_dir(run_id)
             with self._cond:
                 self._cond.notify_all()
