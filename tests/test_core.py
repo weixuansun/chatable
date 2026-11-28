@@ -909,6 +909,7 @@ class WebSearchChainTests(unittest.TestCase):
 
         env = {"TAVILY_API_KEY": "t", "EXA_API_KEY": "e"}
         with patch.dict(os.environ, env, clear=True), \
+             patch.object(web_tools, "_deepseek_search_api_key", lambda: ""), \
              patch.object(web_tools, "_tavily_search", fail), \
              patch.object(web_tools, "_exa_search", ok_exa):
             res = web_tools.web_search("q")
@@ -930,6 +931,7 @@ class WebSearchChainTests(unittest.TestCase):
 
         env = {"TAVILY_API_KEY": "t", "EXA_API_KEY": "e"}
         with patch.dict(os.environ, env, clear=True), \
+             patch.object(web_tools, "_deepseek_search_api_key", lambda: ""), \
              patch.object(web_tools, "_tavily_search", fail), \
              patch.object(web_tools, "_exa_search", fail), \
              patch.object(web_tools, "_ddg_search", ok_ddg):

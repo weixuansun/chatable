@@ -212,6 +212,7 @@ def _web_search_handler(args: dict[str, Any]) -> WebToolResult:
         str(args["query"]).strip(),
         max_results=int(args.get("max_results") or 8),
         language=str(args.get("language") or ""),
+        ori_question=str(args.get("ori_question") or ""),
     )
 
 

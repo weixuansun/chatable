@@ -111,20 +111,36 @@ accepted as aliases.)
 ### Web search (optional)
 
 Automatic `web_search` works out of the box via DuckDuckGo (free, no key).
-For higher-quality results, add one or both provider keys — they are tried in
-the order **Tavily → Exa → DuckDuckGo**, falling back on failure:
+When a DeepSeek API key is available, DeepSeek's official Search API is tried
+first (about $0.75 per 1,000 successful requests). Optional Tavily and Exa
+keys come next. The order is **DeepSeek → Tavily → Exa → DuckDuckGo**,
+falling back on failure (including HTTP 401, insufficient balance, or 429):
 
 ```bash
+# DeepSeek search reuses DEEPSEEK_API_KEY / the Settings key when the
+# backend is DeepSeek. To use a separate search key:
+DEEPSEEK_SEARCH_API_KEY=sk-... chatable-web
+
+# Optional extra providers:
 TAVILY_API_KEY=tvly-... EXA_API_KEY=... chatable-web
 ```
 
+- DeepSeek — [Search API](https://api-docs.deepseek.com/guides/search/);
+  `DEEPSEEK_SEARCH_API_KEY` if set, otherwise the DeepSeek model key
+  (`DEEPSEEK_API_KEY`, or the key saved in Settings when the backend
+  is DeepSeek).
 - `TAVILY_API_KEY` — create a key at [tavily.com](https://tavily.com);
   the free tier includes 1,000 searches/month.
 - `EXA_API_KEY` — create a key at [exa.ai](https://exa.ai);
   the free tier adds $10 of credits every month (no card required).
 
-Both are read from the environment at request time, so exporting them in your
+Keys are read from the environment at request time, so exporting them in your
 shell rc file (e.g. `~/.zshrc`) also works.
+
+To force a single provider or a custom order, set
+`CHATTABLE_WEB_SEARCH_PROVIDER` to a comma-separated list of `deepseek`,
+`tavily`, `exa`, and/or `duckduckgo` (alias: `ddg`), for example
+`CHATTABLE_WEB_SEARCH_PROVIDER=duckduckgo` to skip the paid APIs.
 
 `web_fetch` refuses non-public addresses (SSRF guard). If you run a TUN-mode
 proxy (Clash/Mihomo "fake-IP"), hostnames resolve into 198.18.0.0/15 — that

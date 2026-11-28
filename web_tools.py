@@ -181,9 +181,10 @@ class WebToolResult:
 
 
 # ---------------------------------------------------------------------------
-# Web search: Tavily → Exa → DuckDuckGo fallback chain
+# Web search: DeepSeek → Tavily → Exa → DuckDuckGo fallback chain
 # ---------------------------------------------------------------------------
 
+_DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
 _TAVILY_URL = "https://api.tavily.com/search"
 _EXA_URL = "https://api.exa.ai/search"
 _DDG_URL = "https://html.duckduckgo.com/html/"
@@ -242,6 +243,182 @@ def _parse_ddg_results(html: str, max_results: int = 10) -> list[dict[str, str]]
             results.append({"title": title, "url": url, "snippet": snippet})
             if len(results) >= max_results:
                 break
+    return results
+
+
+
+_DEEPSEEK_QUERY_MAX = 128
+_DEEPSEEK_COUNT_MIN = 1
+_DEEPSEEK_COUNT_MAX = 50
+
+# ISO 639-1 codes accepted when mapping a language/locale tag onto DeepSeek's
+# `lang:` operator. Unknown or ambiguous values are left off the query.
+_DEEPSEEK_LANG_CODES = frozenset({
+    "ar", "bg", "bn", "ca", "cs", "da", "de", "el", "en", "es", "et", "eu",
+    "fa", "fi", "fr", "gl", "he", "hi", "hr", "hu", "id", "it", "ja", "ko",
+    "lt", "lv", "ms", "nb", "nl", "nn", "no", "pl", "pt", "ro", "ru", "sk",
+    "sl", "sr", "sv", "ta", "te", "th", "tr", "uk", "vi", "zh",
+})
+
+# Default fallback order. Keyed providers are skipped when no key is available.
+# Override with CHATTABLE_WEB_SEARCH_PROVIDER (comma-separated ids, aliases
+# like `ddg` accepted), e.g. `duckduckgo` or `tavily,exa,duckduckgo`.
+_SEARCH_PROVIDER_DEFAULT = ("deepseek", "tavily", "exa", "duckduckgo")
+_SEARCH_PROVIDER_ALIASES = {"ddg": "duckduckgo"}
+
+
+def _clip_chars(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip()
+
+
+def _deepseek_lang_operator(language: str) -> str:
+    """Return a `lang:xx` operator, or "" when `language` cannot be mapped cleanly.
+
+    Accepts a 2-letter code (or comma-separated codes), and locale-like tags
+    such as DDG's `cn-zh` or BCP 47 `zh-CN`.
+    """
+    raw = (language or "").strip().replace("_", "-")
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if re.fullmatch(r"[a-z]{2}(?:,[a-z]{2})*", lower):
+        return f"lang:{lower}"
+    m = re.fullmatch(r"([a-z]{2})-([a-z]{2})", lower)
+    if not m:
+        return ""
+    first, second = m.group(1), m.group(2)
+    if second in _DEEPSEEK_LANG_CODES and first not in _DEEPSEEK_LANG_CODES:
+        return f"lang:{second}"
+    if first in _DEEPSEEK_LANG_CODES:
+        return f"lang:{first}"
+    return ""
+
+
+def _compose_deepseek_query(query: str, language: str = "") -> str:
+    q = query.strip()
+    op = _deepseek_lang_operator(language)
+    if op and not re.search(r"(?i)(?:^|\s)lang:", q):
+        room = _DEEPSEEK_QUERY_MAX - len(op) - 1
+        if room >= 1:
+            q = _clip_chars(q, room)
+            if q:
+                return f"{q} {op}"
+    return _clip_chars(q, _DEEPSEEK_QUERY_MAX)
+
+
+def _is_deepseek_base_url(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    parsed = urllib.parse.urlparse(raw if "://" in raw else "https://" + raw)
+    host = (parsed.netloc or "").lower()
+    return host == "api.deepseek.com" or host.endswith(".deepseek.com")
+
+
+def _deepseek_search_api_key() -> str:
+    """Key for DeepSeek Search: dedicated env, else the DeepSeek model key."""
+    dedicated = os.environ.get("DEEPSEEK_SEARCH_API_KEY", "").strip()
+    if dedicated:
+        return dedicated
+    try:
+        import main  # noqa: PLC0415
+        key = str(getattr(main, "OPENAI_API_KEY", "") or "").strip()
+        base = str(getattr(main, "OPENAI_BASE_URL", "") or "").strip()
+        if key and _is_deepseek_base_url(base):
+            return key
+    except Exception:  # noqa: BLE001
+        pass
+    return os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
+
+def _search_provider_order() -> list[str]:
+    raw = os.environ.get("CHATTABLE_WEB_SEARCH_PROVIDER", "").strip()
+    if not raw:
+        return list(_SEARCH_PROVIDER_DEFAULT)
+    out: list[str] = []
+    known = set(_SEARCH_PROVIDER_DEFAULT)
+    for part in raw.split(","):
+        name = _SEARCH_PROVIDER_ALIASES.get(part.strip().lower(), part.strip().lower())
+        if name in known and name not in out:
+            out.append(name)
+    return out or list(_SEARCH_PROVIDER_DEFAULT)
+
+
+def _http_error_text(response: "httpx.Response") -> str:
+    status = response.status_code
+    hint = {401: "unauthorized", 402: "insufficient balance", 429: "rate limited"}.get(status)
+    detail = ""
+    try:
+        data = response.json()
+        err = data.get("error") if isinstance(data, dict) else None
+        if isinstance(err, dict):
+            detail = str(err.get("message") or err.get("code") or "").strip()
+        elif isinstance(err, str):
+            detail = err.strip()
+    except Exception:  # noqa: BLE001
+        detail = (getattr(response, "text", None) or "").strip()[:300]
+    parts = [f"HTTP {status}"]
+    if hint:
+        parts.append(hint)
+    if detail and detail.lower() not in " ".join(parts).lower():
+        parts.append(detail)
+    return ": ".join(parts)
+
+
+def _short_result_date(value: str) -> str:
+    text = (value or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return text
+
+
+async def _deepseek_search(
+    client: httpx.AsyncClient,
+    api_key: str,
+    query: str,
+    max_results: int,
+    language: str = "",
+    ori_question: str = "",
+) -> list[dict[str, str]]:
+    q = _compose_deepseek_query(query, language)
+    if not q:
+        return []
+    count = max(_DEEPSEEK_COUNT_MIN, min(int(max_results), _DEEPSEEK_COUNT_MAX))
+    payload: dict[str, Any] = {"query": q, "count": count, "need_content": False}
+    ori = _clip_chars(ori_question, _DEEPSEEK_QUERY_MAX)
+    if ori:
+        payload["ori_question"] = ori
+    response = await client.post(
+        _DEEPSEEK_SEARCH_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(_http_error_text(response))
+    data = response.json()
+    results: list[dict[str, str]] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        title = (item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        text = (item.get("summary") or "").strip() or (item.get("snippet") or "").strip()
+        if not (title and url):
+            continue
+        rec: dict[str, str] = {"title": title, "url": url, "snippet": text}
+        site = item.get("site_name")
+        if site:
+            rec["site_name"] = str(site).strip()
+        date = item.get("date")
+        if date:
+            rec["date"] = str(date).strip()
+        results.append(rec)
     return results
 
 
@@ -333,13 +510,40 @@ def _format_search_results(results: list[dict[str, str]], query: str, source: st
     for i, result in enumerate(results, 1):
         lines.append(f"{i}. **{result['title']}**")
         lines.append(f"   URL: {result['url']}")
-        if result["snippet"]:
-            lines.append(f"   {result['snippet']}")
+        meta = [p for p in (result.get("site_name") or "", _short_result_date(result.get("date") or "")) if p]
+        if meta:
+            lines.append(f"   {' · '.join(meta)}")
+        snippet = result.get("snippet") or ""
+        if snippet:
+            lines.append(f"   {snippet}")
         lines.append("")
     return "\n".join(lines)
 
 
-async def web_search_async(query: str, max_results: int = 8, language: str = "") -> WebToolResult:
+def _tavily_key() -> str:
+    return os.environ.get("TAVILY_API_KEY", "").strip()
+
+
+def _exa_key() -> str:
+    return os.environ.get("EXA_API_KEY", "").strip()
+
+
+# display name, key-getter attribute (None = keyless), search-fn attribute.
+# Names are resolved at call time so tests can patch the functions.
+_SEARCH_PROVIDERS: dict[str, tuple[str, Optional[str], str]] = {
+    "deepseek": ("DeepSeek", "_deepseek_search_api_key", "_deepseek_search"),
+    "tavily": ("Tavily", "_tavily_key", "_tavily_search"),
+    "exa": ("Exa", "_exa_key", "_exa_search"),
+    "duckduckgo": ("DuckDuckGo", None, "_ddg_search"),
+}
+
+
+async def web_search_async(
+    query: str,
+    max_results: int = 8,
+    language: str = "",
+    ori_question: str = "",
+) -> WebToolResult:
     query = query.strip()
     max_results = max(1, min(int(max_results), 20))
     if not query:
@@ -347,62 +551,51 @@ async def web_search_async(query: str, max_results: int = 8, language: str = "")
     if httpx is None:
         return WebToolResult.error("httpx is required for web_search; install requirements.txt")
 
-    # Keyed providers in fallback order: recurring free quotas first (Tavily
-    # 1k/month, then Exa $10/month). DuckDuckGo (free, keyless) is always the
-    # final fallback.
-    keyed: list[tuple[str, Any, str]] = []
-    tavily_key = os.environ.get("TAVILY_API_KEY", "").strip()
-    exa_key = os.environ.get("EXA_API_KEY", "").strip()
-    if tavily_key:
-        keyed.append(("Tavily", _tavily_search, tavily_key))
-    if exa_key:
-        keyed.append(("Exa", _exa_search, exa_key))
+    # Default order: DeepSeek (when a key is available), then Tavily, Exa,
+    # then keyless DuckDuckGo. CHATTABLE_WEB_SEARCH_PROVIDER overrides the
+    # list and order (missing keys on an explicit list are reported).
+    order = _search_provider_order()
+    forced = bool(os.environ.get("CHATTABLE_WEB_SEARCH_PROVIDER", "").strip())
 
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         fail_parts: list[str] = []
-        for name, fn, key in keyed:
+        for provider_id in order:
+            display, key_attr, fn_attr = _SEARCH_PROVIDERS[provider_id]
+            fn = globals()[fn_attr]
+            key = ""
+            if key_attr is not None:
+                key = (globals()[key_attr]() or "")
+                if not key:
+                    if forced:
+                        fail_parts.append(f"{display}: no API key")
+                    continue
             try:
-                results = await fn(client, key, query, max_results)
+                if provider_id == "deepseek":
+                    results = await fn(
+                        client, key, query, max_results,
+                        language=language, ori_question=ori_question,
+                    )
+                elif provider_id == "duckduckgo":
+                    results = await fn(client, query, max_results, language=language)
+                else:
+                    results = await fn(client, key, query, max_results)
             except Exception as exc:  # noqa: BLE001
-                fail_parts.append(f"{name}: {exc}")
+                fail_parts.append(f"{display}: {exc}")
                 continue
             if results:
-                source = name
+                source = display
                 if fail_parts:
                     source += f" (fallback from: {'; '.join(fail_parts)})"
                 return WebToolResult.success(
                     _format_search_results(results, query, source),
                     query=query,
                     result_count=len(results),
-                    source=name.lower(),
+                    source=provider_id,
                 )
-            fail_parts.append(f"{name}: no results")
-
-        ddg_error: Optional[str] = None
-        try:
-            results = await _ddg_search(client, query, max_results, language=language)
-        except Exception as exc:  # noqa: BLE001
-            ddg_error = str(exc)
-            results = []
-
-        if results:
-            source = "DuckDuckGo"
-            if fail_parts:
-                source += f" (fallback from: {'; '.join(fail_parts)})"
-            return WebToolResult.success(
-                _format_search_results(results, query, source),
-                query=query,
-                result_count=len(results),
-                source="duckduckgo",
-            )
+            fail_parts.append(f"{display}: no results")
 
         search_url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}"
-        parts = list(fail_parts)
-        if ddg_error:
-            parts.append(f"DuckDuckGo: {ddg_error}")
-        else:
-            parts.append("DuckDuckGo: no results found")
-        reason = "; ".join(parts)
+        reason = "; ".join(fail_parts) if fail_parts else "no providers available"
         return WebToolResult.error(
             f"Search failed ({reason})\nManual search URL: {search_url}",
             query=query,
@@ -410,8 +603,15 @@ async def web_search_async(query: str, max_results: int = 8, language: str = "")
         )
 
 
-def web_search(query: str, max_results: int = 8, language: str = "") -> WebToolResult:
-    return asyncio.run(web_search_async(query, max_results, language=language))
+def web_search(
+    query: str,
+    max_results: int = 8,
+    language: str = "",
+    ori_question: str = "",
+) -> WebToolResult:
+    return asyncio.run(web_search_async(
+        query, max_results, language=language, ori_question=ori_question,
+    ))
 
 
 # ---------------------------------------------------------------------------
