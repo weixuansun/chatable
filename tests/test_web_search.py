@@ -170,18 +170,53 @@ class DeepSeekKeyTests(unittest.TestCase):
              patch.object(main, "OPENAI_BASE_URL", "https://api.deepseek.com"):
             self.assertEqual(web_tools._deepseek_search_api_key(), "model-key")
 
-    def test_non_deepseek_backend_falls_back_to_env(self):
+    def test_non_deepseek_backend_uses_env_deepseek_key(self):
         import main
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "env-key"}, clear=True), \
              patch.object(main, "OPENAI_API_KEY", "openai-key"), \
-             patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com/v1"):
+             patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com/v1"), \
+             patch.object(web_tools, "_persisted_settings", lambda: {}):
             self.assertEqual(web_tools._deepseek_search_api_key(), "env-key")
+
+    def test_saved_deepseek_key_used_when_backend_is_not_deepseek(self):
+        import main
+        saved = {
+            "base_url": "https://api.openai.com",
+            "api_key": "openai-key",
+            "deepseek_api_key": "saved-ds-key",
+        }
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(main, "OPENAI_API_KEY", "openai-key"), \
+             patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com"), \
+             patch.object(web_tools, "_persisted_settings", lambda: saved):
+            self.assertEqual(web_tools._deepseek_search_api_key(), "saved-ds-key")
+
+    def test_settings_api_key_used_when_saved_backend_is_deepseek(self):
+        import main
+        saved = {"base_url": "https://api.deepseek.com", "api_key": "settings-ds-key"}
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "env-key"}, clear=True), \
+             patch.object(main, "OPENAI_API_KEY", "kimi-key"), \
+             patch.object(main, "OPENAI_BASE_URL", "https://api.moonshot.cn/v1"), \
+             patch.object(web_tools, "_persisted_settings", lambda: saved):
+            # Live backend is Kimi, but settings still hold the DeepSeek key.
+            self.assertEqual(web_tools._deepseek_search_api_key(), "settings-ds-key")
+
+    def test_non_deepseek_live_key_is_never_sent_to_deepseek(self):
+        import main
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(main, "OPENAI_API_KEY", "openai-key"), \
+             patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com"), \
+             patch.object(web_tools, "_persisted_settings", lambda: {
+                 "base_url": "https://api.openai.com", "api_key": "openai-key",
+             }):
+            self.assertEqual(web_tools._deepseek_search_api_key(), "")
 
     def test_no_key_when_backend_is_not_deepseek_and_env_empty(self):
         import main
         with patch.dict(os.environ, {}, clear=True), \
              patch.object(main, "OPENAI_API_KEY", "openai-key"), \
-             patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com"):
+             patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com"), \
+             patch.object(web_tools, "_persisted_settings", lambda: {}):
             self.assertEqual(web_tools._deepseek_search_api_key(), "")
 
 
@@ -286,3 +321,25 @@ class DeepSeekChainTests(unittest.TestCase):
             res = web_tools.web_search("q")
         self.assertFalse(res.ok)
         self.assertIn("DeepSeek: no API key", res.output)
+
+    def test_missing_deepseek_key_logs_once_then_falls_back(self):
+        import io
+        from contextlib import redirect_stdout
+
+        async def ok_ddg(client, query, max_results, language=""):
+            return [{"title": "T", "url": "https://x.example/", "snippet": "s"}]
+
+        web_tools._missing_deepseek_key_warned = False
+        buf = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(web_tools, "_deepseek_search_api_key", lambda: ""), \
+             patch.object(web_tools, "_ddg_search", ok_ddg), \
+             redirect_stdout(buf):
+            res1 = web_tools.web_search("q")
+            res2 = web_tools.web_search("q")
+        self.assertTrue(res1.ok)
+        self.assertTrue(res2.ok)
+        self.assertEqual(res1.metadata["source"], "duckduckgo")
+        log = buf.getvalue()
+        self.assertEqual(log.count("[web_search] no DeepSeek API key found"), 1)
+        self.assertIn("DEEPSEEK_API_KEY", log)

@@ -277,6 +277,15 @@ def persist_config(data_dir: str = "", workspace_dir: Optional[str] = None) -> N
             "api_key": OPENAI_API_KEY,
             "model": OPENAI_MODEL,
         })
+        # Keep a copy of the DeepSeek model key so web_search can reuse it
+        # after the user switches the chat backend to something else.
+        try:
+            from web_tools import _is_deepseek_base_url  # noqa: PLC0415
+            if OPENAI_API_KEY and _is_deepseek_base_url(OPENAI_BASE_URL):
+                data["deepseek_api_key"] = OPENAI_API_KEY
+        except Exception:  # noqa: BLE001
+            if OPENAI_API_KEY and "deepseek.com" in (OPENAI_BASE_URL or "").lower():
+                data["deepseek_api_key"] = OPENAI_API_KEY
         if data_dir:
             data["data_dir"] = data_dir
         if workspace_dir is not None:

@@ -110,15 +110,18 @@ accepted as aliases.)
 
 ### Web search (optional)
 
-Automatic `web_search` works out of the box via DuckDuckGo (free, no key).
-When a DeepSeek API key is available, DeepSeek's official Search API is tried
-first (about $0.75 per 1,000 successful requests). Optional Tavily and Exa
-keys come next. The order is **DeepSeek → Tavily → Exa → DuckDuckGo**,
-falling back on failure (including HTTP 401, insufficient balance, or 429):
+`web_search` defaults to DeepSeek's official Search API whenever a DeepSeek
+key is available, regardless of which model backend you are chatting with
+(DeepSeek, OpenAI, Claude, Kimi, …). About $0.75 per 1,000 successful
+requests. If no DeepSeek key is found, it falls back to Tavily, then Exa,
+then free DuckDuckGo (the server prints a one-time notice). The order is
+**DeepSeek → Tavily → Exa → DuckDuckGo**, and a provider error (HTTP 401,
+insufficient balance, or 429) also falls through:
 
 ```bash
-# DeepSeek search reuses DEEPSEEK_API_KEY / the Settings key when the
-# backend is DeepSeek. To use a separate search key:
+# Dedicated search key (optional). Otherwise chatable reuses any DeepSeek
+# model key it already has — DEEPSEEK_API_KEY, or the key saved in Settings
+# when you last used a DeepSeek backend (kept after you switch models).
 DEEPSEEK_SEARCH_API_KEY=sk-... chatable-web
 
 # Optional extra providers:
@@ -126,9 +129,9 @@ TAVILY_API_KEY=tvly-... EXA_API_KEY=... chatable-web
 ```
 
 - DeepSeek — [Search API](https://api-docs.deepseek.com/guides/search/);
-  `DEEPSEEK_SEARCH_API_KEY` if set, otherwise the DeepSeek model key
-  (`DEEPSEEK_API_KEY`, or the key saved in Settings when the backend
-  is DeepSeek).
+  `DEEPSEEK_SEARCH_API_KEY` if set, otherwise any DeepSeek model key
+  chatable knows (`DEEPSEEK_API_KEY`, or the Settings key for the
+  DeepSeek provider).
 - `TAVILY_API_KEY` — create a key at [tavily.com](https://tavily.com);
   the free tier includes 1,000 searches/month.
 - `EXA_API_KEY` — create a key at [exa.ai](https://exa.ai);
@@ -141,6 +144,11 @@ To force a single provider or a custom order, set
 `CHATTABLE_WEB_SEARCH_PROVIDER` to a comma-separated list of `deepseek`,
 `tavily`, `exa`, and/or `duckduckgo` (alias: `ddg`), for example
 `CHATTABLE_WEB_SEARCH_PROVIDER=duckduckgo` to skip the paid APIs.
+
+This applies to chatable's own `web_search` tool (chat mode). The built-in
+agent and orchestrator runs do not currently expose `web_search`; external
+CLIs (Claude Code, Codex, Kimi Code) use their own search tools, which
+chatable cannot switch to DeepSeek.
 
 `web_fetch` refuses non-public addresses (SSRF guard). If you run a TUN-mode
 proxy (Clash/Mihomo "fake-IP"), hostnames resolve into 198.18.0.0/15 — that

@@ -318,8 +318,35 @@ def _is_deepseek_base_url(url: str) -> bool:
     return host == "api.deepseek.com" or host.endswith(".deepseek.com")
 
 
+def _persisted_settings() -> dict:
+    """Best-effort read of settings.json (may hold a saved DeepSeek key)."""
+    try:
+        import main  # noqa: PLC0415
+        data = main._load_persisted_config()
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _saved_deepseek_model_key() -> str:
+    """A DeepSeek model key persisted in settings, even if the live backend is not DeepSeek."""
+    data = _persisted_settings()
+    saved = str(data.get("deepseek_api_key") or "").strip()
+    if saved:
+        return saved
+    if _is_deepseek_base_url(str(data.get("base_url") or "")):
+        return str(data.get("api_key") or "").strip()
+    return ""
+
+
 def _deepseek_search_api_key() -> str:
-    """Key for DeepSeek Search: dedicated env, else the DeepSeek model key."""
+    """Key for DeepSeek Search, independent of the live chat backend.
+
+    Order: DEEPSEEK_SEARCH_API_KEY, then any DeepSeek model key chatable
+    already has (the live key if the backend is DeepSeek, else a key saved
+    under settings ``deepseek_api_key`` or ``api_key`` when the saved
+    backend is DeepSeek, else DEEPSEEK_API_KEY).
+    """
     dedicated = os.environ.get("DEEPSEEK_SEARCH_API_KEY", "").strip()
     if dedicated:
         return dedicated
@@ -331,7 +358,27 @@ def _deepseek_search_api_key() -> str:
             return key
     except Exception:  # noqa: BLE001
         pass
+    saved = _saved_deepseek_model_key()
+    if saved:
+        return saved
     return os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
+
+_missing_deepseek_key_warned = False
+
+
+def _warn_missing_deepseek_key() -> None:
+    """One-time notice when search falls back because no DeepSeek key is set."""
+    global _missing_deepseek_key_warned
+    if _missing_deepseek_key_warned:
+        return
+    _missing_deepseek_key_warned = True
+    print(
+        "[web_search] no DeepSeek API key found; falling back to "
+        "Tavily/Exa/DuckDuckGo. Set DEEPSEEK_API_KEY or "
+        "DEEPSEEK_SEARCH_API_KEY to use DeepSeek Search by default.",
+        flush=True,
+    )
 
 
 def _search_provider_order() -> list[str]:
@@ -568,6 +615,8 @@ async def web_search_async(
                 if not key:
                     if forced:
                         fail_parts.append(f"{display}: no API key")
+                    elif provider_id == "deepseek":
+                        _warn_missing_deepseek_key()
                     continue
             try:
                 if provider_id == "deepseek":

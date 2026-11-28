@@ -68,6 +68,29 @@ class SettingsWriteTests(unittest.TestCase):
         for i in range(4):
             self.assertEqual(data[f"w{i}"], 29)  # every writer's last value survived
 
+    def test_deepseek_key_kept_after_switching_backend(self):
+        old_key, old_base, old_model = main.OPENAI_API_KEY, main.OPENAI_BASE_URL, main.OPENAI_MODEL
+        try:
+            main.OPENAI_API_KEY = "ds-saved-key"
+            main.OPENAI_BASE_URL = "https://api.deepseek.com"
+            main.OPENAI_MODEL = "deepseek-v4-pro"
+            main.persist_config()
+            with open(main.SETTINGS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["deepseek_api_key"], "ds-saved-key")
+
+            main.OPENAI_API_KEY = "kimi-key"
+            main.OPENAI_BASE_URL = "https://api.moonshot.cn/v1"
+            main.OPENAI_MODEL = "kimi-k2"
+            main.persist_config()
+            with open(main.SETTINGS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["api_key"], "kimi-key")
+            self.assertEqual(data["base_url"], "https://api.moonshot.cn/v1")
+            self.assertEqual(data["deepseek_api_key"], "ds-saved-key")
+        finally:
+            main.OPENAI_API_KEY, main.OPENAI_BASE_URL, main.OPENAI_MODEL = old_key, old_base, old_model
+
 
 if __name__ == "__main__":
     unittest.main()
